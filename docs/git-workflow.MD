@@ -54,10 +54,10 @@ GitHub has a good guide: [Connecting to GitHub with SSH](https://docs.github.com
 
 ```bash
 # HTTPS
-git clone https://github.com/<org>/fluq.git
+git clone https://github.com/<mwelz9qm/fluq.git
 
 # SSH
-git clone git@github.com:<org>/fluq.git
+git clone git@github.com:mwelz9qm/fluq.git
 
 cd fluq
 ```
