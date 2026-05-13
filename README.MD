@@ -67,6 +67,7 @@ Before anyone touches the actual ML, we have some setup to do. Most of you don't
      common/               # shared utilities — data loaders, plotting, metrics
      notebooks/            # example notebooks for each method
      tests/
+     docs/
      README.md
    ```
    Both teams work in the same repo. Shared code (dataset loaders, plots, metrics) lives in `common/` so we don't duplicate work. If you need something that belongs in `common/`, talk to the other team first so we don't end up with two slightly-different versions of the same function.
