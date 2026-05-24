@@ -80,3 +80,6 @@ pip-delete-this-directory.txt
 .idea/
 *.swp
 *.swo
+
+### pyMAISE ###
+tuning_dir/
