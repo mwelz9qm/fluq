@@ -1,8 +1,14 @@
+import random
+
 import absl.logging
+import numpy as np
+from pyMAISE import settings
+
 # This hides the annoying red warnings caused by Tensor Flow; since pyMAISE is shifting
 # to Pytorch, I am not going to worry about finding a way to make this less hack-y.
 absl.logging.set_verbosity(absl.logging.ERROR)
 
+from typing import Any, Dict, List, Optional, Tuple
 import tensorflow as tf
 from tensorflow.keras import Model
 
@@ -15,13 +21,37 @@ class DeepEnsembleWrapper(Model):
     Acts as a single Keras model that manages the ensemble.
     """
 
-    def __init__(self, models: list, **kwargs):
+    def __init__(self, models: List[Model], **kwargs) -> None:
+        """
+        Wrapper class for Deep Ensembles extending tf.keras.Model.
+        Acts as a single Keras model that manages the ensemble.
+
+        Parameters
+        ----------
+        models: List[Model]
+            List of individual Keras models to manage in the ensemble.
+        **kwargs: dict
+            Standard keyword arguments for tf.keras.Model.
+
+        Returns
+        -------
+        None
+        """
         super(DeepEnsembleWrapper, self).__init__(**kwargs)
         self.ensemble_models = models
 
-    def compile(self, **kwargs):
+    def compile(self, **kwargs) -> None:
         """
         Compiles all underlying models in the ensemble.
+
+        Parameters
+        ----------
+        **kwargs: dict
+            Compilation configurations such as optimizer, loss, and metrics.
+
+        Returns
+        -------
+        None
         """
         # Compile the single parent model.
         wrapper_kwargs = kwargs.copy()
@@ -38,10 +68,21 @@ class DeepEnsembleWrapper(Model):
                 model_kwargs["optimizer"] = optimizer.__class__.from_config(optimizer.get_config())
             model.compile(**model_kwargs)
 
-    def call(self, inputs, training=False):
+    def call(self, inputs: tf.Tensor, training: bool = False) -> tf.Tensor:
         """
         Forward pass for the ensemble.
-        Returns the stacked predictions from all models.
+
+        Parameters
+        ----------
+        inputs: tf.Tensor
+            Input tensor for the models.
+        training: bool, default=False
+            Whether the models are called in training mode.
+
+        Returns
+        -------
+        predictions: tf.Tensor
+            Stacked predictions from all ensemble models.
         """
         predictions = tf.stack(
             [model(inputs, training=training) for model in self.ensemble_models],
@@ -49,9 +90,19 @@ class DeepEnsembleWrapper(Model):
         )
         return predictions
 
-    def train_step(self, data):
+    def train_step(self, data: Tuple) -> Dict[str, tf.Tensor]:
         """
         Custom training step that trains all models in the ensemble on the batch.
+
+        Parameters
+        ----------
+        data: Tuple
+            Training data batch containing inputs and targets.
+
+        Returns
+        -------
+        avg_metrics: Dict[str, tf.Tensor]
+            Average metrics across all ensemble models.
         """
         all_metrics = []
         for model in self.ensemble_models:
@@ -64,9 +115,19 @@ class DeepEnsembleWrapper(Model):
                 avg_metrics[key] = tf.reduce_mean([m[key] for m in all_metrics])
         return avg_metrics
 
-    def test_step(self, data):
+    def test_step(self, data: Tuple) -> Dict[str, tf.Tensor]:
         """
         Custom test/evaluation/validation step that evaluates all models in the ensemble.
+
+        Parameters
+        ----------
+        data: Tuple
+            Test/evaluation data batch containing inputs and targets.
+
+        Returns
+        -------
+        avg_metrics: Dict[str, tf.Tensor]
+            Average metrics across all ensemble models.
         """
         all_metrics = []
         for model in self.ensemble_models:
@@ -79,9 +140,22 @@ class DeepEnsembleWrapper(Model):
                 avg_metrics[key] = tf.reduce_mean([m[key] for m in all_metrics])
         return avg_metrics
 
-    def save_weights(self, filepath, *args, **kwargs):
+    def save_weights(self, filepath: str, *args, **kwargs) -> None:
         """
         Saves the weights of all underlying models in the ensemble.
+
+        Parameters
+        ----------
+        filepath: str
+            Base filepath for saving weights.
+        *args: tuple
+            Extra positional arguments for weight saving.
+        **kwargs: dict
+            Extra keyword arguments for weight saving.
+
+        Returns
+        -------
+        None
         """
         for i, model in enumerate(self.ensemble_models):
             # ensure both Keras 2 and 3 compatibility
@@ -93,9 +167,22 @@ class DeepEnsembleWrapper(Model):
                 p = f"{filepath}_model_{i}"
             model.save_weights(p, *args, **kwargs)
 
-    def load_weights(self, filepath, *args, **kwargs):
+    def load_weights(self, filepath: str, *args, **kwargs) -> None:
         """
         Loads the weights of all underlying models in the ensemble.
+
+        Parameters
+        ----------
+        filepath: str
+            Base filepath for loading weights.
+        *args: tuple
+            Extra positional arguments for weight loading.
+        **kwargs: dict
+            Extra keyword arguments for weight loading.
+
+        Returns
+        -------
+        None
         """
         for i, model in enumerate(self.ensemble_models):
 
@@ -110,10 +197,21 @@ class DeepEnsembleWrapper(Model):
             if status is not None:
                 status.expect_partial()
 
-    def predict(self, x, **kwargs):
+    def predict(self, x: Any, **kwargs) -> tf.Tensor:
         """
         Generates predictions for the input samples using all models.
-        Returns a tensor of stacked predictions.
+
+        Parameters
+        ----------
+        x: Any
+            Input features/samples to predict on.
+        **kwargs: dict
+            Extra keyword arguments for model prediction.
+
+        Returns
+        -------
+        predictions: tf.Tensor
+            Stacked predictions from all ensemble models.
         """
         predictions = tf.stack(
             [model.predict(x, **kwargs) for model in self.ensemble_models],
@@ -121,18 +219,41 @@ class DeepEnsembleWrapper(Model):
         )
         return predictions
 
-    def predict_uq(self, x, **kwargs):
+    def predict_with_uncertainty(
+        self, x: Any, **kwargs
+    ) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, Optional[tf.Tensor]]:
         """
-        TODO:
-            I am not sure if this is the correct place to put this, since all of these methods
-            are just being internally called by TF/Keras. It may make more sense to alter
-            the PostProcessor to accept the UQ values when it calls the predict method.
+        Generates predictions for the input samples using all models including variances.
 
-        TODO NOTE:
-            At the moment, it is not possible to predict aleatoric variance, because the underlying
-            pyMAISE HyperModel does not use NLL, and only supports MAE. That will have to be changed.
+        TODO aleatoric variance not supported yet.
+
+        Parameters
+        ----------
+        x: Any
+            Input features/samples.
+        **kwargs: dict
+            Extra keyword arguments for model prediction.
+
+        Returns
+        -------
+        results: Tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]
+            A tuple containing stacked predictions, mean prediction, epistemic variance,
+            and aleatoric variance.
         """
-        pass
+        predictions = self.predict(x, **kwargs)
+
+        mean_preds = tf.reduce_mean(predictions, axis=0)
+        epistemic_var = tf.math.reduce_variance(predictions, axis=0)
+        aleatoric_var = None # TODO NLL not supported in nnHyperModel.
+        
+        return predictions, mean_preds, epistemic_var, aleatoric_var
+
+
+def _set_random_state(state: int):
+    settings.values.random_state = state
+    random.seed(state)
+    np.random.seed(state)
+    tf.random.set_seed(state)
 
 
 class DeepEnsembleHyperModel(nnHyperModel):
@@ -140,19 +261,98 @@ class DeepEnsembleHyperModel(nnHyperModel):
     HyperModel for Deep Ensembles extending pyMAISE's nnHyperModel.
     """
 
-    def __init__(self, parameters: dict, input_shape, name: str, num_models: int = 5):
+    def __init__(
+        self,
+        parameters: dict,
+        input_shape: Tuple,
+        name: str,
+        num_models: int = 5,
+        tune_ensemble: bool = False,
+    ) -> None:
+        """
+        Parameters
+        ----------
+        parameters: dict
+            Hyperparameter space configuration options.
+        input_shape: Tuple
+            Shape of the input features.
+        name: str
+            Name identifier for this model.
+        num_models: int, default=5
+            Number of models in the ensemble.
+        tune_ensemble: bool, default=False
+            Whether to tune the ensemble as a whole.
+
+        Returns
+        -------
+        None
+        """
         super(DeepEnsembleHyperModel, self).__init__(parameters, input_shape, name)
         self.num_models = num_models
+        self.tune_ensemble = tune_ensemble
 
-    def build(self, hp):
+    def build(self, hp: Any) -> Model:
         """
-        Builds the DeepEnsembleModel consisting of multiple individual models.
+        Builds the model(s) for the Deep Ensemble.
+
+        This method is primarily to be called internally by Keras Tuner.
+
+        Parameters
+        ----------
+        hp: Any
+            HyperParameters object from Keras Tuner.
+
+        Returns
+        -------
+        model: Model
+            A compiled Keras Model (either DeepEnsembleWrapper or a single member).
         """
-        # Build individual models using the parent nnHyperModel's build logic
-        models = [
-            super(DeepEnsembleHyperModel, self).build(hp)
-            for _ in range(self.num_models)
-        ]
+        # Build each individual model and wrap them in a DeepEnsembleModel
+        if self.tune_ensemble:
+            return self.build_ensemble(hp)
+
+        # Build the single model (best for normal tuning)
+        return super(DeepEnsembleHyperModel, self).build(hp)
+
+
+    def build_ensemble(self, hp: Any) -> DeepEnsembleWrapper:
+        """
+        Build each model in the ensemble, returning the wrapped ensemble model.
+
+        This method is to be called by the user, and it can be called internally by
+        Keras Tuner when `tune_ensemble=True`.
+
+        Parameters
+        ----------
+        hp: Any
+            HyperParameters object from Keras Tuner.
+
+        Returns
+        -------
+        ensemble_model: DeepEnsembleWrapper
+            The compiled deep ensemble wrapper model.
+        """
+        models = []
+        seed = settings.values.random_state
+
+        print(settings.values.random_state, seed)
+
+        # A random state must be set
+        # TODO Should this be random number if not set?
+        if seed is None:
+            print("\033[38;5;214mRequired for building deep ensemble: Random State is None, setting to 42.\033[0m")
+            settings.values.random_state = 42
+            seed = 42
+
+        for i in range(self.num_models):
+            # Set the random seed across all frameworks
+            _set_random_state(seed + i)
+
+            # Generate the model based on the new seed
+            models.append(super(DeepEnsembleHyperModel, self).build(hp))
+
+        # reset the random state
+        _set_random_state(seed)
 
         # Wrap them in the DeepEnsembleModel
         ensemble_model = DeepEnsembleWrapper(
@@ -165,3 +365,4 @@ class DeepEnsembleHyperModel(nnHyperModel):
         ensemble_model.compile(**self._compilation_params)
 
         return ensemble_model
+

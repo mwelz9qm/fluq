@@ -82,4 +82,4 @@ pip-delete-this-directory.txt
 *.swo
 
 ### pyMAISE ###
-tuning_dir/
+*tuning_dir*

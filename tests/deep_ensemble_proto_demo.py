@@ -17,7 +17,7 @@ from deep_ensembles._deep_ensemble import DeepEnsembleHyperModel
 
 def main():
     # same pyMAISE setup as normal
-    mai.settings.init("regression", verbosity=1)
+    mai.settings.init("regression", verbosity=1, random_state=42)
 
     # load MIT reactor data
     data, inputs, outputs = load_MITR()
@@ -78,30 +78,48 @@ def main():
     print("Starting Keras Tuner Search...")
     tuner.search(x=xtrain.values, y=ytrain.values)
 
-    # Retrieve the best model (which returns the wrapper class)
-    print("Retrieving best model...")
-    best_model = tuner.get_best_models(num_models=1)[0]
+    # Retrieve the best model's HP's:
+    #   This reworks our logic from before, so that we are only tuning one model,
+    #   then building the DE based on the HP's of that model.
+    print("Building Deep Ensemble using best model hyperparameters...")
+    best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
+    ensemble = de_hypermodel.build_ensemble(best_hps)
+
+    # Fit the final Deep Ensemble model
+    ensemble.fit(
+        x=xtrain.values,
+        y=ytrain.values,
+        **parameters["fitting_params"]
+    )
     
     # Make predictions using the ensemble
     print("Running predictions with the best ensemble...")
-    predictions = best_model.predict(xtest.values)
+    predictions, mean, epistemic, aleatoric = ensemble.predict_with_uncertainty(xtest.values)
     
     print("\n==================================")
     print(f"Ensemble Size: {de_hypermodel.num_models}")
     print(f"Expected Predictions Shape: ({de_hypermodel.num_models}, {xtest.shape[0]}, 1)")
     print("Actual Predictions Shape:", predictions.shape)
-    # print("Predictions:\n", predictions)
-    plot(predictions)
+    plot_predictions(predictions, ytest, mean, np.mean(epistemic), 0.0)
 
 
-def plot(predictions):
+def plot_predictions(predictions, test, mean, ep, al):
     plt.figure(figsize=(12, 6))
 
+    # The model is so insanely horrible that this makes it hard to read!
+    # plt.plot(test.values, color="red", alpha=0.1, marker="o", linestyle="None", markersize=2)
     for i, p in enumerate(predictions):
         plt.plot(p, label=f"Model {i + 1}", alpha=0.7)
-    plt.plot(np.mean(predictions, axis=0), label="Mean", color="black", alpha=0.7)
+    plt.plot(mean, label="Mean", color="black", alpha=0.7)
 
-    plt.legend()
+    plt.text(0.02, 0.88,
+             f"Epistemic: {ep:.4f}\nAleatoric: {al:.4f}\nSTD: {np.sqrt(ep + al):.4f}",
+             transform=plt.gca().transAxes,
+             bbox=dict(facecolor='white', edgecolor='black', pad=5, alpha=0.8),
+             )
+
+    plt.title("Deep Ensemble Predictions on Scaled MIIR")
+    plt.legend(loc="upper right", edgecolor="black")
     plt.show()
 
 
