@@ -62,8 +62,8 @@ class BiasAnalyzer:
 
     def __init__(
             self, 
-            base_architecture:callable | keras.Model, 
-            dataset:pandas.DataFrame, 
+            base_architecture:callable, 
+            dataset, 
             test_size:float = 0.2,
             random_state:int | None = None,
             save_predictions:bool = True
@@ -181,7 +181,7 @@ class BiasAnalyzer:
         '''
         pass
 
-    def _generate_bootstrap_dataset(self, dataset:pandas.DataFrame, sampling_settings:dict | None = None) -> pandas.DataFrame:
+    def _generate_bootstrap_dataset(self, dataset, sampling_settings:dict | None = None):
         '''
         Purpose
         -------------
@@ -202,7 +202,7 @@ class BiasAnalyzer:
         '''
         pass
 
-    def _generate_stratified_dataset(self, dataset:pandas.DataFrame, sampling_settings:dict | None = None) -> pandas.DataFrame:
+    def _generate_stratified_dataset(self, dataset, sampling_settings:dict | None = None):
         '''
         Purpose
         -------------
@@ -223,7 +223,7 @@ class BiasAnalyzer:
         '''
         pass
 
-    def _generate_lhs_dataset(self, dataset:pandas.DataFrame, sampling_settings:dict | None = None) -> pandas.DataFrame:
+    def _generate_lhs_dataset(self, dataset, sampling_settings:dict | None = None):
         '''
         Purpose
         -------------
@@ -247,7 +247,7 @@ class BiasAnalyzer:
     def decompose_variance(
             self,
             view:list[str]=['model','sampling','data']
-            ) -> pandas.DataFrame:
+            ):
         '''
         Purpose
         -----------
