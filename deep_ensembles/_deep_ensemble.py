@@ -243,7 +243,13 @@ class DeepEnsembleWrapper(Model):
         predictions = self.predict(x, **kwargs)
 
         mean_preds = tf.reduce_mean(predictions, axis=0)
-        epistemic_var = tf.math.reduce_variance(predictions, axis=0)
+
+        if settings.values.problem_type == settings.ProblemType.REGRESSION:
+            epistemic_var = tf.math.reduce_variance(predictions, axis=0)
+        elif settings.values.problem_type == settings.ProblemType.CLASSIFICATION:
+            # For classification, compute epistemic uncertainty as the variance of the predicted probabilities.
+            epistemic_var = -tf.reduce_sum(mean_preds * tf.math.log(mean_preds + 1e-10), axis=-1)  # Adding epsilon for numerical stability
+
         aleatoric_var = None # TODO NLL not supported in nnHyperModel.
         
         return predictions, mean_preds, epistemic_var, aleatoric_var
