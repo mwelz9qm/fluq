@@ -196,10 +196,10 @@ class DeepEnsembleWrapper(Model):
             status = model.load_weights(p, *args, **kwargs)
             if status is not None:
                 status.expect_partial()
-
-    def predict(self, x: Any, **kwargs) -> tf.Tensor:
+    
+    def _predict_stacked(self, x: Any, **kwargs) -> tf.Tensor:
         """
-        Generates predictions for the input samples using all models.
+        Private method returning stacked predictions from all ensemble members.
 
         Parameters
         ----------
@@ -211,13 +211,34 @@ class DeepEnsembleWrapper(Model):
         Returns
         -------
         predictions: tf.Tensor
-            Stacked predictions from all ensemble models.
+            Stacked predictions of shape (n_models, n_samples, n_targets).
+            Used internally by predict_with_uncertainty. Not meant to be
+            called directly by users.
         """
-        predictions = tf.stack(
+        return tf.stack(
             [model.predict(x, **kwargs) for model in self.ensemble_models],
             axis=0,
-        )
-        return predictions
+            )
+
+    def predict(self, x: Any, **kwargs) -> tf.Tensor:
+        """
+        Generates mean prediction across all ensemble members.
+
+        Parameters
+        ----------
+        x: Any
+            Input features/samples to predict on.
+        **kwargs: dict
+            Extra keyword arguments for model prediction.
+
+        Returns
+        -------
+        predictions: tf.Tensor
+            Mean prediction of shape (n_samples, n_targets), consistent
+            with standard Keras and pyMAISE models. For full uncertainty
+            decomposition use predict_with_uncertainty() instead.
+        """
+        return tf.reduce_mean(self._predict_stacked(x, **kwargs), axis=0)
 
     def predict_with_uncertainty(
         self, x: Any, **kwargs
@@ -240,15 +261,15 @@ class DeepEnsembleWrapper(Model):
             A tuple containing stacked predictions, mean prediction, epistemic variance,
             and aleatoric variance.
         """
-        predictions = self.predict(x, **kwargs)
-
+        predictions = self._predict_stacked(x, **kwargs)
         mean_preds = tf.reduce_mean(predictions, axis=0)
 
         if settings.values.problem_type == settings.ProblemType.REGRESSION:
             epistemic_var = tf.math.reduce_variance(predictions, axis=0)
         elif settings.values.problem_type == settings.ProblemType.CLASSIFICATION:
-            # For classification, compute epistemic uncertainty as the variance of the predicted probabilities.
-            epistemic_var = -tf.reduce_sum(mean_preds * tf.math.log(mean_preds + 1e-10), axis=-1)  # Adding epsilon for numerical stability
+            # For classification, use predictive entropy as the uncertainty measure.
+            # entropy = -sum(p * log(p)), higher entropy = more uncertain
+            epistemic_var = -tf.reduce_sum(mean_preds * tf.math.log(mean_preds + 1e-10), axis=-1)
 
         aleatoric_var = None # TODO NLL not supported in nnHyperModel.
         
