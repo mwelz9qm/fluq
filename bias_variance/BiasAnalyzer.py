@@ -62,7 +62,7 @@ class BiasAnalyzer:
 
     def __init__(
             self, 
-            base_architecture:callable, 
+            base_architecture, 
             dataset, 
             test_size:float = 0.2,
             random_state:int | None = None,
