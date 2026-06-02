@@ -199,7 +199,7 @@ class DeepEnsembleWrapper(Model):
     
     def _predict_stacked(self, x: Any, **kwargs) -> tf.Tensor:
         """
-        Private method returning stacked predictions from all ensemble members.
+        Method returning stacked predictions from all ensemble members.
 
         Parameters
         ----------
@@ -270,6 +270,8 @@ class DeepEnsembleWrapper(Model):
             # For classification, use predictive entropy as the uncertainty measure.
             # entropy = -sum(p * log(p)), higher entropy = more uncertain
             epistemic_var = -tf.reduce_sum(mean_preds * tf.math.log(mean_preds + 1e-10), axis=-1)
+        else:
+            raise ValueError("DeepEnsembleWrapper.predict_with_uncertainty() only supports regression and classification problems.")
 
         aleatoric_var = None # TODO NLL not supported in nnHyperModel.
         
@@ -365,11 +367,13 @@ class DeepEnsembleHyperModel(nnHyperModel):
         print(settings.values.random_state, seed)
 
         # A random state must be set
-        # TODO Should this be random number if not set?
         if seed is None:
-            print("\033[38;5;214mRequired for building deep ensemble: Random State is None, setting to 42.\033[0m")
-            settings.values.random_state = 42
-            seed = 42
+            # Use numpy's random state acorss pyMAISE
+            seed = np.random.randint(0, 2**32)
+
+            # Set global random state
+            print(f"\033[38;5;214mRequired for building deep ensemble: Random State is None, setting to {seed}.\033[0m")
+            _set_random_state(seed)
 
         for i in range(self.num_models):
             # Set the random seed across all frameworks
