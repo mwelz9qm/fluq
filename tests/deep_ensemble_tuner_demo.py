@@ -111,7 +111,7 @@ def main():
     
     print("\n==================================")
     print(f"Ensemble Size: {num_models}")
-    print(f"Expected Predictions Shape: ({num_models}, {xtest.shape[0]}, 1)")
+    print(f"Expected Predictions Shape: ({num_models}, {xtest.shape[0]}, {ytest.shape[1]})")
     print("Actual Predictions Shape:", predictions.shape)
     
     print("Test passed successfully!")

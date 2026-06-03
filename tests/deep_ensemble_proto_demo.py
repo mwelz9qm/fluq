@@ -98,8 +98,8 @@ def main():
     
     print("\n==================================")
     print(f"Ensemble Size: {de_hypermodel.num_models}")
-    print(f"Expected Predictions Shape: ({de_hypermodel.num_models}, {xtest.shape[0]}, 1)")
-    print("Actual Predictions Shape:", predictions.shape)
+    # print(f"Expected Predictions Shape: ({de_hypermodel.num_models}, {xtest.shape[0]}, {ytest.shape[1]})")
+    # print("Actual Predictions Shape:", predictions.shape) # TODO Tyler investigate
     plot_predictions(predictions, ytest, mean, np.mean(epistemic), 0.0)
 
 

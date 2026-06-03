@@ -1,17 +1,17 @@
-import random
-
 import absl.logging
-import numpy as np
-from pyMAISE import settings
 
 # This hides the annoying red warnings caused by Tensor Flow; since pyMAISE is shifting
 # to Pytorch, I am not going to worry about finding a way to make this less hack-y.
 absl.logging.set_verbosity(absl.logging.ERROR)
 
 from typing import Any, Dict, List, Optional, Tuple
+import random
+import numpy as np
+import warnings
+
 import tensorflow as tf
 from tensorflow.keras import Model
-
+from pyMAISE import settings
 from pyMAISE.methods.nn._nn_hypermodel import nnHyperModel
 
 
@@ -257,9 +257,33 @@ class DeepEnsembleWrapper(Model):
 
         Returns
         -------
-        results: Tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]
-            A tuple containing stacked predictions, mean prediction, epistemic variance,
-            and aleatoric variance.
+        results: Tuple[tf.Tensor, tf.Tensor, tf.Tensor, Optional[tf.Tensor]]
+
+            - **predictions** (tf.Tensor, array-like): Stacked raw predictions from
+              each ensemble member.
+
+              Shapes:
+                - Regression: ``(n_models, n_samples, n_outputs)``
+                - Classification: ``(n_models, n_samples, n_classes)``
+
+            - **mean_preds** (tf.Tensor, array-like): Ensemble mean predictions.
+
+              Shapes:
+                - Regression: ``(n_samples, n_outputs)`` (average predicted target values)
+                - Classification: ``(n_samples, n_classes)`` (average predicted class probability distributions)
+
+            - **epistemic_var** (tf.Tensor, array-like): Epistemic uncertainty.
+
+              Shapes:
+                - Regression: ``(n_samples, n_outputs)`` (variance of predictions across ensemble models)
+                - Classification: ``(n_samples,)`` (predictive entropy over the class probabilities, computed as ``-sum(p * log(p))``)
+
+            - **aleatoric_var** (None, not array-like): Aleatoric uncertainty.
+              TODO Currently returns ``None`` as aleatoric variance is not yet supported.
+
+              Shapes:
+                - Regression: ``None``
+                - Classification: ``None``
         """
         predictions = self._predict_stacked(x, **kwargs)
         mean_preds = tf.reduce_mean(predictions, axis=0)
@@ -364,15 +388,22 @@ class DeepEnsembleHyperModel(nnHyperModel):
         models = []
         seed = settings.values.random_state
 
-        print(settings.values.random_state, seed)
-
         # A random state must be set
         if seed is None:
             # Use numpy's random state acorss pyMAISE
             seed = np.random.randint(0, 2**32)
 
             # Set global random state
-            print(f"\033[38;5;214mRequired for building deep ensemble: Random State is None, setting to {seed}.\033[0m")
+            # TODO I have pyMAISE global verbosity set to 1, which will ignore this warning. I'm assuming
+            #      that is okay, because this warning is minor.
+            warnings.warn(f"Required for building deep ensemble: Random State is None, setting to {seed}.")
+
+            # TODO If we would like to bypass warning settings and always display the seed, this is how
+            #      we would do it. (less desirable IMO)
+            # with warnings.catch_warnings():
+            #     warnings.simplefilter("always")
+            #     warnings.warn(f"Required for building deep ensemble: Random State is None, setting to {seed}.")
+
             _set_random_state(seed)
 
         for i in range(self.num_models):
