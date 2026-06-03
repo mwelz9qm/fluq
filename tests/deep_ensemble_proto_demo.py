@@ -94,7 +94,11 @@ def main():
     
     # Make predictions using the ensemble
     print("Running predictions with the best ensemble...")
-    predictions, mean, epistemic, aleatoric = ensemble.predict_with_uncertainty(xtest.values)
+    results = ensemble.predict_with_uncertainty(xtest.values)
+    predictions = results["predictions"]
+    mean = results["mean"]
+    epistemic = results["epistemic_var"]
+    aleatoric = results["aleatoric_var"]
     
     print("\n==================================")
     print(f"Ensemble Size: {de_hypermodel.num_models}")

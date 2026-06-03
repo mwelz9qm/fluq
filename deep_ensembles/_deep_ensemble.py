@@ -242,7 +242,7 @@ class DeepEnsembleWrapper(Model):
 
     def predict_with_uncertainty(
         self, x: Any, **kwargs
-    ) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, Optional[tf.Tensor]]:
+    ) -> dict:
         """
         Generates predictions for the input samples using all models including variances.
 
@@ -257,8 +257,7 @@ class DeepEnsembleWrapper(Model):
 
         Returns
         -------
-        results: Tuple[tf.Tensor, tf.Tensor, tf.Tensor, Optional[tf.Tensor]]
-
+        results: dict
             - **predictions** (tf.Tensor, array-like): Stacked raw predictions from
               each ensemble member.
 
@@ -299,7 +298,12 @@ class DeepEnsembleWrapper(Model):
 
         aleatoric_var = None # TODO NLL not supported in nnHyperModel.
         
-        return predictions, mean_preds, epistemic_var, aleatoric_var
+        return {
+            "predictions": predictions,
+            "mean": mean_preds,
+            "epistemic_var": epistemic_var,
+            "aleatoric_var": aleatoric_var
+        }
 
 
 def _set_random_state(state: int):
