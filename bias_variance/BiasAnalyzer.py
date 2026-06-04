@@ -1,3 +1,89 @@
+import pandas as pd
+import numpy as np
+
+def get_random_samples(
+        dataset:pd.DataFrame, n_samples:int, with_replacement:bool=False
+    ) -> pd.DataFrame:
+    '''
+    Purpose
+    -------------
+    To sample and return n random samples from a given dataset.
+
+    Parameters
+    -------------
+    dataset : pandas.DataFrame
+        Base dataset to sample from.
+
+    n_samples : int
+        Number of samples to return.
+
+    with_replacement : bool
+        To specify if sampling should include repeated values.
+    
+    Returns
+    -------------
+    pandas.DataFrame
+        The sampled dataset.
+    '''
+    pass
+
+def get_stratified_random_samples(
+        dataset:pd.DataFrame, n_samples:int, stratified_column_name:str, with_replacement:bool=False
+    ) -> pd.DataFrame:
+    '''
+    Purpose
+    -------------
+    To sample and return n random samples from a given dataset. Samples are chosen based on a stratified column name
+    within the dataset. The stratified column partitions the dataset into stratas, based on the distinct categories
+    in the column, and is sampled evenly.
+
+    Parameters
+    -------------
+    dataset : pandas.DataFrame
+        Base dataset to sample from.
+
+    n_samples : int
+        Number of samples to return. Note that the number of samples does not need to divide into the
+        number of stratas.
+
+    stratified_column_name : str
+        The stratified column name used to bin the data points for sampling.
+        
+    with_replacement : bool
+        To specify if sampling should include repeated values.
+    
+    Returns
+    -------------
+    pandas.DataFrame
+        The sampled dataset.
+    '''
+    pass
+    
+def generate_latin_hypercube_samples(
+        regressor_dataset:pd.DataFrame, n_samples:int
+    ) -> pd.DataFrame:
+    '''
+    Purpose
+    -------------
+    To generate and return n latin hypercube samples from a given dataset.
+
+    Parameters
+    -------------
+    regressor_dataset : pandas.DataFrame
+        Base dataset to sample from. Note that the dataset must contain regressor data since
+        this sampling method stratifies the data based on quantile values.
+        
+    n_samples : int
+        Number of samples to return.
+    
+    Returns
+    -------------
+    pandas.DataFrame
+        The generated dataset.
+    '''
+    pass
+
+
 # General workflow
 # analyzer = BiasAnalyzer(...)
 # analyzer.run_model_bias_study(...)
@@ -178,69 +264,6 @@ class BiasAnalyzer:
         ------------
         - Loop through each fold in folds.
             - Train and evaluate model on each fold (helper function call).
-        '''
-        pass
-
-    def _generate_bootstrap_dataset(self, dataset, sampling_settings:dict | None = None):
-        '''
-        Purpose
-        -------------
-        To generate and return a bootstrapped train dataset. 
-
-        Parameters
-        -------------
-        dataset : pandas.DataFrame
-            Base dataset to sample from
-
-        sampling_settings : dict | None, default = None
-            Additional configurations for sampling method
-        
-        Returns
-        -------------
-        pandas.DataFrame
-            The generated dataset
-        '''
-        pass
-
-    def _generate_stratified_dataset(self, dataset, sampling_settings:dict | None = None):
-        '''
-        Purpose
-        -------------
-        To generate and return a stratified train dataset.
-
-        Parameters
-        -------------
-        dataset : pandas.DataFrame
-            Base dataset to sample from
-
-        sampling_settings : dict | None, default = None
-            Additional configurations for sampling method
-        
-        Returns
-        -------------
-        pandas.DataFrame
-            The generated dataset
-        '''
-        pass
-
-    def _generate_lhs_dataset(self, dataset, sampling_settings:dict | None = None):
-        '''
-        Purpose
-        -------------
-        To generate and return a latin hypercube sampled train dataset. 
-
-        Parameters
-        -------------
-        dataset : pandas.DataFrame
-            Base dataset to sample from
-            
-        sampling_settings : dict | None, default = None
-            Additional configurations for sampling method
-        
-        Returns
-        -------------
-        pandas.DataFrame
-            The generated dataset
         '''
         pass
 
