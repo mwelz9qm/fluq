@@ -2,7 +2,10 @@ import pandas as pd
 import numpy as np
 
 def get_random_samples(
-        dataset:pd.DataFrame, n_samples:int, with_replacement:bool=False
+        dataset:pd.DataFrame,
+        n_samples:int,
+        random_state:int|None = None,
+        with_replacement:bool=False,
     ) -> pd.DataFrame:
     '''
     Purpose
@@ -17,6 +20,9 @@ def get_random_samples(
     n_samples : int
         Number of samples to return.
 
+    random_state : int | None = None
+        To optionally specify a random state for reproducibility.
+
     with_replacement : bool
         To specify if sampling should include repeated values.
     
@@ -28,7 +34,11 @@ def get_random_samples(
     pass
 
 def get_stratified_random_samples(
-        dataset:pd.DataFrame, n_samples:int, stratified_column_name:str, with_replacement:bool=False
+        dataset:pd.DataFrame,
+        n_samples:int,
+        stratified_column_name:str,
+        random_state:int|None = None,
+        with_replacement:bool=False
     ) -> pd.DataFrame:
     '''
     Purpose
@@ -48,6 +58,9 @@ def get_stratified_random_samples(
 
     stratified_column_name : str
         The stratified column name used to bin the data points for sampling.
+
+    random_state : int | None = None
+        To optionally specify a random state for reproducibility.
         
     with_replacement : bool
         To specify if sampling should include repeated values.
@@ -60,7 +73,9 @@ def get_stratified_random_samples(
     pass
     
 def generate_latin_hypercube_samples(
-        regressor_dataset:pd.DataFrame, n_samples:int
+        regressor_dataset:pd.DataFrame,
+        n_samples:int,
+        random_state:int|None = None,
     ) -> pd.DataFrame:
     '''
     Purpose
@@ -75,6 +90,9 @@ def generate_latin_hypercube_samples(
         
     n_samples : int
         Number of samples to return.
+    
+    random_state : int | None = None
+        To optionally specify a random state for reproducibility.
     
     Returns
     -------------
