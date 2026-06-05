@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import random
 
 def get_random_samples(
         dataset:pd.DataFrame,
@@ -31,11 +32,14 @@ def get_random_samples(
     pandas.DataFrame
         The sampled dataset.
     '''
-    pass
+    if random_state is None:
+        return dataset.sample(n=n_samples, replace=with_replacement)
+    else:
+        return dataset.sample(n=n_samples, replace=with_replacement, random_state=random_state)
 
 def get_stratified_random_samples(
         dataset:pd.DataFrame,
-        n_samples:int,
+        n_strata_samples:int,
         stratified_column_name:str,
         random_state:int|None = None,
         with_replacement:bool=False
@@ -52,9 +56,8 @@ def get_stratified_random_samples(
     dataset : pandas.DataFrame
         Base dataset to sample from.
 
-    n_samples : int
-        Number of samples to return. Note that the number of samples does not need to divide into the
-        number of stratas.
+    n_strata_samples : int
+        Number of samples per strata to return.
 
     stratified_column_name : str
         The stratified column name used to bin the data points for sampling.
@@ -70,7 +73,10 @@ def get_stratified_random_samples(
     pandas.DataFrame
         The sampled dataset.
     '''
-    pass
+    if random_state is None:
+        return dataset.groupby(stratified_column_name).sample(n=n_strata_samples, replace=with_replacement)
+    else:
+        return dataset.groupby(stratified_column_name).sample(n=n_strata_samples, replace=with_replacement, random_state=random_state)
     
 def generate_latin_hypercube_samples(
         regressor_dataset:pd.DataFrame,
@@ -99,7 +105,34 @@ def generate_latin_hypercube_samples(
     pandas.DataFrame
         The generated dataset.
     '''
-    pass
+    # Get quantile steps to build strata intervals
+    quantile_steps = np.linspace(0, 1, num=n_samples+1)
+
+    # Get quantile values per column.
+    df = regressor_dataset.quantile(quantile_steps, method='table', interpolation='midpoint')
+
+    # Convert df to 2D matrix
+    quantile_matrix = df.to_numpy()
+
+    # Create rng object for shuffling samples
+    rng =  np.random.default_rng()
+    if random is not None:
+        rng = np.random.default_rng(seed=random_state)
+
+    # Loop through quantile matrix to sample from the intervals and build df samples.
+    df_samples = pd.DataFrame(columns=regressor_dataset.columns)
+    for j in np.arange(quantile_matrix.shape(1)):
+        col_samples = np.zeros(n_samples)
+        for i in np.arange(1, quantile_matrix.shape(0)):
+            lower = quantile_matrix[i-1,j]
+            upper = quantile_matrix[i,j]
+            sample = random.uniform(lower, upper)
+            col_samples[i-1] = sample
+        rng.shuffle(col_samples)
+        df_samples[regressor_dataset.columns[j]] = col_samples
+    
+    return df_samples
+
 
 
 # General workflow
