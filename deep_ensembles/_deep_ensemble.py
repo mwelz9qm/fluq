@@ -10,9 +10,11 @@ import numpy as np
 import warnings
 
 import tensorflow as tf
-from tensorflow.keras import Model
+from tensorflow.keras import Model # type: ignore
 from pyMAISE import settings
-from pyMAISE.methods.nn._nn_hypermodel import nnHyperModel
+# TODO: change back to pyMAISE import once NLL changes are merged into pyMAISE
+# from pyMAISE.methods.nn._nn_hypermodel import nnHyperModel
+from ._nn_hypermodel import nnHyperModel, gaussian_nll_loss  # local copy for NLL development
 
 
 class DeepEnsembleWrapper(Model):
@@ -21,7 +23,7 @@ class DeepEnsembleWrapper(Model):
     Acts as a single Keras model that manages the ensemble.
     """
 
-    def __init__(self, models: List[Model], **kwargs) -> None:
+    def __init__(self, models: List[Model], heteroscedastic: bool = False, **kwargs) -> None:
         """
         Wrapper class for Deep Ensembles extending tf.keras.Model.
         Acts as a single Keras model that manages the ensemble.
@@ -30,6 +32,8 @@ class DeepEnsembleWrapper(Model):
         ----------
         models: List[Model]
             List of individual Keras models to manage in the ensemble.
+        heteroscedastic: bool, default=False
+            Whether to use heteroscedastic uncertainty quantification.
         **kwargs: dict
             Standard keyword arguments for tf.keras.Model.
 
@@ -39,6 +43,7 @@ class DeepEnsembleWrapper(Model):
         """
         super(DeepEnsembleWrapper, self).__init__(**kwargs)
         self.ensemble_models = models
+        self.heteroscedastic = heteroscedastic
 
     def compile(self, **kwargs) -> None:
         """
@@ -246,7 +251,7 @@ class DeepEnsembleWrapper(Model):
         """
         Generates predictions for the input samples using all models including variances.
 
-        TODO aleatoric variance not supported yet.
+        Aleatoric variance supported when loss_func="nll" is set in compile_params.
 
         Parameters
         ----------
@@ -277,26 +282,40 @@ class DeepEnsembleWrapper(Model):
                 - Regression: ``(n_samples, n_outputs)`` (variance of predictions across ensemble models)
                 - Classification: ``(n_samples,)`` (predictive entropy over the class probabilities, computed as ``-sum(p * log(p))``)
 
-            - **aleatoric_var** (None, not array-like): Aleatoric uncertainty.
-              TODO Currently returns ``None`` as aleatoric variance is not yet supported.
+            - **aleatoric_var** (tf.Tensor or None): Aleatoric uncertainty.
+            Returns None if heteroscedastic=False (default). Returns aleatoric
+            variance if heteroscedastic=True (loss_func="nll" in compile_params).
 
-              Shapes:
-                - Regression: ``None``
+            Shapes:
+                - Regression (heteroscedastic=True): ``(n_samples, n_outputs)``
+                - Regression (heteroscedastic=False): ``None``
                 - Classification: ``None``
         """
         predictions = self._predict_stacked(x, **kwargs)
-        mean_preds = tf.reduce_mean(predictions, axis=0)
+
+        if self.heteroscedastic:
+            n_targets = predictions.shape[-1] // 2
+            member_means = predictions[:, :, :n_targets]
+            member_vars = predictions[:, :, n_targets:]
+            mean_preds = tf.reduce_mean(member_means, axis=0)
+            aleatoric_var = tf.reduce_mean(member_vars, axis=0)
+        else:
+            mean_preds = tf.reduce_mean(predictions, axis=0)
+            aleatoric_var = None
+
 
         if settings.values.problem_type == settings.ProblemType.REGRESSION:
-            epistemic_var = tf.math.reduce_variance(predictions, axis=0)
+            if self.heteroscedastic:
+                # For heteroscedastic regression, epistemic variance is the variance of the mean predictions across ensemble members.
+                epistemic_var = tf.math.reduce_variance(member_means, axis=0)
+            else:
+                epistemic_var = tf.math.reduce_variance(predictions, axis=0)
         elif settings.values.problem_type == settings.ProblemType.CLASSIFICATION:
             # For classification, use predictive entropy as the uncertainty measure.
             # entropy = -sum(p * log(p)), higher entropy = more uncertain
             epistemic_var = -tf.reduce_sum(mean_preds * tf.math.log(mean_preds + 1e-10), axis=-1)
         else:
             raise ValueError("DeepEnsembleWrapper.predict_with_uncertainty() only supports regression and classification problems.")
-
-        aleatoric_var = None # TODO NLL not supported in nnHyperModel.
         
         return {
             "predictions": predictions,
@@ -424,11 +443,16 @@ class DeepEnsembleHyperModel(nnHyperModel):
         ensemble_model = DeepEnsembleWrapper(
             models=models,
             name=f"{self._name}_ensemble",
+            heteroscedastic=self._compilation_params.get("loss_func") == "nll"
         )
 
-        # Compile the ensemble
-        self._compilation_params["optimizer"] = self._get_optimizer(hp)
-        ensemble_model.compile(**self._compilation_params)
+        # Compile the ensemble — strip loss_func (pyMAISE-only key) and inject
+        # gaussian_nll_loss so Keras doesn't receive an unknown kwarg.
+        compile_params = {k: v for k, v in self._compilation_params.items() if k != "loss_func"}
+        if self._compilation_params.get("loss_func") == "nll":
+            compile_params["loss"] = gaussian_nll_loss
+        compile_params["optimizer"] = self._get_optimizer(hp)
+        ensemble_model.compile(**compile_params)
 
         return ensemble_model
 
