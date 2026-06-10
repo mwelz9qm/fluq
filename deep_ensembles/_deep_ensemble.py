@@ -325,7 +325,7 @@ class DeepEnsembleHyperModel(nnHyperModel):
         input_shape: Tuple,
         name: str,
         num_models: int = 5,
-        tune_ensemble: bool = False,  # TODO why would we want tune the entire ensemble?
+        ensemble_mode: bool = False,  # TODO naming?
     ) -> None:
         """
         Parameters
@@ -338,22 +338,72 @@ class DeepEnsembleHyperModel(nnHyperModel):
             Name identifier for this model.
         num_models: int, default=5
             Number of models in the ensemble.
-        tune_ensemble: bool, default=False
-            Whether to tune the ensemble as a whole.
-
-        Returns
-        -------
-        None
+        ensemble_mode: bool, default=False
+            If True, `.build()` will return the full DeepEnsemble wrapper (used during PostProcessing).
+            If False, `.build()` will return a single neural network (used during fast tuning).
         """
         super(DeepEnsembleHyperModel, self).__init__(parameters, input_shape, name)
         self.num_models = num_models
-        self.tune_ensemble = tune_ensemble
+        self.ensemble_mode = ensemble_mode
+
+    @classmethod
+    def inject_for_postprocessing(  # TODO not a fan of the naming here
+        cls,
+        tuner_results: dict,
+        model_name: str,
+        parameters: dict,
+        input_shape: Tuple,
+        num_models: int = 5,
+    ) -> "DeepEnsembleHyperModel":
+        """
+        Alternative constructor that creates a DeepEnsembleHyperModel in ensemble_mode 
+        and automatically injects it into a pyMAISE Tuner results dictionary. 
+
+        Parameters
+        ----------
+        tuner_results: dict
+            The output dictionary from pyMAISE's Tuner search (e.g., tuner.nn_random_search)
+        model_name: str
+            The key inside the tuner_results dictionary to target (e.g., "DeepEnsembleHyperModel")
+        parameters: dict
+            Hyperparameter space configuration options.
+        input_shape: Tuple
+            Shape of the input features.
+        num_models: int, default=5
+            Number of models in the ensemble.
+
+        Returns
+        -------
+        DeepEnsembleHyperModel
+            The instantiated model wrapper.
+        """
+        if model_name not in tuner_results:
+            raise KeyError(f"Model name '{model_name}' not found in tuner_results.")
+
+        # Extract the top configurations found by the Tuner
+        top_configs, _ = tuner_results[model_name]
+
+        # "Ensemble Mode" instance
+        instance = cls(
+            parameters=parameters,
+            input_shape=input_shape,
+            name=model_name,
+            num_models=num_models,
+            ensemble_mode=True,
+        )
+
+        # Mutate the dictionary so pyMAISE PostProcessor sees the ensemble
+        tuner_results[model_name] = (top_configs, instance)
+
+        return instance
 
     def build(self, hp: Any) -> Model:
         """
         Builds the model(s) for the Deep Ensemble.
 
         This method is primarily to be called internally by Keras Tuner.
+
+        # TODO NOTE: PostProcessor calls this!
 
         Parameters
         ----------
@@ -366,7 +416,7 @@ class DeepEnsembleHyperModel(nnHyperModel):
             A compiled Keras Model (either DeepEnsembleWrapper or a single member).
         """
         # Build each individual model and wrap them in a DeepEnsembleModel
-        if self.tune_ensemble:
+        if self.ensemble_mode:
             return self.build_ensemble(hp)
 
         # Build the single model (best for normal tuning)
@@ -399,16 +449,7 @@ class DeepEnsembleHyperModel(nnHyperModel):
             seed = np.random.randint(0, 2**32)
 
             # Set global random state
-            # TODO I have pyMAISE global verbosity set to 1, which will ignore this warning. I'm assuming
-            #      that is okay, because this warning is minor.
             warnings.warn(f"Required for building deep ensemble: Random State is None, setting to {seed}.")
-
-            # TODO If we would like to bypass warning settings and always display the seed, this is how
-            #      we would do it. (less desirable IMO)
-            # with warnings.catch_warnings():
-            #     warnings.simplefilter("always")
-            #     warnings.warn(f"Required for building deep ensemble: Random State is None, setting to {seed}.")
-
             _set_random_state(seed)
 
         for i in range(self.num_models):
