@@ -1,139 +1,9 @@
 import pandas as pd
 import numpy as np
-import random
-
-def get_random_samples(
-        dataset:pd.DataFrame,
-        n_samples:int,
-        random_state:int|None = None,
-        with_replacement:bool=False,
-    ) -> pd.DataFrame:
-    '''
-    Purpose
-    -------------
-    To sample and return n random samples from a given dataset.
-
-    Parameters
-    -------------
-    dataset : pandas.DataFrame
-        Base dataset to sample from.
-
-    n_samples : int
-        Number of samples to return.
-
-    random_state : int | None = None
-        To optionally specify a random state for reproducibility.
-
-    with_replacement : bool
-        To specify if sampling should include repeated values.
-    
-    Returns
-    -------------
-    pandas.DataFrame
-        The sampled dataset.
-    '''
-    if random_state is None:
-        return dataset.sample(n=n_samples, replace=with_replacement)
-    else:
-        return dataset.sample(n=n_samples, replace=with_replacement, random_state=random_state)
-
-def get_stratified_random_samples(
-        dataset:pd.DataFrame,
-        n_strata_samples:int,
-        stratified_column_name:str,
-        random_state:int|None = None,
-        with_replacement:bool=False
-    ) -> pd.DataFrame:
-    '''
-    Purpose
-    -------------
-    To sample and return n random samples from a given dataset. Samples are chosen based on a stratified column name
-    within the dataset. The stratified column partitions the dataset into stratas, based on the distinct categories
-    in the column, and is sampled evenly.
-
-    Parameters
-    -------------
-    dataset : pandas.DataFrame
-        Base dataset to sample from.
-
-    n_strata_samples : int
-        Number of samples per strata to return.
-
-    stratified_column_name : str
-        The stratified column name used to bin the data points for sampling.
-
-    random_state : int | None = None
-        To optionally specify a random state for reproducibility.
-        
-    with_replacement : bool
-        To specify if sampling should include repeated values.
-    
-    Returns
-    -------------
-    pandas.DataFrame
-        The sampled dataset.
-    '''
-    if random_state is None:
-        return dataset.groupby(stratified_column_name).sample(n=n_strata_samples, replace=with_replacement)
-    else:
-        return dataset.groupby(stratified_column_name).sample(n=n_strata_samples, replace=with_replacement, random_state=random_state)
-    
-def generate_latin_hypercube_samples(
-        regressor_dataset:pd.DataFrame,
-        n_samples:int,
-        random_state:int|None = None,
-    ) -> pd.DataFrame:
-    '''
-    Purpose
-    -------------
-    To generate and return n latin hypercube samples from a given dataset.
-
-    Parameters
-    -------------
-    regressor_dataset : pandas.DataFrame
-        Base dataset to sample from. Note that the dataset must contain regressor data since
-        this sampling method stratifies the data based on quantile values.
-        
-    n_samples : int
-        Number of samples to return.
-    
-    random_state : int | None = None
-        To optionally specify a random state for reproducibility.
-    
-    Returns
-    -------------
-    pandas.DataFrame
-        The generated dataset.
-    '''
-    # Get quantile steps to build strata intervals
-    quantile_steps = np.linspace(0, 1, num=n_samples+1)
-
-    # Get quantile values per column.
-    df = regressor_dataset.quantile(quantile_steps, method='table', interpolation='midpoint')
-
-    # Convert df to 2D matrix
-    quantile_matrix = df.to_numpy()
-
-    # Create rng object for shuffling samples
-    rng =  np.random.default_rng()
-    if random is not None:
-        rng = np.random.default_rng(seed=random_state)
-
-    # Loop through quantile matrix to sample from the intervals and build df samples.
-    df_samples = pd.DataFrame(columns=regressor_dataset.columns)
-    for j in np.arange(quantile_matrix.shape(1)):
-        col_samples = np.zeros(n_samples)
-        for i in np.arange(1, quantile_matrix.shape(0)):
-            lower = quantile_matrix[i-1,j]
-            upper = quantile_matrix[i,j]
-            sample = random.uniform(lower, upper)
-            col_samples[i-1] = sample
-        rng.shuffle(col_samples)
-        df_samples[regressor_dataset.columns[j]] = col_samples
-    
-    return df_samples
-
-
+from ..common.sampling import _sampling
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score, root_mean_squared_error, mean_absolute_error
 
 # General workflow
 # analyzer = BiasAnalyzer(...)
@@ -195,17 +65,33 @@ class BiasAnalyzer:
         analyzer_ran_study.decompose_variance()
     
     - Should we select all plots by default or only select the best representation w/ an auto selection feature?
+
+    - Should we have dataset contain inputs and outputs or should each be separate variables?
+    
+    - Should the BiasAnalyzer hold a compiled base model?
     '''
 
     def __init__(
             self, 
-            base_architecture:callable, 
-            dataset, 
+            base_architecture:callable,
+            base_model,
+            inputs_df:pd.DataFrame,
+            outputs_df:pd.DataFrame,
+            results_df:pd.DataFrame,
+            predictions_df:pd.DataFrame,
             test_size:float = 0.2,
             random_state:int | None = None,
-            save_predictions:bool = True
+            is_predictions_saved:bool = True
             ) -> None:
-        pass
+        self.base_architecture = base_architecture
+        self.base_model = base_model
+        self.inputs_df = inputs_df
+        self.outputs_df = outputs_df
+        self.results_df = results_df
+        self.predictions_df = predictions_df
+        self.test_size = test_size # Should the test_size be stored? Or can we pass this into the run_study methods?
+        self.random_state = random_state
+        self.is_predictions_saved = is_predictions_saved
 
     def run_model_bias_study(
             self, 
@@ -246,12 +132,51 @@ class BiasAnalyzer:
         '''
         pass
 
+    def _get_sample_run_results_row(
+            X_train, X_test, y_train, y_test, model, model_settings:dict, sampling_label:str
+        ):
+        model.compile(
+            optimizer=model_settings['optimizer'],
+            loss=model_settings['loss'],
+            metrics=model_settings['metrics']
+        )  # Decide on keeping or maintaining in self.base_model
+        
+        model.fit(
+            X_train,
+            y_train,
+            epochs=model_settings['epochs'],
+            batch_size=model_settings['batch_size'],
+            verbose=model_settings['verbose']
+        )
+
+        y_pred = model.predict(X_test).flatten()
+
+        scores = {
+            'rmse': root_mean_squared_error(y_test, y_pred),
+            'mse': mean_squared_error(y_test, y_pred),
+            'mae': mean_absolute_error(y_test, y_pred),
+            'r2': r2_score(y_test, y_pred)
+        }
+
+        results_row = {
+            'study': 'sampling',
+            'sampling_method': sampling_label,
+        }
+
+        for metric in scores.keys:
+            results_row[metric] = scores[metric]
+        
+        return results_row
+        
+
     def run_sampling_bias_study(
-            self, 
+            self,
             strategies:list[str]=['bootstrap','lhs','stratified'], 
-            n_samples:int=10,
-            sample_fraction:float = 1.0,
-            replacement:bool = True
+            n_samples:int=100,
+            n_iter:int = 10,
+            sample_fraction:float = 1.0, # is this needed?
+            stratified_col_name:str|None = None,
+            with_replacement:bool = True
             ) -> None:
         '''
         Purpose
@@ -277,14 +202,61 @@ class BiasAnalyzer:
         Returns
         ------------
         None
-
-        TODO (implementaion):
-        ------------
-        - Create each train dataset w/ helper functions for sampling methods.
-        - Loop through each sampled_dataset in dataset.
-            - Train and evaluate model using base_model (helper function call).
         '''
-        pass
+        # TODO: handle random_state when it is not None
+        results_df = pd.DataFrame() # To hold results
+        model_settings = {
+            'optimizer' : 'adam',
+            'loss' : 'mse',
+            'metrics' : ['rmse','r2','mse','mae'],
+            'epochs' : 100,
+            'batch_size' : 10,
+            'verbose' : 0
+        } # model settings for Sequential() FNN parameters (Should this be a parameter in sampling study run?)
+        dataset_df = pd.concat([self.inputs_df, self.outputs_df], axis=1) # merge inputs and outputs for sampling
+        
+        # Loop through sampling options and perform sampling on dataset, training on sampled set, and gathering results.
+        # TODO: Refactor stratified method to allow for each method/strategy to be in helper function.
+        for strategy in strategies:
+            if strategy.lower() == 'bootstrap':
+                # Loop through the amount of iterators/data points for results_df.
+                for _ in np.arange(n_iter):
+                    # apply sampling method
+                    bootstrap_df = _sampling.get_random_samples(dataset_df, n_samples=n_samples, with_replacement=with_replacement)
+                    # split sampled dataset into input and output datasets
+                    bootstrap_inputs_df = bootstrap_df[self.inputs_df.columns]
+                    bootstrap_outputs_df = bootstrap_df[self.outputs_df.columns]
+                    # split inputs and outputs for training and testing
+                    X_train, X_test, y_train, y_test = train_test_split(bootstrap_inputs_df, bootstrap_outputs_df, test_size=self.test_size)
+                    # copy base model
+                    model = tf.keras.clone_model(self.base_model)
+                    # compile, fit, and predict - store analysis results in results_df
+                    results_df = pd.concat([results_df, self._get_sample_run_results_row(X_train, X_test, y_train, y_test, model, model_settings, 'bootstrap')])
+
+            # Same structure applied as in 'bootstrap' method
+            if strategy.lower() == 'lhs':
+                for _ in np.arange(n_iter):
+                    lhs_df = _sampling.generate_latin_hypercube_samples(dataset_df, n_samples=n_samples)
+                    lhs_inputs_df = lhs_df[self.inputs_df.columns]
+                    lhs_outputs_df = lhs_df[self.outputs_df.columns]
+                    X_train, X_test, y_train, y_test = train_test_split(lhs_inputs_df, lhs_outputs_df, test_size=self.test_size)
+                    model = tf.keras.clone_model(self.base_model)
+                    results_df = pd.concat([results_df, self._get_sample_run_results_row(X_train, X_test, y_train, y_test, model, model_settings, 'lhs')])
+            
+            if strategy.lower() == 'stratified':
+                for _ in np.arange(n_iter):
+                    # TODO: Throw error if stratified_col_name is None... else cont.
+                    # TODO: n_strata_samples = ceiling(n_samples // n_features)
+                    stratified_df = _sampling.get_stratified_random_samples(dataset_df, stratified_column_name=stratified_col_name, n_strata_samples=n_samples, with_replacement=with_replacement)
+                    stratified_inputs_df = stratified_df[self.inputs_df.columns]
+                    stratified_outputs_df = stratified_df[self.outputs_df.columns]
+                    # TODO: remove excess samples to match n_samples
+                    X_train, X_test, y_train, y_test = train_test_split(stratified_inputs_df, stratified_outputs_df, test_size=self.test_size)
+                    model = tf.keras.clone_model(self.base_model)
+                    results_df = pd.concat([results_df, self._get_sample_run_results_row(X_train, X_test, y_train, y_test, model, model_settings, 'stratified')])
+            
+        self.results_df = results_df # copy results - Should we have a results_df for each bias? (i.e., data_results_df, sampling_results_df, model_results_df) 
+        
 
     def run_data_bias_study(
             self, 
