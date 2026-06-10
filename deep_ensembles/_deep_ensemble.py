@@ -1,7 +1,8 @@
 import absl.logging
 
-# This hides the annoying red warnings caused by Tensor Flow; since pyMAISE is shifting
-# to Pytorch, I am not going to worry about finding a way to make this less hack-y.
+# TODO NOTE:
+#   This hides the annoying red warnings caused by Tensor Flow; since pyMAISE is shifting
+#   to Pytorch, I am not going to worry about finding a way to make this less hack-y.
 absl.logging.set_verbosity(absl.logging.ERROR)
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -324,7 +325,7 @@ class DeepEnsembleHyperModel(nnHyperModel):
         input_shape: Tuple,
         name: str,
         num_models: int = 5,
-        tune_ensemble: bool = False,
+        tune_ensemble: bool = False,  # TODO why would we want tune the entire ensemble?
     ) -> None:
         """
         Parameters

@@ -84,7 +84,7 @@ def main():
         max_trials=2,
         directory="tuning_dir",
         project_name="mai_tuner_de_test",
-        overwrite=True
+        overwrite=True,
     )
 
     # 2. Extract best hyperparameters and the underlying DeepEnsembleHyperModel
