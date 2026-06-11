@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-import random
 
 def get_random_samples(
         dataset:pd.DataFrame,
@@ -39,7 +38,7 @@ def get_random_samples(
 
 def get_stratified_random_samples(
         dataset:pd.DataFrame,
-        n_strata_samples:int,
+        n_samples:int,
         stratified_column_name:str,
         random_state:int|None = None,
         with_replacement:bool=False
@@ -73,10 +72,17 @@ def get_stratified_random_samples(
     pandas.DataFrame
         The sampled dataset.
     '''
+    grouped_df = dataset.groupby(stratified_column_name)
+    n_strata_samples = int(np.ceil(n_samples / grouped_df.ngroups))
+    print('number of stratas:', grouped_df.ngroups)
+    print('number of strata samples:', n_strata_samples)
     if random_state is None:
-        return dataset.groupby(stratified_column_name).sample(n=n_strata_samples, replace=with_replacement)
+        samples_df = grouped_df.sample(n=n_strata_samples, replace=with_replacement)
+        return samples_df
     else:
-        return dataset.groupby(stratified_column_name).sample(n=n_strata_samples, replace=with_replacement, random_state=random_state)
+        samples_df = grouped_df.sample(n=n_strata_samples, replace=with_replacement, random_state=random_state)
+        return samples_df
+    # need to return trimmed df until row shape matches n_samples
     
 def generate_latin_hypercube_samples(
         regressor_dataset:pd.DataFrame,
