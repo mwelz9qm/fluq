@@ -1,7 +1,8 @@
 import pandas as pd
 import numpy as np
-from ..common.sampling import _sampling
+from common.sampling._sampling import get_random_samples, get_stratified_random_samples, generate_latin_hypercube_samples
 import tensorflow as tf
+from tensorflow.keras.metrics import R2Score, MeanSquaredError, RootMeanSquaredError, MeanAbsoluteError
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score, root_mean_squared_error, mean_absolute_error
 
@@ -97,7 +98,7 @@ class BiasAnalyzer:
             self, 
             architecture_types:list[str]=['wide','narrow','taper','reverse_taper','combined_taper'], 
             n_architectures=10,
-            metrics:list[str]=['rmse','r2','mse','mae']
+            metrics:list[str]=['root_mean_squared_error','r2','mse','mae']
             ) -> None:
         '''
         Purpose
@@ -133,12 +134,26 @@ class BiasAnalyzer:
         pass
 
     def _get_sample_run_results_row(
-            X_train, X_test, y_train, y_test, model, model_settings:dict, sampling_label:str
+            self,
+            X_train,
+            X_test,
+            y_train,
+            y_test,
+            model,
+            model_settings:dict,
+            sampling_label:str
         ):
+        metric_options = {
+            'rmse' : RootMeanSquaredError(name='rmse'),
+            'mse' : MeanSquaredError(name='mse'),
+            'mae' : MeanAbsoluteError(name='mae'),
+            'r2' : R2Score(name='r2')
+        }
+
         model.compile(
             optimizer=model_settings['optimizer'],
             loss=model_settings['loss'],
-            metrics=model_settings['metrics']
+            metrics=[metric_options[metric] for metric in model_settings['metrics']]
         )  # Decide on keeping or maintaining in self.base_model
         
         model.fit(
@@ -163,10 +178,10 @@ class BiasAnalyzer:
             'sampling_method': sampling_label,
         }
 
-        for metric in scores.keys:
+        for metric in scores.keys():
             results_row[metric] = scores[metric]
         
-        return results_row
+        return pd.DataFrame([results_row])
         
 
     def run_sampling_bias_study(
@@ -222,37 +237,42 @@ class BiasAnalyzer:
                 # Loop through the amount of iterators/data points for results_df.
                 for _ in np.arange(n_iter):
                     # apply sampling method
-                    bootstrap_df = _sampling.get_random_samples(dataset_df, n_samples=n_samples, with_replacement=with_replacement)
+                    bootstrap_df = get_random_samples(dataset_df, n_samples=n_samples, with_replacement=with_replacement)
                     # split sampled dataset into input and output datasets
                     bootstrap_inputs_df = bootstrap_df[self.inputs_df.columns]
                     bootstrap_outputs_df = bootstrap_df[self.outputs_df.columns]
                     # split inputs and outputs for training and testing
                     X_train, X_test, y_train, y_test = train_test_split(bootstrap_inputs_df, bootstrap_outputs_df, test_size=self.test_size)
                     # copy base model
-                    model = tf.keras.clone_model(self.base_model)
+                    model = tf.keras.models.clone_model(self.base_model)
                     # compile, fit, and predict - store analysis results in results_df
                     results_df = pd.concat([results_df, self._get_sample_run_results_row(X_train, X_test, y_train, y_test, model, model_settings, 'bootstrap')])
 
             # Same structure applied as in 'bootstrap' method
             if strategy.lower() == 'lhs':
                 for _ in np.arange(n_iter):
-                    lhs_df = _sampling.generate_latin_hypercube_samples(dataset_df, n_samples=n_samples)
+                    lhs_df = generate_latin_hypercube_samples(dataset_df, n_samples=n_samples)
                     lhs_inputs_df = lhs_df[self.inputs_df.columns]
                     lhs_outputs_df = lhs_df[self.outputs_df.columns]
                     X_train, X_test, y_train, y_test = train_test_split(lhs_inputs_df, lhs_outputs_df, test_size=self.test_size)
-                    model = tf.keras.clone_model(self.base_model)
+                    model = tf.keras.models.clone_model(self.base_model)
                     results_df = pd.concat([results_df, self._get_sample_run_results_row(X_train, X_test, y_train, y_test, model, model_settings, 'lhs')])
             
+            # TODO: find best implementation for handling stratified column in dataframe.
+            # Comments: leave out stratified option in testing.
+            # Questions: Should the dataframe contain the stratified column or should the
+            # get_stratified_random_samples function add and remove the stratified column
+            # in the implementation?
             if strategy.lower() == 'stratified':
                 for _ in np.arange(n_iter):
                     # TODO: Throw error if stratified_col_name is None... else cont.
                     # TODO: n_strata_samples = ceiling(n_samples // n_features)
-                    stratified_df = _sampling.get_stratified_random_samples(dataset_df, stratified_column_name=stratified_col_name, n_strata_samples=n_samples, with_replacement=with_replacement)
+                    stratified_df = get_stratified_random_samples(dataset_df, stratified_column_name=stratified_col_name, n_samples=n_samples, with_replacement=with_replacement)
                     stratified_inputs_df = stratified_df[self.inputs_df.columns]
                     stratified_outputs_df = stratified_df[self.outputs_df.columns]
                     # TODO: remove excess samples to match n_samples
                     X_train, X_test, y_train, y_test = train_test_split(stratified_inputs_df, stratified_outputs_df, test_size=self.test_size)
-                    model = tf.keras.clone_model(self.base_model)
+                    model = tf.keras.models.clone_model(self.base_model)
                     results_df = pd.concat([results_df, self._get_sample_run_results_row(X_train, X_test, y_train, y_test, model, model_settings, 'stratified')])
             
         self.results_df = results_df # copy results - Should we have a results_df for each bias? (i.e., data_results_df, sampling_results_df, model_results_df) 

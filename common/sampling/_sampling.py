@@ -41,7 +41,8 @@ def get_stratified_random_samples(
         n_samples:int,
         stratified_column_name:str,
         random_state:int|None = None,
-        with_replacement:bool=False
+        with_replacement:bool=False,
+        is_print_statements_shown:bool=False
     ) -> pd.DataFrame:
     '''
     Purpose
@@ -64,8 +65,11 @@ def get_stratified_random_samples(
     random_state : int | None = None
         To optionally specify a random state for reproducibility.
         
-    with_replacement : bool
+    with_replacement : bool = False
         To specify if sampling should include repeated values.
+
+    is_print_statements_shown : bool = False
+        Temporary parameter for testing.
     
     Returns
     -------------
@@ -74,8 +78,9 @@ def get_stratified_random_samples(
     '''
     grouped_df = dataset.groupby(stratified_column_name)
     n_strata_samples = int(np.ceil(n_samples / grouped_df.ngroups))
-    print('number of stratas:', grouped_df.ngroups)
-    print('number of strata samples:', n_strata_samples)
+    if is_print_statements_shown:
+        print('number of stratas:', grouped_df.ngroups)
+        print('number of strata samples:', n_strata_samples)
     if random_state is None:
         samples_df = grouped_df.sample(n=n_strata_samples, replace=with_replacement)
         return samples_df
@@ -88,6 +93,7 @@ def generate_latin_hypercube_samples(
         regressor_dataset:pd.DataFrame,
         n_samples:int,
         random_state:int|None = None,
+        is_print_statements_shown:bool=False
     ) -> pd.DataFrame:
     '''
     Purpose
@@ -106,6 +112,9 @@ def generate_latin_hypercube_samples(
     random_state : int | None = None
         To optionally specify a random state for reproducibility.
     
+    is_print_statements_shown : bool = False
+        Temporary parameter for testing.
+    
     Returns
     -------------
     pandas.DataFrame
@@ -121,10 +130,11 @@ def generate_latin_hypercube_samples(
     quantile_matrix = df.to_numpy()
 
     # Show quantile_matrix (for testing only)
-    print('Showing quantile_matrix')
-    print('-'*30)
-    print(quantile_matrix)
-    print('quantile_matrix shape:', quantile_matrix.shape)
+    if is_print_statements_shown:
+        print('Showing quantile_matrix')
+        print('-'*30)
+        print(quantile_matrix)
+        print('quantile_matrix shape:', quantile_matrix.shape)
 
     # Create rng object for shuffling samples
     rng =  np.random.default_rng()

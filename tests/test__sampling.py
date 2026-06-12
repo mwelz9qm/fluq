@@ -22,7 +22,7 @@ class TestSampling(unittest.TestCase):
         df = self._get_test_df()
         col_index = 0
         df[f'quantile_rank_col_{col_index}'] = pd.qcut(df.iloc[:,col_index], q=4, labels=False)
-        print(get_stratified_random_samples(df, 101, f'quantile_rank_col_{col_index}', 42, True))
+        print(get_stratified_random_samples(df, 101, f'quantile_rank_col_{col_index}', 42, True, True))
         # should the user have option to remove stratified col after sampling? (i.e. is_stratified_col_removed:bool=True)
 
     def test_generate_latin_hypercube_samples(self):
@@ -30,7 +30,7 @@ class TestSampling(unittest.TestCase):
         print('-'*30)
 
         df = self._get_test_df()
-        print(generate_latin_hypercube_samples(df, 100, 42))
+        print(generate_latin_hypercube_samples(df, 100, 42, True))
 
 if __name__ == '__main__':
     unittest.main()
