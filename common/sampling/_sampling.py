@@ -115,10 +115,16 @@ def generate_latin_hypercube_samples(
     quantile_steps = np.linspace(0, 1, num=n_samples+1)
 
     # Get quantile values per column.
-    df = regressor_dataset.quantile(quantile_steps, method='table', interpolation='midpoint')
+    df = regressor_dataset.quantile(quantile_steps, interpolation='midpoint')
 
     # Convert df to 2D matrix
     quantile_matrix = df.to_numpy()
+
+    # Show quantile_matrix (for testing only)
+    print('Showing quantile_matrix')
+    print('-'*30)
+    print(quantile_matrix)
+    print('quantile_matrix shape:', quantile_matrix.shape)
 
     # Create rng object for shuffling samples
     rng =  np.random.default_rng()
@@ -127,9 +133,9 @@ def generate_latin_hypercube_samples(
 
     # Loop through quantile matrix to sample from the intervals and build df samples.
     df_samples = pd.DataFrame(columns=regressor_dataset.columns)
-    for j in np.arange(quantile_matrix.shape(1)):
+    for j in np.arange(quantile_matrix.shape[1]):
         col_samples = np.zeros(n_samples)
-        for i in np.arange(1, quantile_matrix.shape(0)):
+        for i in np.arange(1, quantile_matrix.shape[0]):
             lower = quantile_matrix[i-1,j]
             upper = quantile_matrix[i,j]
             sample = rng.uniform(lower, upper)
