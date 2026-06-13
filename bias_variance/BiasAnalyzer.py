@@ -1,16 +1,30 @@
 import pandas as pd
 import numpy as np
-from common.sampling._sampling import get_random_samples, get_stratified_random_samples, generate_latin_hypercube_samples
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Dense
-from tensorflow.keras.metrics import R2Score, MeanSquaredError, RootMeanSquaredError, MeanAbsoluteError
-from tensorflow.keras.models import Model
+from keras.layers import Input, Dense
+from keras.metrics import (
+    R2Score,
+    MeanSquaredError,
+    RootMeanSquaredError,
+    MeanAbsoluteError
+)
+from keras.models import Model
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, r2_score, root_mean_squared_error, mean_absolute_error
+from common.sampling._sampling import (
+    get_random_samples,
+    get_stratified_random_samples,
+    generate_latin_hypercube_samples
+)
 
 class BiasAnalyzerConfigMeta(type):
+    '''
+    Provides static, const member variables for the BiasAnalyzer class.
+    '''
     @property
     def METRIC_OPTIONS(cls):
+        '''
+        Returns all keras functional model metric selections for analysis.
+        '''
         return {
             'rmse' : RootMeanSquaredError(name='rmse'),
             'mse' : MeanSquaredError(name='mse'),
@@ -28,43 +42,52 @@ class BiasAnalyzerConfigMeta(type):
 
 class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
     '''
-    Purpose
-    ------------
-    To analyze each bias by comparing to the base model and dataset to
+    Analyzes each bias by comparing to the base model and dataset to
     the generated predictions' 95% confidence interval.
 
     Parameters
     ------------
-    base_architecture : callable | keras.Model
-        Base model architecture or model factory.
-    
-    dataset : pandas.DataFrame
+    inputs_df: pandas.DataFrame
+        The input dataframe
 
-    test_size : float, default=0.2
+    outputs_df: pandas.DataFrame
+        The output dataframe
+    
+    model_settings: dict = { 'hidden_layers': [32, 32], 'activation' : 'relu', 'optimizer' : 'adam', 'loss' : 'mse', 'metrics' : ['rmse','r2','mse','mae'], 'epochs' : 100, 'batch_size' : 10, 'verbose' : 0 }
+        All configurable settings for the base model.
+        'hidden_layers': list[int] = Number of hidden layers and neurons per layer.
+        'activation': str = Activation function.
+        'optimizer': str = Optimizer algorithm.
+        'loss': str = Loss function.
+        'metrics': list[str] = Metrics for results.
+        'epochs': int = Number of passes.
+        'batch_size': int = Number of training samples.
+        'verbose': int = logging infomation display modes.
+    
+    test_size : float = 0.2
         Fraction used for initial train/test split.
 
-    random_state : int | None, default=None
+    random_state : int | None = None
         Seed used for reproducibility.
 
-    save_predicitons : bool, default=True
-        Determines if raw predictions are stored internally.
+    is_predicitons_saved : bool = True
+        Determines if raw predictions are stored.
 
-    Attributes
-    ------------
-    results : pandas.DataFrame
-        Stores summarized study outputs.
-
-    predictions : pandas.DataFrame
-        Stores raw prediction arrays.
+    _model: tensorflow.keras.Model | None = None
+        Holds the base model.
+    
+    _init_weights: list[numpy.ndarray] | None = None
+        Holds the initial weights before any training data is fitted on the base model.
+    
+    _results_df: pandas.DataFrame | None = None
+        Caches the results after a study has ran.
+    
+    _predictions_df: pandas.DataFrame | None = None
+        Caches the predictions after a study has ran.
+    
 
     Questions
     ------------
-    - Should we pass the entire dataset and use a random seed for the base train/test split when
-    comparing the sampling and data biases? Or, does it make more sense to pass the base train
-    /test datasets for comparisons? - I think we should pass the entire dataset to prevent leakage,
-    centralize randomness, and guarantee fair comparisons. Once passed, the train/test splits 
-    can be reproducibly generated and the split indices can be stored.
-
     - Should we store the prediction results in the BiasAnalyzer class as pandas dataframes? Or,
     should they be exported as a csv for deeper analysis? - I think internally, the data should be 
     stored as a pandas DataFrame, for the time being, since DataFrames make filtering, grouping, 
@@ -78,37 +101,33 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         analyzer_ran_study.decompose_variance()
     
     - Should we select all plots by default or only select the best representation w/ an auto selection feature?
-
-    - Should we have dataset contain inputs and outputs or should each be separate variables?
-    
-    - Should the BiasAnalyzer hold a compiled base model?
     '''
 
     def __init__(
-            self,
-            inputs_df: pd.DataFrame,
-            outputs_df: pd.DataFrame,
-            *,
-            model_settings: dict = {
-                'hidden_layers': [
-                    32, 32
-                ],
-                'activation' : 'relu',
-                'optimizer' : 'adam',
-                'loss' : 'mse',
-                'metrics' : ['rmse','r2','mse','mae'],
-                'epochs' : 100,
-                'batch_size' : 10,
-                'verbose' : 0
-            },
-            test_size: float = 0.2,
-            random_state: int | None = None,
-            is_predictions_saved: bool = False,
-            _model: tf.keras.Model | None = None,
-            _init_weights: list[np.ndarray] | None = None,
-            _results_df: pd.DataFrame | None = None,
-            _predictions_df: pd.DataFrame | None = None,
-            ) -> None:
+        self,
+        inputs_df: pd.DataFrame,
+        outputs_df: pd.DataFrame,
+        *,
+        model_settings: dict = {
+            'hidden_layers': [
+                32, 32
+            ],
+            'activation' : 'relu',
+            'optimizer' : 'adam',
+            'loss' : 'mse',
+            'metrics' : ['rmse','r2','mse','mae'],
+            'epochs' : 100,
+            'batch_size' : 10,
+            'verbose' : 0
+        },
+        test_size: float = 0.2,
+        random_state: int | None = None,
+        is_predictions_saved: bool = False,
+        _model: tf.keras.Model | None = None,
+        _init_weights: list[np.ndarray] | None = None,
+        _results_df: pd.DataFrame | None = None,
+        _predictions_df: pd.DataFrame | None = None,
+    ) -> None:
         self.inputs_df = inputs_df
         self.outputs_df = outputs_df
         self.model_settings = model_settings
@@ -122,6 +141,9 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
 
 
     def _init_model(self):
+        '''
+        Initializes the base model for studies.
+        '''
         if self._model is None:
             # use keras functional api to build base model
             inputs = Input(shape=(self.inputs_df.shape[1],))
@@ -141,6 +163,27 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             self._init_weights = self._model.get_weights()
 
     def _train_and_evaluate_model(self, X_train, y_train, X_test, y_test) -> dict:
+        '''
+        Trains and evaluates the model on a given train-test split.
+        
+        Parameters
+        --------------
+        X_train
+            Input data from train set.
+        
+        y_train
+            Output data from train set.
+        
+        X_test
+            Input data from test set.
+        
+        y_test
+            Output data from test set.
+
+        Returns
+        ----------------
+        A dictionary object with the loss and metric values defined in self.model_settings.
+        '''
         # reset weights
         self._model.set_weights(self._init_weights)
         # train
@@ -157,14 +200,12 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
 
 
     def run_model_bias_study(
-            self, 
-            architecture_types:list[str]=['wide','narrow','taper','reverse_taper','combined_taper'], 
-            n_architectures=10,
-            metrics:list[str]=['root_mean_squared_error','r2','mse','mae']
-            ) -> None:
+        self, 
+        architecture_types:list[str]=['wide','narrow','taper','reverse_taper','combined_taper'], 
+        n_architectures=10,
+        metrics:list[str]=['root_mean_squared_error','r2','mse','mae']
+    ) -> None:
         '''
-        Purpose
-        -----------
         To create multiple model architectures based on shape types (i.e., wide, narrow, taper,
         reverse_taper, and combined_taper), train base dataset on all models with base train dataset,
         and make predictions with base test dataset per model architecture for comparison results.
@@ -196,35 +237,40 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         pass
 
     def run_sampling_bias_study(
-            self,
-            *,
-            strategies:list[str]=['bootstrap','lhs','stratified'], 
-            n_samples: int | None = None,
-            sample_fraction: float | None = None,
-            n_iter_per_strategy: int = 10,
-            stratified_col_name: str | None = None,
-            with_replacement: bool = False
-            ) -> None:
+        self,
+        *,
+        strategies:list[str]=['bootstrap','lhs','stratified'], 
+        n_samples: int | None = None,
+        sample_fraction: float | None = None,
+        n_iter_per_strategy: int = 10,
+        stratified_col_name: str | None = None,
+        with_replacement: bool = False
+    ) -> None:
         '''
-        Purpose
-        -----------
-        To create multiple train dataset samples based on strategies (i.e., bootstrap, lhs, and
-        stratified), train on base model with all generated train datasets, and make predictions
-        with base test dataset per train dataset for comparison results.
+        Creates multiple, sampled datasets based on strategies (i.e., bootstrap, lhs, and
+        stratified), trains on all generated train datasets with base model, and makes predictions
+        with generated test dataset per train dataset for analysis.
 
         Parameters
         ------------
-        strategies : list[str], default = ['bootstrap','lhs','stratified'] i.e. all strategies
+        strategies: list[str] = ['bootstrap','lhs','stratified'] i.e. all strategies
             Must contain at least one strategy to run.
         
-        n_samples : int, default = 10
+        n_samples: int | None = None
             The number of sampled train datasets generated per strategy. Must be greater than 0.
 
-        sample_fraction : float, default = 1.0
+        sample_fraction: float | None = None
             Control variable of sample size, used for bootstrap/LHS sampling.
+        
+        n_iter_per_strategy: int = 10
+            Number of iterations per sampling strategy.
+        
+        stratified_col_name: str | None = None
+            The stratified column name in the dataset. If None is provided, then the dataset
+            is given a stratified column based on the quantile rankings for the first output column.
 
-        replacement : bool, default = True
-            Control variable for bootstrap sampling.
+        with_replacement: bool = True
+            Control variable for bootstrap and stratified sampling.
 
         Returns
         ------------
@@ -300,14 +346,12 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         
 
     def run_data_bias_study(
-            self, 
-            cv_folds:int = 5, 
-            n_iter:int = 10,
-            shuffle:bool = True
-            ) -> None:
+        self, 
+        cv_folds:int = 5, 
+        n_iter:int = 10,
+        shuffle:bool = True
+    ) -> None:
         '''
-        Purpose
-        -----------
         To create multiple train/test datasets based on cross validation folds,
         train on base model with generated train dataset, and make predictions
         with generated test dataset per paired train dataset for comparison results.
@@ -332,12 +376,10 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         pass
 
     def decompose_variance(
-            self,
-            view:list[str]=['model','sampling','data']
-            ):
+        self,
+        view:list[str]=['model','sampling','data']
+    ) -> pd.DataFrame:
         '''
-        Purpose
-        -----------
         To provide a breakdown of bias variance of previous runs. If no runs were performed,
         the analyzer should not provide any results.
 
@@ -354,12 +396,10 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         pass
     
     def export_results(
-            self,
-            filepath:str = 'results.csv'
+        self,
+        filepath:str = 'results.csv'
     ) -> None:
         '''
-        Purpose
-        -----------
         To export the results of previous runs to a CSV file. If no runs were performed,
         the exporter should not create a new file.
 
@@ -375,14 +415,12 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         pass
     
     def plot_disagreement_map(
-            self,
-            view:list[str] = ['model','sampling','data'],
-            plot_type:list[str] = ['heatmap','histogram','KDE','uncertainty_bands','scatter_disagreement'],
-            plot_setttings:dict | None = None
-            ) -> None:
+        self,
+        view:list[str] = ['model','sampling','data'],
+        plot_type:list[str] = ['heatmap','histogram','KDE','uncertainty_bands','scatter_disagreement'],
+        plot_setttings:dict | None = None
+    ) -> None:
         '''
-        Purpose
-        -----------
         To provide a plot of bias variance results of previous runs. If no runs were performed,
         the analyzer should not provide any results.
 
@@ -393,6 +431,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
 
         plot_type : str, default = ['heatmap','histogram','KDE','uncertainty_bands','scatter_disagreement']
             Selection of visualizations for study.
+        
         Returns
         -------------
         None
