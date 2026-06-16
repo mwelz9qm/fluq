@@ -31,6 +31,14 @@ def get_random_samples(
     pandas.DataFrame
         The sampled dataset.
     '''
+    # Error conditions
+    if (n_samples < 1):
+        raise ValueError('The number of samples \'n_samples\' must be a positive interger.')
+
+    if not with_replacement and (n_samples > dataset.shape[0]):
+        raise ValueError('The number of samples \'n_samples\' exceeds the size of the dataset. Consider setting \'with_replacement\'=True for sampling with replacement')
+
+    # check if random_state is set, then sample with random_state if given
     if random_state is None:
         return dataset.sample(n=n_samples, replace=with_replacement)
     else:
@@ -76,18 +84,48 @@ def get_stratified_random_samples(
     pandas.DataFrame
         The sampled dataset.
     '''
+    # Error conditions
+    if (n_samples < 1):
+        raise ValueError('The number of samples \'n_samples\' must be a positive interger.')
+
+    if not with_replacement and (n_samples > dataset.shape[0]):
+        raise ValueError('The number of samples \'n_samples\' exceeds the size of the dataset. Consider setting \'with_replacement\'=True for sampling with replacement')
+
+    # create the grouped dataframe and determine the number of bins/stratas
     grouped_df = dataset.groupby(stratified_column_name)
     n_strata_samples = int(np.ceil(n_samples / grouped_df.ngroups))
     if is_print_statements_shown:
         print('number of stratas:', grouped_df.ngroups)
         print('number of strata samples:', n_strata_samples)
+
+    samples_df = pd.DataFrame() # To hold the samples
+
+    # check if random_state is set, then get samples per strata
     if random_state is None:
         samples_df = grouped_df.sample(n=n_strata_samples, replace=with_replacement)
-        return samples_df
     else:
         samples_df = grouped_df.sample(n=n_strata_samples, replace=with_replacement, random_state=random_state)
-        return samples_df
-    # need to return trimmed df until row shape matches n_samples
+    
+    grouped_samples_df = samples_df.groupby(stratified_column_name) # Regroup for trimming
+
+    # create rng object
+    rng = np.random.default_rng()
+    if random_state is not None:
+        rng = np.random.default_rng(seed=random_state)
+    
+    # iterate through groups and track removable samples until
+    # the sample size equals n_samples
+    drop_indicies = []
+    counter = 0
+    for _, group_df in grouped_samples_df:
+        if samples_df.shape[0] - counter == n_samples:
+            break
+        random_index = rng.choice(group_df.index)
+        drop_indicies.append(random_index)
+        counter += 1
+    
+    # remove the rows (trimming sample set) and return samples
+    return samples_df.drop(drop_indicies)
     
 def generate_latin_hypercube_samples(
         regressor_dataset:pd.DataFrame,
@@ -120,6 +158,13 @@ def generate_latin_hypercube_samples(
     pandas.DataFrame
         The generated dataset.
     '''
+    # Error conditions
+    if (n_samples < 1):
+        raise ValueError('The number of samples \'n_samples\' must be a positive interger.')
+    
+    if (n_samples > regressor_dataset.shape[0]):
+        raise ValueError('The number of samples \'n_samples\' must be less than the size of the regressor dataset.')
+
     # Get quantile steps to build strata intervals
     quantile_steps = np.linspace(0, 1, num=n_samples+1)
 
