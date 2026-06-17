@@ -239,11 +239,13 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
     def run_sampling_bias_study(
         self,
         *,
-        strategies:list[str]=['bootstrap','lhs','stratified'], 
+        strategies:list[str]=['bootstrap','lhs','stratified'],
+        n_iter: int = 100, 
         n_samples: int | None = None,
         sample_fraction: float | None = None,
-        n_iter_per_strategy: int = 10,
-        stratified_col_name: str | None = None,
+        stratify_col_index: int | None = None,
+        stratify_col_name: str | None = None,
+        n_bins: int = 4,
         with_replacement: bool = False
     ) -> None:
         '''
@@ -256,18 +258,25 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         strategies: list[str] = ['bootstrap','lhs','stratified'] i.e. all strategies
             Must contain at least one strategy to run.
         
-        n_samples: int | None = None
-            The number of sampled train datasets generated per strategy. Must be greater than 0.
-
-        sample_fraction: float | None = None
-            Control variable of sample size, used for bootstrap/LHS sampling.
-        
-        n_iter_per_strategy: int = 10
+        n_iter: int = 100
             Number of iterations per sampling strategy.
         
-        stratified_col_name: str | None = None
-            The stratified column name in the dataset. If None is provided, then the dataset
-            is given a stratified column based on the quantile rankings for the first output column.
+        n_samples: int | None = None
+            The number of sampled train datasets generated per strategy. Must be greater than 0.
+            If n_samples is not None, then sample_fraction must be None.
+
+        sample_fraction: float | None = None
+            Control variable of sample size, used for bootstrap/LHS sampling. Must be within (0, 1].
+            If sample_fraction is not None, then n_samples must be None.
+        
+        stratify_col_index: int | None = None
+            The selected column index to apply the stratified method on.
+        
+        stratify_col_name: str | None = None
+            The selected column name to apply the stratified method on.
+        
+        n_bins: int = 4
+            The number of stratas used in the stratified method.
 
         with_replacement: bool = True
             Control variable for bootstrap and stratified sampling.
@@ -276,24 +285,26 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         ------------
         None
 
-        TODO tasks
+        TODO
         ------------
-        - Handle random_state when it is not None.
-        - Refactor stratified method to allow for each method/strategy to be in helper function.
-        - Find best implementation for handling stratified column in dataframe.
+        - Implement and handle sample_fraction parameter and incoporate in sampling methods
 
         Questions
         -----------
-        - Should the dataframe contain the stratified column or should the get_stratified_random_samples
-        function add and remove the stratified column in the implementation?
         - Should we have a results_df for each bias? (i.e., data_results_df, sampling_results_df, model_results_df)
         '''
-        # Error checking
+        # Error conditions
         if (n_samples is None) and (sample_fraction is None):
             raise TypeError('You must provide exactly one of \'n_samples\' or \'sample_fraction\'.')
         
-        if (stratified_col_name is None) and ('stratified' in strategies):
-            raise TypeError('You must provide \'stratified_col_name\' if \'strategies\' contains \'stratified\'.')
+        if (n_samples is not None) and (sample_fraction is not None):
+            raise TypeError('You must provide exactly one of \'n_samples\' or \'sample_fraction\'.')
+        
+        if (stratify_col_index is not None) and (stratify_col_name is not None):
+            raise TypeError('You must provide one of \'stratify_col_index\' or \'stratify_col_name\', or leave both as None.')
+        
+        if ((stratify_col_index is not None) or (stratify_col_name is not None)) and ('stratified' in strategies):
+            raise TypeError('You must provide \'stratify_col_index\' or \'stratify_col_name\' if \'strategies\' contains \'stratified\'.')
 
         # before running study, initialize self._model based on self.model_settings
         self._init_model()
@@ -305,14 +316,14 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         for strategy in strategies:
             if strategy.lower() == 'bootstrap':
                 # Loop through the amount of iterators/data points for results_df.
-                for _ in np.arange(n_iter_per_strategy):
-                    # apply sampling method
-                    bootstrap_df = get_random_samples(dataset_df, n_samples=n_samples, with_replacement=with_replacement)
+                for i in np.arange(n_iter):
+                    # apply sampling method, NOTE: we add i to random_state to ensure different, but reproducible, sampled datasets.
+                    bootstrap_df = get_random_samples(dataset_df, n_samples=n_samples, random_state=self.random_state+i, with_replacement=with_replacement)
                     # split sampled dataset into input and output datasets
                     bootstrap_inputs_df = bootstrap_df[self.inputs_df.columns]
                     bootstrap_outputs_df = bootstrap_df[self.outputs_df.columns]
                     # split inputs and outputs for training and testing
-                    X_train, X_test, y_train, y_test = train_test_split(bootstrap_inputs_df, bootstrap_outputs_df, test_size=self.test_size)
+                    X_train, X_test, y_train, y_test = train_test_split(bootstrap_inputs_df, bootstrap_outputs_df, test_size=self.test_size, random_state=self.random_state+i) # NOTE: Should random_state vary in train_test_split() at each step?
                     # build results content for results_df
                     results_row = {
                         'study': 'sampling',
@@ -322,25 +333,39 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
 
             # Same structure applied as in 'bootstrap' method
             if strategy.lower() == 'lhs':
-                for _ in np.arange(n_iter_per_strategy):
-                    lhs_df = generate_latin_hypercube_samples(dataset_df, n_samples=n_samples)
+                for i in np.arange(n_iter):
+                    lhs_df = generate_latin_hypercube_samples(dataset_df, n_samples=n_samples, random_state=self.random_state+i)
                     lhs_inputs_df = lhs_df[self.inputs_df.columns]
                     lhs_outputs_df = lhs_df[self.outputs_df.columns]
-                    X_train, X_test, y_train, y_test = train_test_split(lhs_inputs_df, lhs_outputs_df, test_size=self.test_size)
+                    X_train, X_test, y_train, y_test = train_test_split(lhs_inputs_df, lhs_outputs_df, test_size=self.test_size, random_state=self.random_state+i)
                     results_row = {
                         'study': 'sampling',
                         'sampling_method': 'lhs',
                     } | self._train_and_evaluate_model(X_train, y_train, X_test, y_test)
                     results_df = pd.concat([results_df, pd.DataFrame([results_row])])
             
-            # NOTE: stratified method needs to be refactored for handling stratified_column_name
             if strategy.lower() == 'stratified':
-                for _ in np.arange(n_iter_per_strategy):
-                    stratified_df = get_stratified_random_samples(dataset_df, stratified_column_name=stratified_col_name, n_samples=n_samples, with_replacement=with_replacement)
+                # create the stratified column based on quantile rank on the selected index
+                stratified_col_name = ''
+                if stratify_col_index is not None:
+                    stratified_col_name = f'quantile_rank_on_col_{stratify_col_index}'
+                    dataset_df[stratified_col_name] = pd.qcut(dataset_df.iloc[:,stratify_col_index], q=n_bins, labels=False) # add column to dataset df
+                if stratify_col_name is not None:
+                    stratified_col_name = f'quantile_rank_on_{stratify_col_name}'
+                    dataset_df[stratified_col_name] = pd.qcut(dataset_df[stratify_col_name], q=n_bins, labels=False)
+                # apply same steps as in 'bootstrap' and 'lhs' methods
+                for i in np.arange(n_iter):
+                    stratified_df = get_stratified_random_samples(dataset_df, stratified_column_name=stratified_col_name, n_samples=n_samples, random_state=self.random_state+i, with_replacement=with_replacement)
                     stratified_inputs_df = stratified_df[self.inputs_df.columns]
                     stratified_outputs_df = stratified_df[self.outputs_df.columns]
-                    X_train, X_test, y_train, y_test = train_test_split(stratified_inputs_df, stratified_outputs_df, test_size=self.test_size)
-                    results_df = pd.concat([results_df, self._get_sample_run_results_row(X_train, X_test, y_train, y_test, self.model, self.model_settings, 'stratified')])
+                    X_train, X_test, y_train, y_test = train_test_split(stratified_inputs_df, stratified_outputs_df, test_size=self.test_size, random_state=self.random_state+i)
+                    results_row = {
+                        'study': 'sampling',
+                        'sampling_method': 'stratified',
+                    } | self._train_and_evaluate_model(X_train, y_train, X_test, y_test)
+                    results_df = pd.concat([results_df, pd.DataFrame([results_row])])
+                # remove stratified column after getting results
+                dataset_df.drop(columns=stratified_col_name)
             
         self.results_df = results_df # copy results
         
