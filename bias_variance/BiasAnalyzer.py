@@ -270,10 +270,12 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             If sample_fraction is not None, then n_samples must be None.
         
         stratify_col_index: int | None = None
-            The selected column index to apply the stratified method on.
+            The selected column index to apply the stratified method on. Is mutually exclusive with
+            stratify_col_name, and either one must be not None if stratified method is selected.
         
         stratify_col_name: str | None = None
-            The selected column name to apply the stratified method on.
+            The selected column name to apply the stratified method on. Is mutually exclusive with
+            stratify_col_index, and either one must be to not None if stratified method is selected.
         
         n_bins: int = 4
             The number of stratas used in the stratified method.
@@ -284,10 +286,6 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         Returns
         ------------
         None
-
-        TODO
-        ------------
-        - Implement and handle sample_fraction parameter and incoporate in sampling methods
 
         Questions
         -----------
@@ -318,7 +316,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                 # Loop through the amount of iterators/data points for results_df.
                 for i in np.arange(n_iter):
                     # apply sampling method, NOTE: we add i to random_state to ensure different, but reproducible, sampled datasets.
-                    bootstrap_df = get_random_samples(dataset_df, n_samples=n_samples, random_state=self.random_state+i, with_replacement=with_replacement)
+                    bootstrap_df = get_random_samples(dataset_df, n_samples=n_samples, sample_fraction=sample_fraction, random_state=self.random_state+i, with_replacement=with_replacement)
                     # split sampled dataset into input and output datasets
                     bootstrap_inputs_df = bootstrap_df[self.inputs_df.columns]
                     bootstrap_outputs_df = bootstrap_df[self.outputs_df.columns]
@@ -334,7 +332,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             # Same structure applied as in 'bootstrap' method
             if strategy.lower() == 'lhs':
                 for i in np.arange(n_iter):
-                    lhs_df = generate_latin_hypercube_samples(dataset_df, n_samples=n_samples, random_state=self.random_state+i)
+                    lhs_df = generate_latin_hypercube_samples(dataset_df, n_samples=n_samples, sample_fraction=sample_fraction, random_state=self.random_state+i)
                     lhs_inputs_df = lhs_df[self.inputs_df.columns]
                     lhs_outputs_df = lhs_df[self.outputs_df.columns]
                     X_train, X_test, y_train, y_test = train_test_split(lhs_inputs_df, lhs_outputs_df, test_size=self.test_size, random_state=self.random_state+i)
@@ -355,7 +353,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                     dataset_df[stratified_col_name] = pd.qcut(dataset_df[stratify_col_name], q=n_bins, labels=False)
                 # apply same steps as in 'bootstrap' and 'lhs' methods
                 for i in np.arange(n_iter):
-                    stratified_df = get_stratified_random_samples(dataset_df, stratified_column_name=stratified_col_name, n_samples=n_samples, random_state=self.random_state+i, with_replacement=with_replacement)
+                    stratified_df = get_stratified_random_samples(dataset_df, stratified_column_name=stratified_col_name, n_samples=n_samples, sample_fraction=sample_fraction, random_state=self.random_state+i, with_replacement=with_replacement)
                     stratified_inputs_df = stratified_df[self.inputs_df.columns]
                     stratified_outputs_df = stratified_df[self.outputs_df.columns]
                     X_train, X_test, y_train, y_test = train_test_split(stratified_inputs_df, stratified_outputs_df, test_size=self.test_size, random_state=self.random_state+i)
