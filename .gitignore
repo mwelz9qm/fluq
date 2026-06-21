@@ -25,7 +25,6 @@ MANIFEST
 ### Virtual Environments ###
 # Common names for virtual envs
 .venv/
-venv/
 env/
 ENV/
 install/
