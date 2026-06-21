@@ -19,6 +19,8 @@ import pyMAISE as mai
 from pyMAISE.utils.hyperparameters import Int, Float
 from deep_ensembles._deep_ensemble import DeepEnsembleHyperModel
 
+# TODO DELETE?
+
 def main():
     mai.init(problem_type="regression", random_state=42, verbosity=1)
 

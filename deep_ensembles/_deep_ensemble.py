@@ -197,7 +197,7 @@ class DeepEnsemble:
             # Validation loss
             if "valid_loss" in all_history[0][i]:
                 avg_val_loss = np.mean(
-                    hist[i, "valid_loss"] for hist in all_history
+                    [hist[i, "valid_loss"] for hist in all_history]
                 )
                 self.history.record("valid_loss", avg_val_loss)
 
