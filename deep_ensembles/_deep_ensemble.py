@@ -6,14 +6,33 @@ import numpy as np
 import warnings
 
 import torch
+from skorch.history import History
 
 from pyMAISE import settings
 from pyMAISE.methods.nn._nn_hypermodel import nnHyperModel
 
+
+"""
+How the classes interact with pyMAISE:
+1. Tuner: 
+    - Instantiates a DeepEnsembleHyperModel.
+    - Tunes a single, non-ensemble, model using the DeepEnsembleHyperModel object by calling the build method.
+    - Returns the best hyperparameters.
+2. PostProcessor:
+    - Enables "Ensemble Mode" for the DeepEnsembleHyperModel.
+    - When the PostProcessor invokes the fit method on the model, DeepEnsembleHyperModel returns the
+      wrapper DeepEnsemble object encapsulating all the trained models.
+3. User:
+    - Getting the DeepEnsemble object from the PostProcessor by calling the get_model method allows the user
+      to call predict_with_uncertainty, along with all the other typical methods associated with other pyMAISE models.
+"""
+
+
 class DeepEnsemble:
     """
-    Deep Ensemble class for managing M indepependently trained models.
-    Plain python class.
+    Deep Ensemble class for managing M independently trained models.
+    Plain python class. This class acts as a wrapper around a list of nnHyperModels
+    to work seamlessly in place of a skorch model.
     """
 
     def __init__(self, models: List, heteroscedastic: bool = False) -> None:
@@ -31,6 +50,7 @@ class DeepEnsemble:
         """
         self.ensemble_models = models
         self.heteroscedastic = heteroscedastic
+        self.history = History()
 
     def fit(self, x: Any, y: Any, **kwargs) -> "DeepEnsemble":
         """
@@ -52,29 +72,10 @@ class DeepEnsemble:
         """
         for member in self.ensemble_models:
             member.fit(x, y, **kwargs)
-        return self
-    
-    def _predict_stacked(self, x: Any) -> np.ndarray:
-        """
-        Method returning stacked predictions from all ensemble members.
 
-        Parameters
-        ----------
-        x: Any
-            Input features/samples to predict on.
-        
-        Returns
-        -------
-        predictions: np.ndarray
-            Stacked predictions of shape (n_models, n_samples, n_targets) in standard mode,
-            or (n_models, n_samples, 2*n_targets) in heteroscedastic NLL mode.
-            Used internally by predict_with_uncertainty. Not meant to be
-            called directly by users.
-        """
-        return np.stack(
-            [model.predict(x) for model in self.ensemble_models],
-            axis=0,
-            )
+        self._record_history()
+
+        return self
 
     def predict(self, x: Any) -> np.ndarray:
         """
@@ -172,6 +173,56 @@ class DeepEnsemble:
             "aleatoric_var": aleatoric_var
         }
 
+    def _record_history(self):
+        """
+        Helper method to update the history object by averaging the history of all models.
+        """
+        all_history = [member.history for member in self.ensemble_models]
+
+        if not all_history:
+            return
+
+        self.history = History()  # reset
+        n_epoch = len(all_history[0])
+
+        for i in range(n_epoch):
+            self.history.new_epoch()
+
+            # Training loss
+            avg_train_loss = np.mean(
+                [hist[i, "train_loss"] for hist in all_history]
+            )
+            self.history.record("train_loss", avg_train_loss)
+
+            # Validation loss
+            if "valid_loss" in all_history[0][i]:
+                avg_val_loss = np.mean(
+                    hist[i, "valid_loss"] for hist in all_history
+                )
+                self.history.record("valid_loss", avg_val_loss)
+
+    def _predict_stacked(self, x: Any) -> np.ndarray:
+        """
+        Method returning stacked predictions from all ensemble members.
+
+        Parameters
+        ----------
+        x: Any
+            Input features/samples to predict on.
+
+        Returns
+        -------
+        predictions: np.ndarray
+            Stacked predictions of shape (n_models, n_samples, n_targets) in standard mode,
+            or (n_models, n_samples, 2*n_targets) in heteroscedastic NLL mode.
+            Used internally by predict_with_uncertainty. Not meant to be
+            called directly by users.
+        """
+        return np.stack(
+            [model.predict(x) for model in self.ensemble_models],
+            axis=0,
+        )
+
 
 def _set_random_state(state: int):
     settings.values.random_state = state
@@ -214,7 +265,8 @@ class DeepEnsembleHyperModel(nnHyperModel):
         """
         super(DeepEnsembleHyperModel, self).__init__(parameters, input_shape, name)
         self.num_models = num_models
-        self.tune_ensemble = tune_ensemble
+        self.ensemble_mode = tune_ensemble
+        self.best_trial = None
 
     def build(self, trial: Any) -> Any:
         """
@@ -232,15 +284,17 @@ class DeepEnsembleHyperModel(nnHyperModel):
         model: Model
             A Skorch NerualNetRegressor model (either DeepEnsembleWrapper or a single member).
         """
+        self.best_trial = trial
+
         # Build each individual model and wrap them in a DeepEnsembleModel
-        if self.tune_ensemble:
+        if self.ensemble_mode:
             return self.build_ensemble(trial)
 
         # Build the single model (best for normal tuning)
         return super(DeepEnsembleHyperModel, self).build(trial)
 
 
-    def build_ensemble(self, trial: Any) -> DeepEnsemble:
+    def build_ensemble(self, trial: Any | None = None) -> DeepEnsemble:
         """
         Build each model in the ensemble, returning the wrapped ensemble model.
 
@@ -251,6 +305,8 @@ class DeepEnsembleHyperModel(nnHyperModel):
         ----------
         trial: Any
             HyperParameters object
+                — If the model is returned from the Tuner, the best trial will be used from the
+                Tuner. Otherwise, the trial parameter must be provided.
 
         Returns
         -------
@@ -270,24 +326,20 @@ class DeepEnsembleHyperModel(nnHyperModel):
             seed = np.random.randint(0, 2**32)
 
             # Set global random state
-            # TODO I have pyMAISE global verbosity set to 1, which will ignore this warning. I'm assuming
-            #      that is okay, because this warning is minor.
             warnings.warn(f"Required for building deep ensemble: Random State is None, setting to {seed}.")
-
-            # TODO If we would like to bypass warning settings and always display the seed, this is how
-            #      we would do it. (less desirable IMO)
-            # with warnings.catch_warnings():
-            #     warnings.simplefilter("always")
-            #     warnings.warn(f"Required for building deep ensemble: Random State is None, setting to {seed}.")
-
             _set_random_state(seed)
+
+        # Define which trial to use for all the ensemble members
+        if trial is None and self.best_trial is None:
+            raise ValueError("A trial parameter must be provided if the model has not been returned from the Tuner object.")
+        this_trial = trial if trial is not None else self.best_trial
 
         for i in range(self.num_models):
             # Set the random seed across all frameworks
             _set_random_state(seed + i)
 
             # Generate the model based on the new seed
-            models.append(super(DeepEnsembleHyperModel, self).build(trial))
+            models.append(super(DeepEnsembleHyperModel, self).build(this_trial))
 
         # reset the random state
         _set_random_state(seed)
