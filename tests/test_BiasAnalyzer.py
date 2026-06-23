@@ -1,32 +1,15 @@
-import unittest
+import pytest
+from pathlib import Path
 import pandas as pd
 import numpy as np
-from pyMAISE.datasets import load_chf
 from bias_variance.BiasAnalyzer import BiasAnalyzer
 
-class TestBiasAnalyzer(unittest.TestCase):
+def test_bias_analyzer_init():
+    BENCHMARKS = Path(__file__).resolve().parents[1] / "benchmarks"
+    train_df = pd.read_csv(BENCHMARKS / 'chf_train_synth.csv')
+    test_df = pd.read_csv(BENCHMARKS / 'chf_test_synth.csv')
+    df = pd.concat([train_df, test_df])
+    inputs_df = df.iloc[:,:6]
+    outputs_df = df.iloc[:,6:]
 
-    def test_run_sampling_bias_study(self):
-        # load chf data and create input and output dataframes
-        train_data, X_train, y_train, test_data, X_test, y_test = load_chf()
-        inputs_df = pd.concat([pd.DataFrame(X_train), pd.DataFrame(X_test)], ignore_index=True)
-        outputs_df = pd.concat([pd.DataFrame(y_train), pd.DataFrame(y_test)], ignore_index=True)
-
-        # rename columns since column names are not provided
-        inputs_df.columns = [f'feature_{i}' for i in np.arange(inputs_df.shape[1])]
-        outputs_df.columns = ['target']
-
-        # create BiasAnalyzer object
-        analyzer = BiasAnalyzer(
-            inputs_df,
-            outputs_df
-        )
-
-        # run sampling study
-        analyzer.run_sampling_bias_study(strategies=['bootstrap'], n_samples=1000, n_iter_per_strategy=100)
-        
-        # show results
-        print(analyzer._results_df)
-
-if __name__ == '__main__':
-    unittest.main()
+    analyer = BiasAnalyzer(inputs_df, outputs_df)
