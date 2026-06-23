@@ -98,16 +98,17 @@ def test_deep_ensemble_regression():
     assert uncertainty_results["aleatoric_var"] is None  # TODO
 
     # ---- NLL Test Example (Commented out) ----
-    # parameters["DeepEnsemble"]["compile_params"]["loss"] = "nll"
+    parameters["DeepEnsemble"]["compile_params"]["loss"] = "nll"
     # # Need double the outputs for heteroscedastic NLL
-    # parameters["DeepEnsemble"]["structural_params"]["Dense_2"]["units"] = ytrain.shape[-1] * 2
-    # tuner_nll = mai.Tuner(xtrain, ytrain, model_settings=parameters)
-    # results_nll = tuner_nll.nn_grid_search(objective="r2_score", cv=2)
-    # pp_nll = PostProcessor(data=data, model_configs=[results_nll])
-    # model_nll = pp_nll.get_model(model_type="DeepEnsemble")
-    # uncert_nll = model_nll.predict_with_uncertainty(xtest.values)
-    # assert uncert_nll["aleatoric_var"] is not None
-    # assert uncert_nll["aleatoric_var"].shape == (xtest.shape[0], ytrain.shape[-1])
+    parameters["DeepEnsemble"]["structural_params"]["Dense_2"]["units"] = ytrain.shape[-1] * 2
+    tuner_nll = mai.Tuner(xtrain, ytrain, model_settings=parameters)
+    results_nll = tuner_nll.nn_grid_search(objective="r2_score", cv=2)
+    pp_nll = PostProcessor(data=data, model_configs=[results_nll])
+    pp_nll.metrics()
+    model_nll = pp_nll.get_model(model_type="DeepEnsemble")
+    uncert_nll = model_nll.predict_with_uncertainty(xtest.values)
+    assert uncert_nll["aleatoric_var"] is not None
+    assert uncert_nll["aleatoric_var"].shape == (xtest.shape[0], ytrain.shape[-1])
 
 
 def test_deep_ensemble_classification():

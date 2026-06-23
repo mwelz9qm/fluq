@@ -9,6 +9,7 @@ import torch
 from skorch.history import History
 
 from pyMAISE import settings
+from pyMAISE.methods.nn._utils import split_mean_var
 from pyMAISE.methods.nn._nn_hypermodel import nnHyperModel
 
 
@@ -81,6 +82,11 @@ class DeepEnsemble:
         """
         Generates mean prediction across all ensemble members.
 
+        For heteroscedastic (NLL) models, only the mean half of each
+        member's output is used - the raw output is
+        [mean | raw_variance] concatenated, and predict() returns
+        values comparable to the target.
+
         Parameters
         ----------
         x: Any
@@ -93,7 +99,11 @@ class DeepEnsemble:
             with standard pyMAISE models. For full uncertainty
             decomposition use predict_with_uncertainty() instead.
         """
-        return np.mean(self._predict_stacked(x), axis=0)
+        stacked = self._predict_stacked(x)
+        if self.heteroscedastic:
+            mean_t, _ = split_mean_var(torch.from_numpy(stacked))
+            stacked = mean_t.numpy()
+        return np.mean(stacked, axis=0)
 
     def predict_with_uncertainty(self, x: Any) -> dict:
         """
@@ -142,10 +152,12 @@ class DeepEnsemble:
         predictions = self._predict_stacked(x)
 
         if self.heteroscedastic:
-            n_targets = predictions.shape[-1] // 2
             assert predictions.shape[-1] % 2 == 0, "heteroscedastic mode expects 2*n_targets outputs"
-            member_means = predictions[:, :, :n_targets]
-            member_vars = predictions[:, :, n_targets:]
+            # Reuse the same split + softplus transform used during training
+            # (split_mean_var) so train and predict never disagree on what "variance" means.
+            member_means_t, member_vars_t = split_mean_var(torch.from_numpy(predictions))
+            member_means = member_means_t.numpy()
+            member_vars = member_vars_t.numpy()
             mean_preds = np.mean(member_means, axis=0)
             aleatoric_var = np.mean(member_vars, axis=0)
         else:
