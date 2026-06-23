@@ -248,7 +248,91 @@ def test_deep_ensemble_hyperparameter_propagation():
         assert first_layer.linear.out_features == chosen_units
 
 
+def test_deep_ensemble_postprocessor():
+    """Test all PostProcessor methods on DeepEnsemble."""
+    global_settings = mai.init(
+        problem_type=mai.ProblemType.REGRESSION, 
+        random_state=42, 
+        num_configs_saved=1, 
+        verbosity=0
+    )
+    
+    data = simulate_regression_data()
+    xtrain, xtest, ytrain, ytest = data
+
+    parameters = {
+        "models": ["DeepEnsemble"],
+        "DeepEnsemble": {
+            "num_models": 2,
+            "structural_params": {
+                "Dense_1": {
+                    "units": 8,
+                    "activation": "relu",
+                },
+                "Dense_2": {
+                    "units": ytrain.shape[-1],
+                    "activation": "linear",
+                }
+            },
+            "optimizer": "Adam",
+            "Adam": {
+                "learning_rate": 1e-3,
+            },
+            "compile_params": {
+                "loss": "mean_absolute_error",
+            },
+            "fitting_params": {
+                "epochs": 1,
+                "batch_size": 16,
+            }
+        }
+    }
+
+    tuner = mai.Tuner(xtrain, ytrain, model_settings=parameters)
+    results = tuner.nn_grid_search(
+        objective="r2_score", 
+        cv=ShuffleSplit(n_splits=2, test_size=0.2, random_state=global_settings.random_state)
+    )
+    
+    post_processor = PostProcessor(data=data, model_configs=[results])
+
+    # Test metrics()
+    metrics = post_processor.metrics()
+    assert metrics is not None
+    assert "Test MAE" in metrics.columns
+
+    # Test get_predictions()
+    train_preds, test_preds = post_processor.get_predictions(model_type="DeepEnsemble")
+    assert train_preds.shape == (xtrain.shape[0], ytrain.shape[-1])
+    assert test_preds.shape == (xtest.shape[0], ytest.shape[-1])
+
+    # Test get_params()
+    params = post_processor.get_params(model_type="DeepEnsemble")
+    assert params is not None
+
+    # Test get_model()
+    model = post_processor.get_model(model_type="DeepEnsemble")
+    assert isinstance(model, DeepEnsemble)
+
+    # Test print_model()
+    post_processor.print_model(model_type="DeepEnsemble")
+
+    # Test diagonal_validation_plot()
+    ax_diag = post_processor.diagonal_validation_plot(model_type="DeepEnsemble")
+    assert ax_diag is not None
+
+    # Test validation_plot()
+    ax_val = post_processor.validation_plot(model_type="DeepEnsemble")
+    assert ax_val is not None
+
+    # Test nn_learning_plot()
+    ax_learn = post_processor.nn_learning_plot(model_type="DeepEnsemble")
+    assert ax_learn is not None
+
+
 if __name__ == "__main__":
     test_deep_ensemble_regression()
     test_deep_ensemble_classification()
     test_deep_ensemble_hyperparameter_propagation()
+    test_deep_ensemble_postprocessor()
+

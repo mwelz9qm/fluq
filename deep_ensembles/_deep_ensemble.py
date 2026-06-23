@@ -53,6 +53,21 @@ class DeepEnsemble:
         self.heteroscedastic = heteroscedastic
         self.history = History()
 
+    def initialize(self) -> "DeepEnsemble":
+        """
+        Initializes each underlying model in the ensemble.
+        """
+        for model in self.ensemble_models:
+            model.initialize()
+        return self
+
+    @property
+    def module_(self) -> Any:
+        """
+        Returns the module structure of the first ensemble member.
+        """
+        return self.ensemble_models[0].module_
+
     def fit(self, x: Any, y: Any, **kwargs) -> "DeepEnsemble":
         """
         Trains each model in the ensemble to the provided data.

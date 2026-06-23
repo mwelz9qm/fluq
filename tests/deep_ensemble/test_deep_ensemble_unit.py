@@ -54,8 +54,13 @@ def test_predict_with_uncertainty_heteroscedastic():
     np.testing.assert_allclose(res["mean"], [[2.0], [4.0]])
     # epistemic var = var of means
     np.testing.assert_allclose(res["epistemic_var"], [[1.0], [1.0]])
-    # aleatoric var = mean of variances
-    np.testing.assert_allclose(res["aleatoric_var"], [[0.2], [0.3]])
+    # aleatoric var = mean of softplus-transformed variances
+    softplus = lambda x: np.log(1.0 + np.exp(x)) + 1e-6
+    expected_aleatoric = [
+        [(softplus(0.1) + softplus(0.3)) / 2],
+        [(softplus(0.2) + softplus(0.4)) / 2]
+    ]
+    np.testing.assert_allclose(res["aleatoric_var"], expected_aleatoric)
 
 
 def test_predict_with_uncertainty_classification():
