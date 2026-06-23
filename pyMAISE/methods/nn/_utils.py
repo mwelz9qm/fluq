@@ -21,6 +21,20 @@ ACTIVATION_MAP = {
 }
 
 
+def validate_output_shape(y_pred, y_true):
+    """
+    When using NLL as the loss function, the output layer must be **double** the size of the
+    number of outputs. If the shape of the predictions do not match this, raise an error so
+    that other systems do not fail unexpectedly.
+    """
+    if y_pred.shape[-1] != 2 * y_true.shape[-1]:
+        raise ValueError(
+            f"Gaussian NLL loss expects the network's final output dimension ({y_pred.shape[-1]}) "
+            f"to be exactly double the target dimension ({y_true.shape[-1]} * 2 = {2 * y_true.shape[-1]}). "
+            f"Please update your final output layer 'units' to match this."
+        )
+
+
 def split_mean_var(output):
     """
     Splits a (..., 2*n_targets) tensor into mean and variance halves for
@@ -58,6 +72,7 @@ class _GaussianNLLCriterion(nn.Module):
         self._nll = nn.GaussianNLLLoss()
 
     def forward(self, y_pred, y_true):
+        validate_output_shape(y_pred, y_true)
         mean, var = split_mean_var(y_pred)
         return self._nll(mean, y_true, var)
 

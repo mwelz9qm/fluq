@@ -97,6 +97,7 @@ def test_record_history():
     assert ensemble.history[1, "train_loss"] == 1.0 
     assert ensemble.history[1, "valid_loss"] == 1.5 
 
+
 if __name__ == "__main__":
     test_predict_with_uncertainty_regression()
     test_predict_with_uncertainty_heteroscedastic()

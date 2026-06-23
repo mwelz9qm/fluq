@@ -95,9 +95,9 @@ def test_deep_ensemble_regression():
     assert uncertainty_results["predictions"].shape == (3, xtest.shape[0], ytrain.shape[-1])
     assert uncertainty_results["mean"].shape == (xtest.shape[0], ytrain.shape[-1])
     assert uncertainty_results["epistemic_var"].shape == (xtest.shape[0], ytrain.shape[-1])
-    assert uncertainty_results["aleatoric_var"] is None  # TODO
+    assert uncertainty_results["aleatoric_var"] is None
 
-    # ---- NLL Test Example (Commented out) ----
+    # NLL Test
     parameters["DeepEnsemble"]["compile_params"]["loss"] = "nll"
     # # Need double the outputs for heteroscedastic NLL
     parameters["DeepEnsemble"]["structural_params"]["Dense_2"]["units"] = ytrain.shape[-1] * 2
