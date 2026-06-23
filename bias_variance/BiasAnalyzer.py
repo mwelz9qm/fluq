@@ -1,3 +1,6 @@
+import os
+import datetime
+import h5py
 import pandas as pd
 import numpy as np
 import tensorflow as tf
@@ -31,6 +34,21 @@ class BiasAnalyzerConfigMeta(type):
             'mae' : MeanAbsoluteError(name='mae'),
             'r2' : R2Score(name='r2')
         }
+    
+    @property
+    def RESULTS_FILENAME(cls):
+        '''
+        Returns the saved results dataframe filename (w/ file extension) for later analysis.
+        '''
+        return 'bias_variance_results.csv'
+    
+    @property
+    def FIT_ITERATIONS_DIR_NAME(cls):
+        '''
+        Returns directory name for saved predictions and actuals from model training/fitting.
+        '''
+        return 'iterations'
+
 
 # General workflow
 # analyzer = BiasAnalyzer(...)
@@ -70,9 +88,6 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
     random_state : int | None = None
         Seed used for reproducibility.
 
-    is_predicitons_saved : bool = True
-        Determines if raw predictions are stored.
-
     _model: tensorflow.keras.Model | None = None
         Holds the base model.
     
@@ -81,9 +96,6 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
     
     _results_df: pandas.DataFrame | None = None
         Caches the results after a study has ran.
-    
-    _predictions_df: pandas.DataFrame | None = None
-        Caches the predictions after a study has ran.
     
 
     Questions
@@ -122,23 +134,30 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         },
         test_size: float = 0.2,
         random_state: int | None = None,
-        is_predictions_saved: bool = False,
         _model: tf.keras.Model | None = None,
         _init_weights: list[np.ndarray] | None = None,
         _results_df: pd.DataFrame | None = None,
-        _predictions_df: pd.DataFrame | None = None,
     ) -> None:
         self.inputs_df = inputs_df
         self.outputs_df = outputs_df
         self.model_settings = model_settings
         self.test_size = test_size
         self.random_state = random_state
-        self.is_predictions_saved = is_predictions_saved
         self._model = _model
         self._init_weights = _init_weights
         self._results_df = _results_df
-        self._predictions_df = _predictions_df
 
+    def _init_results_csv(self):
+        '''
+        Initializes the results csv file.
+        '''
+        if os.path.exists(BiasAnalyzer.RESULTS_FILENAME):
+            self._results_df = pd.read_csv(BiasAnalyzer.RESULTS_FILENAME)
+        else:
+            columns = ['run_id', 'timestamp']
+            columns.append(list(BiasAnalyzer.METRIC_OPTIONS.keys()))
+            self._results_df = pd.DataFrame(columns=columns)
+        os.makedirs(BiasAnalyzer.FIT_ITERATIONS_DIR_NAME, exist_ok=True)
 
     def _init_model(self):
         '''
@@ -161,6 +180,29 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             )
             # store initial weights when model needs to be retrained
             self._init_weights = self._model.get_weights()
+
+    def _save_predictions_and_actuals(self, X_test, y_test):
+        '''
+        Saves the predictions and actuals from a given trained model.
+
+        Parameters
+        -------------
+        X_test
+            Input data from test set.
+        
+        y_test
+            Output data from test set.
+
+        Returns
+        --------------
+        None
+        '''
+        predictions = self._model.predict(X_test)
+        run_id = f'run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}'
+        pred_file_path = f'{BiasAnalyzer.FIT_ITERATIONS_DIR_NAME}/{run_id}.h5'
+        with h5py.File(pred_file_path, 'w') as hf:
+            hf.create_dataset('predictions', data=predictions)
+            hf.create_dataset('actuals', data=y_test)
 
     def _train_and_evaluate_model(self, X_train, y_train, X_test, y_test) -> dict:
         '''
@@ -193,10 +235,14 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             epochs=self.model_settings['epochs'],
             verbose=self.model_settings['verbose']
         )
+
+        # save predictions
+        self._save_predictions_and_actuals(X_test, y_test)
+
         # evaluate
-        results = self._model.evaluate(X_test, y_test, batch_size=self.model_settings['batch_size'], return_dict=True)
+        scores = self._model.evaluate(X_test, y_test, batch_size=self.model_settings['batch_size'], return_dict=True)
         
-        return results
+        return scores
 
 
     def run_model_bias_study(
@@ -327,7 +373,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                         'study': 'sampling',
                         'sampling_method': 'bootstrap',
                     } | self._train_and_evaluate_model(X_train, y_train, X_test, y_test)
-                    results_df = pd.concat([results_df, pd.DataFrame([results_row])])
+                    results_df = pd.concat([results_df, pd.DataFrame([results_row])], ignore_index=True)
 
             # Same structure applied as in 'bootstrap' method
             if strategy.lower() == 'lhs':
@@ -340,7 +386,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                         'study': 'sampling',
                         'sampling_method': 'lhs',
                     } | self._train_and_evaluate_model(X_train, y_train, X_test, y_test)
-                    results_df = pd.concat([results_df, pd.DataFrame([results_row])])
+                    results_df = pd.concat([results_df, pd.DataFrame([results_row])], ignore_index=True)
             
             if strategy.lower() == 'stratified':
                 # create the stratified column based on quantile rank on the selected index
@@ -361,10 +407,11 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                         'study': 'sampling',
                         'sampling_method': 'stratified',
                     } | self._train_and_evaluate_model(X_train, y_train, X_test, y_test)
-                    results_df = pd.concat([results_df, pd.DataFrame([results_row])])
+                    results_df = pd.concat([results_df, pd.DataFrame([results_row])], ignore_index=True)
                 # remove stratified column after getting results
                 dataset_df.drop(columns=stratified_col_name)
             
+        self.results_df.to_csv(BiasAnalyzer.RESULTS_FILENAME, index=False)
         self.results_df = results_df # copy results
         
 
@@ -415,25 +462,6 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         -------------
         pandas.DataFrame
             Summary results from each study.
-        '''
-        pass
-    
-    def export_results(
-        self,
-        filepath:str = 'results.csv'
-    ) -> None:
-        '''
-        To export the results of previous runs to a CSV file. If no runs were performed,
-        the exporter should not create a new file.
-
-        Parameters
-        -----------
-        filepath : str, default = 'results.csv'
-            Filepath of CSV file to be saved.
-
-        Returns
-        -----------
-        None
         '''
         pass
     
