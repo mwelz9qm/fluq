@@ -1,7 +1,7 @@
 import inspect
 import pandas as pd
 from collections.abc import Callable
-from typing  import Generic, ParamSpec, TypeVar
+from typing import Generic, ParamSpec, TypeVar
 
 # Define type variables for argument signatures and return types
 P = ParamSpec('P')
@@ -17,9 +17,9 @@ class Sampler(Generic[P, R]):
         The list of sampling stategies used to generate a new dataset.
     '''
     def __init__(self):
-        self.strategies: list[tuple[str, Callable[P, R], tuple, dict]] = []
+        self.strategies: list[tuple[str, Callable[P, R], dict]] = []
 
-    def __init__(self, strategies: list[tuple[str, Callable[P, R], tuple, dict]]):
+    def __init__(self, strategies: list[tuple[str, Callable[P, R], dict]]):
         self.strategies = strategies
     
     def add_strategy(self, label: str, sampling_func: Callable[P, R], **kwargs: P.kwargs) -> 'Sampler':
