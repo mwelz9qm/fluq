@@ -1,3 +1,4 @@
+import inspect
 import pandas as pd
 from collections.abc import Callable
 from typing  import Generic, ParamSpec, TypeVar
@@ -21,11 +22,11 @@ class Sampler(Generic[P, R]):
     def __init__(self, strategies: list[tuple[str, Callable[P, R], tuple, dict]]):
         self.strategies = strategies
     
-    def add_strategy(self, label: str, sampling_func: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> 'Sampler':
+    def add_strategy(self, label: str, sampling_func: Callable[P, R], **kwargs: P.kwargs) -> 'Sampler':
         '''
         Adds a sampling function for the Sampler to apply and generate new datasets.
         '''
-        self.strategies.append((label, sampling_func, args, kwargs))
+        self.strategies.append((label, sampling_func, kwargs))
         return self
     
     def remove_strategy(self, label: str) -> 'Sampler':
@@ -35,12 +36,20 @@ class Sampler(Generic[P, R]):
         self.strategies = [strategy for strategy in self.strategies if label not in strategy]
         return self
     
-    def generate(self, df: pd.DataFrame) ->  dict[str, pd.DataFrame]:
+    def generate(self, df: pd.DataFrame, injected_kwargs: dict | None = None) ->  dict[str, pd.DataFrame]:
         '''
         Generates datasets with the provided strategies. Set strategies via the constructor or
         with the add_strategy() method.
         '''
+        injected_kwargs = injected_kwargs or {}
         sample_sets = {}
-        for label, sampling_func, args, kwargs in self.strategies:
-            sample_sets[label] = sampling_func(df.copy(), *args, **kwargs)
+        for label, sampling_func, kwargs in self.strategies:
+            final_kwargs  = kwargs.copy()
+            sig = inspect.signature(sampling_func)
+            # Loop through injected_kwargs and add to final_kwargs if not defined
+            # to prevent overwriting
+            for key, value in injected_kwargs.items():
+                if key in sig.parameters and key not in final_kwargs:
+                    final_kwargs[key] = value
+            sample_sets[label] = sampling_func(df.copy(), **final_kwargs)
         return sample_sets
