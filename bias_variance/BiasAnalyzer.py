@@ -14,11 +14,6 @@ from keras.metrics import (
 )
 from keras.models import Model
 from sklearn.model_selection import train_test_split
-from common.sampling._sampling import (
-    get_random_samples,
-    get_stratified_random_samples,
-    generate_latin_hypercube_samples
-)
 from common.sampling.Sampler import Sampler
 
 class BiasAnalyzerConfigMeta(type):
@@ -116,18 +111,6 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
 
     Questions
     ------------
-    - Should we store the prediction results in the BiasAnalyzer class as pandas dataframes? Or,
-    should they be exported as a csv for deeper analysis? - I think internally, the data should be 
-    stored as a pandas DataFrame, for the time being, since DataFrames make filtering, grouping, 
-    variance analysis, plotting, and statistics much easier to view and implement. It is still a 
-    good idea to implement exporting the results to a CSV for saving results later.
-    
-    - For study runs, should this return the ran BiasAnalyzer object with altered attributes or keep as same object with updated attributes?
-    * This will consequently change our workflow i.e.,
-        analyzer = BiasAnalyzer(...)
-        analyzer_ran_study = analyzer.run_study(...) \\ OR analyzer = analyzer.run_study(...).copy()
-        analyzer_ran_study.decompose_variance()
-    
     - Should we select all plots by default or only select the best representation w/ an auto selection feature?
     '''
 
@@ -371,10 +354,10 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                     BiasAnalyzer.STUDY_FIELD_NAME: 'sampling',
                     BiasAnalyzer.VARIABLE_FIELD_NAME: label
                 } | self._train_and_evaluate_model(X_train, y_train, X_test, y_test)
-                results_df = pd.concat([results_df,pd.DataFrame[results_row]], ignore_index=True)
+                results_df = pd.concat([results_df, pd.DataFrame([results_row])], ignore_index=True)
             
-        self.results_df.to_csv(BiasAnalyzer.RESULTS_FILENAME, index=False)
-        self.results_df = results_df # copy results
+        self._results_df = results_df # copy results
+        self._results_df.to_csv(BiasAnalyzer.RESULTS_FILENAME, index=False) # then export to csv
 
         return self
         
@@ -433,28 +416,57 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             Summary results from each study. Contains averages, maximums, minimums, and
             confidence intervals for each metric.
         '''
-        df = pd.read_csv(BiasAnalyzer.RESULTS_FILENAME)
+        # Error conditions
+        if confidence <= 0 or confidence >= 1:
+            raise ValueError('confidence must be between 0 and 1.')
+
+        df = self._results_df
+        if df is None:
+            df = pd.read_csv(BiasAnalyzer.RESULTS_FILENAME)
+        
         views = {}
 
-        for group_name, group_df in df.groupby(BiasAnalyzer.STUDY_FIELD_NAME):
-            if group_name not in view:
+        for study_group_name, study_group_df in df.groupby(BiasAnalyzer.STUDY_FIELD_NAME):
+            if study_group_name not in view:
                 continue
-            averages = {}
-            maximums = {}
-            minimums = {}
-            confidence_intervals = {}
-            for col_name in group_df.columns[2:]:
-                col_data = group_df[col_name]
-                averages[col_name] = col_data.mean()
-                maximums[col_name] = col_data.max()
-                minimums[col_name] = col_data.min()
-                confidence_intervals[col_name] = stats.norm.interval(confidence, loc=np.mean(col_data), scale=stats.sem(col_data))
-            views[group_name] = {
-                'averages': averages,
-                'maximums': maximums,
-                'minimums': minimums,
-                'confidence_intervals': confidence_intervals
-            }
+
+            views[study_group_name] = {}
+            for var_group_name, var_group_df in study_group_df.groupby(BiasAnalyzer.VARIABLE_FIELD_NAME):
+                metric_cols = [
+                    col for col in var_group_df.columns
+                    if col not in {
+                        BiasAnalyzer.STUDY_FIELD_NAME,
+                        BiasAnalyzer.VARIABLE_FIELD_NAME,
+                        'run_id',
+                        'timestamp'
+                    }
+                ]
+
+                averages = {}
+                maximums = {}
+                minimums = {}
+                confidence_intervals = {}
+                for col_name in metric_cols:
+                    col_data = var_group_df[col_name].dropna()
+                    averages[col_name] = col_data.mean()
+                    maximums[col_name] = col_data.max()
+                    minimums[col_name] = col_data.min()
+
+                    if len(col_data) > 1:
+                        confidence_intervals[col_name] = stats.norm.interval(
+                            confidence, loc=col_data.mean(), scale=stats.sem(col_data)
+                        )
+                    else:
+                        confidence_intervals[col_name] = (np.nan, np.nan)
+                
+                views[study_group_name][var_group_name] = {
+                    var_group_name: {
+                        'averages': averages,
+                        'maximums': maximums,
+                        'minimums': minimums,
+                        'confidence_intervals': confidence_intervals
+                    }
+                }
         
         return views
 
