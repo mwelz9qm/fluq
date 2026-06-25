@@ -181,7 +181,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             # store initial weights when model needs to be retrained
             self._init_weights = self._model.get_weights()
 
-    def _save_predictions_and_actuals(self, X_test, y_test):
+    def _save_predictions_and_actuals(self, predictions, y_test):
         '''
         Saves the predictions and actuals from a given trained model.
 
@@ -197,7 +197,6 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         --------------
         None
         '''
-        predictions = self._model.predict(X_test)
         run_id = f'run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}'
         pred_file_path = f'{BiasAnalyzer.FIT_ITERATIONS_DIR_NAME}/{run_id}.h5'
         with h5py.File(pred_file_path, 'w') as hf:
@@ -224,7 +223,8 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
 
         Returns
         ----------------
-        A dictionary object with the loss and metric values defined in self.model_settings.
+        A dictionary object with the loss and metric values defined in self.model_settings,
+        and the mean and variance on the predictions.
         '''
         # reset weights
         self._model.set_weights(self._init_weights)
@@ -236,13 +236,17 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             verbose=self.model_settings['verbose']
         )
 
-        # save predictions
-        self._save_predictions_and_actuals(X_test, y_test)
+        predictions = self._model.predict(X_test)
+
+        # save predictions and actuals in directory
+        self._save_predictions_and_actuals(predictions, y_test)
 
         # evaluate
         scores = self._model.evaluate(X_test, y_test, batch_size=self.model_settings['batch_size'], return_dict=True)
+        variance = np.var(predictions)
+        mean = np.mean(predictions)
         
-        return scores
+        return scores | {'variance': variance} | {'mean': mean}
 
 
     def run_model_bias_study(
