@@ -13,7 +13,7 @@ class Sampler(Generic[P, R]):
 
     Parameters
     ------------------
-    strategies: list[tuple[str, Callable[P, R], tuple, dict]]
+    strategies: list[tuple[str, Callable[P, R], dict]]
         The list of sampling stategies used to generate a new dataset.
     '''
     def __init__(self):
