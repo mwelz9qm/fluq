@@ -156,6 +156,92 @@ def get_stratified_random_samples(
     
     # remove the rows (trimming sample set) and return samples
     return samples_df.drop(drop_indicies)
+
+
+def get_quantile_stratified_random_samples(
+    dataset: pd.DataFrame,
+    *,
+    stratify_col_index: int | None = None,
+    stratify_col_name: str | None = None,
+    n_bins: int = 4,
+    n_samples: int | None = None,
+    sample_fraction: float | None = None,
+    random_state: int | None = None,
+    with_replacement: bool = False,
+) -> pd.DataFrame:
+    '''
+    To sample and return n random samples from a given dataset. Samples are chosen based on a stratified column name or
+    index within the dataset. The stratified column partitions the dataset into stratas, based on quantile rankings.
+
+    Parameters
+    -------------
+    dataset : pandas.DataFrame
+        Base dataset to sample from.
+
+    stratify_col_index: int | None = None
+        Specified column to stratify the dataset. The column must contain numerical values. You must
+        provide exactly one of stratify_col_index or stratify_col_name.
+
+    stratify_col_name : str | None = None
+        Specified column to stratify the dataset. The column must contain numerical values. You must
+        provide exactly one of stratify_col_index or stratify_col_name.
+
+    n_bins : int | None = 4
+        Number of quantile ranks applied on the stratify column data.
+
+    n_samples : int | None = None
+        Number of samples to return. Is mutually exclusive with sample_fraction.
+    
+    sample_fraction : float | None = None
+        Size of sample set to return as a fraction of dataset. Is mutually exclusive with n_samples.
+
+    random_state : int | None = None
+        Specify seed for reproducibility.
+
+    with_replacement : bool
+        Determines if samples include repeated values.
+    
+    Returns
+    -------------
+    pandas.DataFrame
+        The sampled dataset.
+    '''
+    # Error conditions
+    if (stratify_col_index is None) == (stratify_col_name is None):
+        raise ValueError(
+            'Provide exactly one of stratify_col_index or stratify_col_name.'
+        )
+
+    stratified_df = dataset.copy()
+    quantile_col_name = '__quantile_strata__'
+
+    if quantile_col_name in stratified_df.columns:
+        raise ValueError(f'Temporary column name {quantile_col_name!r} already exists.')
+
+    if stratify_col_index is not None:
+        stratify_values = stratified_df.iloc[:, stratify_col_index]
+    else:
+        stratify_values = stratified_df[stratify_col_name]
+
+    # Create new column based on quantile ranking.
+    stratified_df[quantile_col_name] = pd.qcut(
+        stratify_values,
+        q=n_bins,
+        labels=False,
+        duplicates='drop', # Safeguard in case bin edges happen to be equal since qcut() enforces unique bin edges.
+    )
+
+    # Get samples
+    samples_df = get_stratified_random_samples(
+        stratified_df,
+        stratified_column_name=quantile_col_name,
+        n_samples=n_samples,
+        sample_fraction=sample_fraction,
+        random_state=random_state,
+        with_replacement=with_replacement,
+    )
+
+    return samples_df.drop(columns=quantile_col_name) # Remove quantile column after sampling.
     
 def generate_latin_hypercube_samples(
         regressor_dataset: pd.DataFrame,
