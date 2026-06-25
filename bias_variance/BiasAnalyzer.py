@@ -3,6 +3,7 @@ import datetime
 import h5py
 import pandas as pd
 import numpy as np
+import scipy.stats as stats
 import tensorflow as tf
 from keras.layers import Input, Dense
 from keras.metrics import (
@@ -48,6 +49,20 @@ class BiasAnalyzerConfigMeta(type):
         Returns directory name for saved predictions and actuals from model training/fitting.
         '''
         return 'iterations'
+    
+    @property
+    def STUDY_FIELD_NAME(cls):
+        '''
+        Returns study field name for results table.
+        '''
+        return 'study'
+    
+    @property
+    def VARIABLE_FIELD_NAME(cls):
+        '''
+        Returns variable field name for results table. This is dependent on the type of study.
+        '''
+        return 'variable'
 
 
 # General workflow
@@ -374,8 +389,8 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                     X_train, X_test, y_train, y_test = train_test_split(bootstrap_inputs_df, bootstrap_outputs_df, test_size=self.test_size, random_state=self.random_state+i) # NOTE: Should random_state vary in train_test_split() at each step?
                     # build results content for results_df
                     results_row = {
-                        'study': 'sampling',
-                        'sampling_method': 'bootstrap',
+                        BiasAnalyzer.STUDY_FIELD_NAME: 'sampling',
+                        BiasAnalyzer.VARIABLE_FIELD_NAME: 'bootstrap',
                     } | self._train_and_evaluate_model(X_train, y_train, X_test, y_test)
                     results_df = pd.concat([results_df, pd.DataFrame([results_row])], ignore_index=True)
 
@@ -387,8 +402,8 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                     lhs_outputs_df = lhs_df[self.outputs_df.columns]
                     X_train, X_test, y_train, y_test = train_test_split(lhs_inputs_df, lhs_outputs_df, test_size=self.test_size, random_state=self.random_state+i)
                     results_row = {
-                        'study': 'sampling',
-                        'sampling_method': 'lhs',
+                        BiasAnalyzer.STUDY_FIELD_NAME: 'sampling',
+                        BiasAnalyzer.VARIABLE_FIELD_NAME: 'lhs',
                     } | self._train_and_evaluate_model(X_train, y_train, X_test, y_test)
                     results_df = pd.concat([results_df, pd.DataFrame([results_row])], ignore_index=True)
             
@@ -408,8 +423,8 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                     stratified_outputs_df = stratified_df[self.outputs_df.columns]
                     X_train, X_test, y_train, y_test = train_test_split(stratified_inputs_df, stratified_outputs_df, test_size=self.test_size, random_state=self.random_state+i)
                     results_row = {
-                        'study': 'sampling',
-                        'sampling_method': 'stratified',
+                        BiasAnalyzer.STUDY_FIELD_NAME: 'sampling',
+                        BiasAnalyzer.VARIABLE_FIELD_NAME: 'stratified',
                     } | self._train_and_evaluate_model(X_train, y_train, X_test, y_test)
                     results_df = pd.concat([results_df, pd.DataFrame([results_row])], ignore_index=True)
                 # remove stratified column after getting results
@@ -451,8 +466,10 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
 
     def decompose_variance(
         self,
-        view:list[str]=['model','sampling','data']
-    ) -> pd.DataFrame:
+        view:list[str]=['model','sampling','data'],
+        *,
+        confidence: float = 0.95
+    ) -> dict:
         '''
         To provide a breakdown of bias variance of previous runs. If no runs were performed,
         the analyzer should not provide any results.
@@ -461,13 +478,41 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         -------------
         view : list[str], default = ['model','sampling','data']
             The selection of variances to view.
+        
+        confidence : float, default = 0.95
+            The confidence level for each metric.
 
         Returns
         -------------
-        pandas.DataFrame
-            Summary results from each study.
+        dict
+            Summary results from each study. Contains averages, maximums, minimums, and
+            confidence intervals for each metric.
         '''
-        pass
+        df = pd.read_csv(BiasAnalyzer.RESULTS_FILENAME)
+        views = {}
+
+        for group_name, group_df in df.groupby(BiasAnalyzer.STUDY_FIELD_NAME):
+            if group_name not in view:
+                continue
+            averages = {}
+            maximums = {}
+            minimums = {}
+            confidence_intervals = {}
+            for col_name in group_df.columns[2:]:
+                col_data = group_df[col_name]
+                averages[col_name] = col_data.mean()
+                maximums[col_name] = col_data.max()
+                minimums[col_name] = col_data.min()
+                confidence_intervals[col_name] = stats.norm.interval(confidence, loc=np.mean(col_data), scale=stats.sem(col_data))
+            views[group_name] = {
+                'averages': averages,
+                'maximums': maximums,
+                'minimums': minimums,
+                'confidence_intervals': confidence_intervals
+            }
+        
+        return views
+
     
     def plot_disagreement_map(
         self,
