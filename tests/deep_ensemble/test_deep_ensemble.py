@@ -329,10 +329,87 @@ def test_deep_ensemble_postprocessor():
     ax_learn = post_processor.nn_learning_plot(model_type="DeepEnsemble")
     assert ax_learn is not None
 
+def test_deep_ensemble_pickle():
+    """ Verify DeepEnsemble can be saved and reloaded via pickle with no custom save/load methods."""
+    import pickle
+
+    mai.init(
+        problem_type=mai.ProblemType.REGRESSION,
+        random_state=42,
+        num_configs_saved=1,
+        verbosity=0,
+    )
+
+    data = simulate_regression_data()
+    xtrain, xtest, ytrain, ytest = data
+
+    parameters = {
+        "models": ["DeepEnsemble"],
+        "DeepEnsemble": {
+            "num_models": 2,
+            "structural_params": {
+                "Dense_1": {
+                    "units": 8,
+                    "activation": "relu",
+                },
+                "Dense_2": {
+                    "units": ytrain.shape[-1],
+                    "activation": "linear",
+                },
+            },
+            "optimizer": "Adam",
+            "Adam": {
+                "learning_rate": 1e-3,
+            },
+            "compile_params": {
+                "loss": "mean_absolute_error",
+            },
+            "fitting_params": {
+                "epochs": 1,
+                "batch_size": 16,
+            },
+        },
+    }
+
+    tuner = mai.Tuner(xtrain, ytrain, model_settings=parameters)
+    results = tuner.nn_grid_search(objective="r2_score", cv=2)
+
+    post_processor = PostProcessor(data=data, model_configs=[results])
+    post_processor.metrics()
+    model = post_processor.get_model(model_type="DeepEnsemble")
+
+    # Predictions before picking
+    original_preds = model.predict(xtest.values)
+    original_uncertainty = model.predict_with_uncertainty(xtest.values)
+
+    # Round-trip through pickle
+    # save_models()/load_models()
+    pickled = pickle.dumps(model)
+    reloaded_model = pickle.loads(pickled)
+
+    assert isinstance(reloaded_model, DeepEnsemble)
+    assert len(reloaded_model.ensemble_models) == len(model.ensemble_models)
+
+    # Reloaded predictions must match the original exactly
+    reloaded_preds = reloaded_model.predict(xtest.values)
+    np.testing.assert_allclose(reloaded_preds, original_preds)
+
+    reloaded_uncertainty = reloaded_model.predict_with_uncertainty(xtest.values)
+    np.testing.assert_allclose(
+        reloaded_uncertainty["mean"], original_uncertainty["mean"]
+    )
+    np.testing.assert_allclose(
+        reloaded_uncertainty["epistemic_var"], original_uncertainty["epistemic_var"]
+    )
+
+    # module_ property (added for skorch-style compatibility) should also
+    # survive the round-trip, since downstream PostProcessor code relies on it.
+    assert reloaded_model.module_ is not None
 
 if __name__ == "__main__":
     test_deep_ensemble_regression()
     test_deep_ensemble_classification()
     test_deep_ensemble_hyperparameter_propagation()
     test_deep_ensemble_postprocessor()
+    test_deep_ensemble_pickle()
 
