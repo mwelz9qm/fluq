@@ -326,7 +326,7 @@ class Tuner:
 
             # TODO NEW ================================================================================================
             # Instantiate a DeepEnsemble
-            elif model == "DeepEnsemble":
+            elif model in ("DeepEnsemble", "DE"):
                 from deep_ensembles import DeepEnsembleHyperModel
 
                 num_models = 5

@@ -37,7 +37,7 @@ def test_predict_with_uncertainty_regression():
     
     np.testing.assert_allclose(res["mean"], [[2.0, 3.0], [4.0, 5.0]])
     np.testing.assert_allclose(res["epistemic_var"], [[1.0, 1.0], [1.0, 1.0]])
-    assert res["aleatoric_var"] is None   # TODO
+    assert res["aleatoric_var"] is None
 
 
 def test_predict_with_uncertainty_heteroscedastic():
