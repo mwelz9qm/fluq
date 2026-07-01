@@ -13,14 +13,12 @@ class Sampler(Generic[P, R]):
 
     Parameters
     ------------------
-    strategies: list[tuple[str, Callable[P, R], dict]]
+    strategies: list[tuple[str, Callable[P, R], dict]] | None = None
         The list of sampling stategies used to generate a new dataset.
     '''
-    def __init__(self):
-        self.strategies: list[tuple[str, Callable[P, R], dict]] = []
 
-    def __init__(self, strategies: list[tuple[str, Callable[P, R], dict]]):
-        self.strategies = strategies
+    def __init__(self, strategies: list[tuple[str, Callable[P, R], dict]] | None = None):
+        self.strategies = strategies if strategies is not None else []
     
     def add_strategy(self, label: str, sampling_func: Callable[P, R], **kwargs: P.kwargs) -> 'Sampler':
         '''
@@ -33,7 +31,7 @@ class Sampler(Generic[P, R]):
         '''
         Removes a sampling function from the Sampler.
         '''
-        self.strategies = [strategy for strategy in self.strategies if label not in strategy]
+        self.strategies = [strategy for strategy in self.strategies if strategy[0] != label]
         return self
     
     def generate(self, df: pd.DataFrame, injected_kwargs: dict | None = None) ->  dict[str, pd.DataFrame]:
