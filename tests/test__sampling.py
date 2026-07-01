@@ -4,6 +4,7 @@ import pytest
 
 from common.sampling._sampling import (
     generate_latin_hypercube_samples,
+    get_quantile_stratified_random_samples,
     get_random_samples,
     get_stratified_random_samples,
 )
@@ -171,6 +172,112 @@ def test_get_stratified_random_samples_rejects_unknown_column(sample_data):
             stratified_column_name="missing",
             n_samples=3,
             random_state=42,
+        )
+
+
+@pytest.mark.parametrize(
+    "stratify_by",
+    [
+        {"stratify_col_name": "feature_1"},
+        {"stratify_col_index": 0},
+    ],
+)
+def test_get_quantile_stratified_random_samples_returns_balanced_quantiles(
+    sample_data, stratify_by
+):
+    samples = get_quantile_stratified_random_samples(
+        sample_data,
+        n_bins=3,
+        n_samples=6,
+        random_state=42,
+        **stratify_by,
+    )
+    quantile_labels = pd.qcut(
+        sample_data["feature_1"], q=3, labels=False, duplicates="drop"
+    )
+
+    assert len(samples) == 6
+    assert quantile_labels.loc[samples.index].value_counts().to_dict() == {
+        0: 2,
+        1: 2,
+        2: 2,
+    }
+    pd.testing.assert_frame_equal(samples, sample_data.loc[samples.index])
+
+
+def test_get_quantile_stratified_random_samples_fraction(sample_data):
+    samples = get_quantile_stratified_random_samples(
+        sample_data,
+        stratify_col_name="feature_1",
+        n_bins=3,
+        sample_fraction=0.5,
+        random_state=42,
+    )
+
+    assert len(samples) == 6
+
+
+def test_get_quantile_stratified_random_samples_is_reproducible(sample_data):
+    kwargs = {
+        "stratify_col_name": "feature_1",
+        "n_bins": 3,
+        "n_samples": 7,
+        "random_state": 17,
+    }
+
+    first = get_quantile_stratified_random_samples(sample_data, **kwargs)
+    second = get_quantile_stratified_random_samples(sample_data, **kwargs)
+
+    pd.testing.assert_frame_equal(first, second)
+
+
+@pytest.mark.parametrize(
+    "stratify_by",
+    [
+        {},
+        {"stratify_col_index": 0, "stratify_col_name": "feature_1"},
+    ],
+)
+def test_get_quantile_stratified_random_samples_requires_one_stratify_column(
+    sample_data, stratify_by
+):
+    with pytest.raises(ValueError, match="Provide exactly one"):
+        get_quantile_stratified_random_samples(
+            sample_data, n_samples=3, **stratify_by
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "exception"),
+    [
+        ({}, TypeError),
+        ({"n_samples": 2, "sample_fraction": 0.5}, TypeError),
+        ({"n_samples": 0}, ValueError),
+        ({"n_samples": 13}, ValueError),
+        ({"sample_fraction": 0}, ValueError),
+        ({"sample_fraction": 1.1}, ValueError),
+    ],
+)
+def test_get_quantile_stratified_random_samples_rejects_invalid_sample_arguments(
+    sample_data, kwargs, exception
+):
+    with pytest.raises(exception):
+        get_quantile_stratified_random_samples(
+            sample_data, stratify_col_name="feature_1", n_bins=3, **kwargs
+        )
+
+
+def test_get_quantile_stratified_random_samples_rejects_temporary_column_name():
+    data = pd.DataFrame(
+        {
+            "value": np.arange(8),
+            "__quantile_strata__": np.arange(8),
+        }
+    )
+
+    with pytest.raises(ValueError, match="Temporary column name"):
+        get_quantile_stratified_random_samples(
+            data, stratify_col_name="value", n_samples=4, random_state=42
         )
 
 
