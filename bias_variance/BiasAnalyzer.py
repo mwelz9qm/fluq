@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import scipy.stats as stats
 import tensorflow as tf
+import matplotlib.pyplot as plt
 from keras.layers import Input, Dense
 from keras.metrics import (
     R2Score,
@@ -15,6 +16,12 @@ from keras.metrics import (
 from keras.models import Model
 from sklearn.model_selection import train_test_split
 from common.sampling.Sampler import Sampler
+from bias_variance._plotting import (
+    plot_mean_distribution,
+    plot_prediction_means_by_r2_scores,
+    plot_variance_contribution,
+    plot_variance_distribution,
+)
 
 class BiasAnalyzerConfigMeta(type):
     '''
@@ -188,7 +195,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         -------------
         X_test
             Input data from test set.
-        
+
         y_test
             Output data from test set.
 
@@ -470,12 +477,17 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         
         return views
 
+    def _get_result_df(self):
+        results_df = self._results_df
+        if results_df is None:
+            results_df = pd.read_csv(BiasAnalyzer.RESULTS_FILENAME)
+        return results_df
     
     def plot_disagreement_map(
         self,
-        view:list[str] = ['model','sampling','data'],
-        plot_type:list[str] = ['heatmap','histogram','KDE','uncertainty_bands','scatter_disagreement'],
-        plot_setttings:dict | None = None
+        view:list[str] | None = None,
+        plot_type:list[str] | None = None,
+        plot_settings:dict | None = None
     ) -> None:
         '''
         To provide a plot of bias variance results of previous runs. If no runs were performed,
@@ -493,4 +505,40 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         -------------
         None
         '''
-        pass
+        # variance-contribution
+        view = view or ['model', 'sampling', 'data']
+        plot_type = plot_type or ['variance_contribution']
+
+        results_df = self._get_result_df()
+        filtered_df = results_df[results_df[BiasAnalyzer.STUDY_FIELD_NAME].isin(view)]
+
+        if filtered_df.empty:
+            raise ValueError(
+                'No results are available for the selected studies.'
+            )
+
+        if 'variance_contribution' in plot_type:
+            plot_variance_contribution(
+                filtered_df,
+                settings=plot_settings,
+            )
+
+        if 'prediction_means_by_r2_scores' in plot_type:
+            plot_prediction_means_by_r2_scores(
+                filtered_df,
+                settings=plot_settings,
+            )
+
+        if 'variance_distribution' in plot_type:
+            plot_variance_distribution(
+                filtered_df,
+                settings=plot_settings,
+            )
+
+        if 'mean_distribution' in plot_type:
+            plot_mean_distribution(
+                filtered_df,
+                settings=plot_settings,
+            )
+
+        plt.show()
