@@ -60,89 +60,25 @@ def _numeric_values(results_df: pd.DataFrame, column: str) -> pd.Series:
     return values
 
 
-def _mean_confidence_bounds(
-        results_df: pd.DataFrame,
-        settings: dict,
-) -> tuple[pd.Series, pd.Series]:
-    """Find lower and upper mean-confidence bounds in common result schemas."""
-    lower_col = settings.get('lower_bound_col')
-    upper_col = settings.get('upper_bound_col')
-    if (lower_col is None) != (upper_col is None):
-        raise ValueError(
-            'Both lower_bound_col and upper_bound_col must be provided.'
-        )
-
-    column_pairs = [
-        (lower_col, upper_col),
-        ('conf_interval_lower', 'conf_interval_upper'),
-        ('mean_ci_lower', 'mean_ci_upper'),
-        ('mean_confidence_lower', 'mean_confidence_upper'),
-        ('confidence_interval_lower', 'confidence_interval_upper'),
-        ('confidence_lower', 'confidence_upper'),
-        ('ci_lower', 'ci_upper'),
-    ]
-    for lower_name, upper_name in column_pairs:
-        if (
-            lower_name is not None
-            and lower_name in results_df.columns
-            and upper_name in results_df.columns
-        ):
-            return (
-                pd.to_numeric(results_df[lower_name], errors='coerce'),
-                pd.to_numeric(results_df[upper_name], errors='coerce'),
-            )
-
-    interval_col = settings.get('confidence_interval_col')
-    candidate_cols = [
-        interval_col,
-        'mean_confidence_interval',
-        'confidence_intervals',
-        'confidence_interval',
-    ]
-    for column in candidate_cols:
-        if column is None or column not in results_df.columns:
-            continue
-
-        def bounds(value):
-            if isinstance(value, str):
-                try:
-                    value = ast.literal_eval(value)
-                except (SyntaxError, ValueError):
-                    return (np.nan, np.nan)
-            if isinstance(value, dict):
-                value = value.get('mean')
-            if isinstance(value, (list, tuple, np.ndarray)) and len(value) == 2:
-                return value
-            return (np.nan, np.nan)
-
-        parsed = results_df[column].map(bounds)
-        return (
-            pd.to_numeric(parsed.map(lambda value: value[0]), errors='coerce'),
-            pd.to_numeric(parsed.map(lambda value: value[1]), errors='coerce'),
-        )
-
-    raise ValueError(
-        'Results do not contain confidence intervals for mean predictions. '
-        'Provide lower/upper bound columns or a column of (lower, upper) pairs.'
-    )
-
-
 def plot_prediction_means_by_r2_scores(
         results_df: pd.DataFrame,
         *,
         settings: dict | None = None,
 ) -> Axes:
-    """Plot prediction means against R2 scores with asymmetric CI error bars."""
+    """Plot prediction means against R2 scores with CI error bars."""
     settings = settings or {}
     r2_col = settings.get('r2_col', 'r2')
     mean_col = settings.get('mean_col', 'mean')
+    lower_col = settings.get('conf_interval_lower_col', 'conf_interval_lower')
+    upper_col = settings.get('conf_interval_upper_col', 'conf_interval_upper')
 
     r2_scores = _numeric_values(results_df, r2_col)
     means = _numeric_values(results_df, mean_col)
-    lower, upper = _mean_confidence_bounds(results_df, settings)
+    lower = _numeric_values(results_df, lower_col)
+    upper = _numeric_values(results_df, upper_col)
     valid = r2_scores.notna() & means.notna() & lower.notna() & upper.notna()
     if not valid.any():
-        raise ValueError('No rows contain an R2 score, mean, and confidence interval.')
+        raise ValueError('No rows contain an R2 score, mean, and confidence interval lower and upper bounds.')
 
     x = r2_scores[valid].to_numpy()
     y = means[valid].to_numpy()
@@ -176,9 +112,10 @@ def _plot_distribution(
         default_xlabel: str,
         settings: dict | None,
 ) -> Axes:
-    settings = settings or {}
-    values = _numeric_values(results_df, column).dropna()
+    settings = settings or {} # check plot settings, set as defaults if None
+    values = _numeric_values(results_df, column).dropna() # get numeric values from results_df for specified column
 
+    # define the subplot(s) and set values from settings.
     _, ax = plt.subplots(figsize=settings.get('figsize', (10, 6)))
     ax.hist(
         values,

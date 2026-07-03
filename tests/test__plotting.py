@@ -82,28 +82,6 @@ def test_plot_prediction_means_uses_training_result_confidence_intervals(
         )
 
 
-@pytest.mark.parametrize(
-    ('column', 'intervals'),
-    [
-        ('confidence_interval', [(9.0, 11.0), (18.0, 22.0)]),
-        ('confidence_intervals', [
-            {'mean': (9.0, 11.0)},
-            "{'mean': (18.0, 22.0)}",
-        ]),
-    ],
-)
-def test_plot_prediction_means_accepts_paired_interval_columns(column, intervals):
-    results = pd.DataFrame({
-        'r2': [0.8, 0.9],
-        'mean': [10.0, 20.0],
-        column: intervals,
-    })
-
-    ax = plot_prediction_means_by_r2_scores(results)
-
-    assert len(ax.collections[0].get_segments()) == 2
-
-
 def test_plot_prediction_means_supports_custom_columns_and_labels():
     results = pd.DataFrame({
         'score': [0.8],
@@ -114,8 +92,8 @@ def test_plot_prediction_means_supports_custom_columns_and_labels():
     settings = {
         'r2_col': 'score',
         'mean_col': 'prediction_average',
-        'lower_bound_col': 'low',
-        'upper_bound_col': 'high',
+        'conf_interval_lower_col': 'low',
+        'conf_interval_upper_col': 'high',
         'title': 'Custom title',
         'xlabel': 'Score',
         'ylabel': 'Average',
@@ -190,8 +168,8 @@ def test_distribution_plot_supports_density_and_custom_column():
         ),
         (
             plot_prediction_means_by_r2_scores,
-            pd.DataFrame({'r2': [0.9], 'mean': [10.0]}),
-            'Results do not contain confidence intervals',
+            pd.DataFrame({'r2': [0.9], 'mean': [10.0], 'conf_interval_lower': ['not numeric'], 'conf_interval_upper': ['not numeric']}),
+            'Results do not contain any numeric \'conf_interval_lower\' values.',
         ),
     ],
 )
