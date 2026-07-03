@@ -23,8 +23,8 @@ def results_df() -> pd.DataFrame:
         'r2': [0.70, 0.80, 0.90, 0.95],
         'mean': [10.0, 20.0, 30.0, 40.0],
         'variance': [2.0, 6.0, 3.0, 1.0],
-        'mean_ci_lower': [9.0, 18.0, 27.0, 36.0],
-        'mean_ci_upper': [11.5, 23.0, 34.0, 45.0],
+        'conf_interval_lower': [9.0, 18.0, 27.0, 36.0],
+        'conf_interval_upper': [11.5, 23.0, 34.0, 45.0],
     })
 
 
@@ -55,7 +55,9 @@ def test_plot_variance_contribution(results_df):
     assert list(totals_by_x.values()) == pytest.approx([1.0, 1.0])
 
 
-def test_plot_prediction_means_uses_asymmetric_confidence_intervals(results_df):
+def test_plot_prediction_means_uses_training_result_confidence_intervals(
+        results_df,
+):
     ax = plot_prediction_means_by_r2_scores(results_df)
 
     assert isinstance(ax, Axes)
@@ -68,8 +70,14 @@ def test_plot_prediction_means_uses_asymmetric_confidence_intervals(results_df):
         np.testing.assert_allclose(
             segment,
             [
-                [results_df.loc[index, 'r2'], results_df.loc[index, 'mean_ci_lower']],
-                [results_df.loc[index, 'r2'], results_df.loc[index, 'mean_ci_upper']],
+                [
+                    results_df.loc[index, 'r2'],
+                    results_df.loc[index, 'conf_interval_lower'],
+                ],
+                [
+                    results_df.loc[index, 'r2'],
+                    results_df.loc[index, 'conf_interval_upper'],
+                ],
             ],
         )
 
@@ -200,8 +208,8 @@ def test_prediction_mean_must_be_inside_confidence_interval():
     results = pd.DataFrame({
         'r2': [0.9],
         'mean': [10.0],
-        'mean_ci_lower': [11.0],
-        'mean_ci_upper': [12.0],
+        'conf_interval_lower': [11.0],
+        'conf_interval_upper': [12.0],
     })
 
     with pytest.raises(ValueError, match='must contain its prediction mean'):

@@ -74,6 +74,7 @@ def _mean_confidence_bounds(
 
     column_pairs = [
         (lower_col, upper_col),
+        ('conf_interval_lower', 'conf_interval_upper'),
         ('mean_ci_lower', 'mean_ci_upper'),
         ('mean_confidence_lower', 'mean_confidence_upper'),
         ('confidence_interval_lower', 'confidence_interval_upper'),
