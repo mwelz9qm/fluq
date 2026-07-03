@@ -230,7 +230,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         Returns
         ----------------
         A dictionary object with the loss and metric values defined in self.model_settings,
-        and the mean and variance on the predictions.
+        and the mean, variance, and 95% confidence interval on the predictions.
         '''
         # reset weights
         self._model.set_weights(self._init_weights)
@@ -249,10 +249,23 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
 
         # evaluate
         scores = self._model.evaluate(X_test, y_test, batch_size=self.model_settings['batch_size'], return_dict=True)
-        variance = np.var(predictions)
-        mean = np.mean(predictions)
-        
-        return scores | {'variance': variance} | {'mean': mean}
+        prediction_values = np.asarray(predictions).reshape(-1)
+        variance = np.var(prediction_values)
+        mean = np.mean(prediction_values)
+        conf_interval = stats.norm.interval(
+            0.95,
+            loc=mean,
+            scale=stats.sem(prediction_values),
+        )
+
+        metrics = {
+            'variance': variance,
+            'mean': mean,
+            'conf_interval_lower': conf_interval[0],
+            'conf_interval_upper': conf_interval[1],
+        }
+
+        return scores | metrics
 
 
     def run_model_bias_study(
