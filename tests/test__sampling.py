@@ -12,6 +12,7 @@ from common.sampling._sampling import (
 
 @pytest.fixture
 def sample_data():
+    '''12x3 sample dataset'''
     return pd.DataFrame(
         {
             "feature_1": np.arange(12),
@@ -23,6 +24,7 @@ def sample_data():
 
 @pytest.fixture
 def regressor_data():
+    '''10x3 regressor sample dataset'''
     return pd.DataFrame(
         {
             "feature_1": np.arange(10, dtype=float),
@@ -32,19 +34,26 @@ def regressor_data():
     )
 
 
+###############################################
+#       TESTS FOR get_random_samples()        #
+###############################################
+
 def test_get_random_samples_size(sample_data):
+    '''Test n_samples arg for get_random_samples()'''
     samples = get_random_samples(sample_data, n_samples=5, random_state=42)
 
     assert len(samples) == 5
 
 
 def test_get_random_samples_fraction(sample_data):
+    '''Test sample_fraction arg for get_random_samples()'''
     samples = get_random_samples(sample_data, sample_fraction=0.5, random_state=42)
 
     assert len(samples) == 6
 
 
 def test_get_random_samples_rows_are_from_dataset(sample_data):
+    '''Test row data integrity for get_random_samples()'''
     samples = get_random_samples(sample_data, n_samples=5, random_state=42)
 
     assert samples.index.isin(sample_data.index).all()
@@ -52,6 +61,7 @@ def test_get_random_samples_rows_are_from_dataset(sample_data):
 
 
 def test_get_random_samples_is_reproducible(sample_data):
+    '''Test random_state arg for get_random_samples()'''
     first = get_random_samples(sample_data, n_samples=5, random_state=17)
     second = get_random_samples(sample_data, n_samples=5, random_state=17)
 
@@ -59,6 +69,7 @@ def test_get_random_samples_is_reproducible(sample_data):
 
 
 def test_get_random_samples_without_replacement_has_unique_rows(sample_data):
+    '''Test when with_replacement=False for get_random_samples()'''
     samples = get_random_samples(
         sample_data, n_samples=8, random_state=42, with_replacement=False
     )
@@ -67,6 +78,7 @@ def test_get_random_samples_without_replacement_has_unique_rows(sample_data):
 
 
 def test_get_random_samples_with_replacement_can_exceed_dataset_size():
+    '''Test when with_replacement=True for get_random_samples()'''
     data = pd.DataFrame({"value": [10]})
 
     samples = get_random_samples(
@@ -89,13 +101,19 @@ def test_get_random_samples_with_replacement_can_exceed_dataset_size():
     ],
 )
 def test_get_random_samples_rejects_invalid_arguments(sample_data, kwargs, exception):
+    '''Test invalid arguments in get_random_samples()'''
     with pytest.raises(exception):
         get_random_samples(sample_data, **kwargs)
 
 
+##########################################################
+#       TESTS FOR get_stratified_random_samples()        #
+##########################################################
+
 def test_get_stratified_random_samples_returns_requested_size_and_balanced_strata(
     sample_data,
 ):
+    '''Test n_samples arg and if stratas are balanced in get_stratified_random_samples()'''
     samples = get_stratified_random_samples(
         sample_data,
         stratified_column_name="stratum",
@@ -106,10 +124,11 @@ def test_get_stratified_random_samples_returns_requested_size_and_balanced_strat
     counts = samples["stratum"].value_counts()
     assert len(samples) == 7
     assert set(counts.index) == {"A", "B", "C"}
-    assert counts.max() - counts.min() <= 1
+    assert counts.max() - counts.min() <= 1 # strata counts are at most 1 count from each other
 
 
 def test_get_stratified_random_samples_fraction(sample_data):
+    '''Test sample_fraction arg for get_stratified_random_samples()'''
     samples = get_stratified_random_samples(
         sample_data,
         stratified_column_name="stratum",
@@ -122,6 +141,7 @@ def test_get_stratified_random_samples_fraction(sample_data):
 
 
 def test_get_stratified_random_samples_is_reproducible(sample_data):
+    '''Test random_state arg for get_stratified_random_samples()'''
     kwargs = {
         "stratified_column_name": "stratum",
         "n_samples": 7,
@@ -135,6 +155,7 @@ def test_get_stratified_random_samples_is_reproducible(sample_data):
 
 
 def test_get_stratified_random_samples_rows_are_from_dataset(sample_data):
+    '''Test row data integrity for get_stratified_random_samples()'''
     samples = get_stratified_random_samples(
         sample_data,
         stratified_column_name="stratum",
@@ -142,7 +163,7 @@ def test_get_stratified_random_samples_rows_are_from_dataset(sample_data):
         random_state=42,
     )
 
-    pd.testing.assert_frame_equal(samples, sample_data.loc[samples.index])
+    pd.testing.assert_frame_equal(samples, sample_data.loc[samples.index]) # compares indexed rows from samples to original dataset
 
 
 @pytest.mark.parametrize(
@@ -159,6 +180,7 @@ def test_get_stratified_random_samples_rows_are_from_dataset(sample_data):
 def test_get_stratified_random_samples_rejects_invalid_arguments(
     sample_data, kwargs, exception
 ):
+    '''Test invalid arguments in get_stratified_random_samples()'''
     with pytest.raises(exception):
         get_stratified_random_samples(
             sample_data, stratified_column_name="stratum", **kwargs
@@ -166,6 +188,7 @@ def test_get_stratified_random_samples_rejects_invalid_arguments(
 
 
 def test_get_stratified_random_samples_rejects_unknown_column(sample_data):
+    '''Test invalid column name in get_stratified_random_samples()'''
     with pytest.raises(KeyError):
         get_stratified_random_samples(
             sample_data,
@@ -174,6 +197,10 @@ def test_get_stratified_random_samples_rejects_unknown_column(sample_data):
             random_state=42,
         )
 
+
+###################################################################
+#       TESTS FOR get_quantile_stratified_random_samples()        #
+###################################################################
 
 @pytest.mark.parametrize(
     "stratify_by",
@@ -185,6 +212,7 @@ def test_get_stratified_random_samples_rejects_unknown_column(sample_data):
 def test_get_quantile_stratified_random_samples_returns_balanced_quantiles(
     sample_data, stratify_by
 ):
+    '''Test stratas are balanced in get_quantile_stratified_random_samples()'''
     samples = get_quantile_stratified_random_samples(
         sample_data,
         n_bins=3,
@@ -206,6 +234,7 @@ def test_get_quantile_stratified_random_samples_returns_balanced_quantiles(
 
 
 def test_get_quantile_stratified_random_samples_fraction(sample_data):
+    '''Test sample_fraction arg for get_quantile_stratified_random_samples()'''
     samples = get_quantile_stratified_random_samples(
         sample_data,
         stratify_col_name="feature_1",
@@ -218,6 +247,7 @@ def test_get_quantile_stratified_random_samples_fraction(sample_data):
 
 
 def test_get_quantile_stratified_random_samples_is_reproducible(sample_data):
+    '''Test random_state arg for get_quantile_stratified_random_samples()'''
     kwargs = {
         "stratify_col_name": "feature_1",
         "n_bins": 3,
@@ -241,6 +271,7 @@ def test_get_quantile_stratified_random_samples_is_reproducible(sample_data):
 def test_get_quantile_stratified_random_samples_requires_one_stratify_column(
     sample_data, stratify_by
 ):
+    '''Test stratify column identifier is unique for get_quantile_stratified_random_samples()'''
     with pytest.raises(ValueError, match="Provide exactly one"):
         get_quantile_stratified_random_samples(
             sample_data, n_samples=3, **stratify_by
@@ -261,6 +292,7 @@ def test_get_quantile_stratified_random_samples_requires_one_stratify_column(
 def test_get_quantile_stratified_random_samples_rejects_invalid_sample_arguments(
     sample_data, kwargs, exception
 ):
+    '''Test invalid sample arguments for get_quantile_stratified_random_samples()'''
     with pytest.raises(exception):
         get_quantile_stratified_random_samples(
             sample_data, stratify_col_name="feature_1", n_bins=3, **kwargs
@@ -268,6 +300,8 @@ def test_get_quantile_stratified_random_samples_rejects_invalid_sample_arguments
 
 
 def test_get_quantile_stratified_random_samples_rejects_temporary_column_name():
+    '''Test stratify column name is not equal to the temporary column name for
+    get_quantile_stratified_random_samples()'''
     data = pd.DataFrame(
         {
             "value": np.arange(8),
@@ -281,7 +315,12 @@ def test_get_quantile_stratified_random_samples_rejects_temporary_column_name():
         )
 
 
+#############################################################
+#       TESTS FOR generate_latin_hypercube_samples()        #
+#############################################################
+
 def test_generate_latin_hypercube_samples_shape_and_columns(regressor_data):
+    '''Test n_samples arg and columns in generate_latin_hypercube_samples()'''
     samples = generate_latin_hypercube_samples(
         regressor_data, n_samples=5, random_state=42
     )
@@ -291,6 +330,7 @@ def test_generate_latin_hypercube_samples_shape_and_columns(regressor_data):
 
 
 def test_generate_latin_hypercube_samples_fraction(regressor_data):
+    '''Test sample_fraction arg for generate_latin_hypercube_samples()'''
     samples = generate_latin_hypercube_samples(
         regressor_data, sample_fraction=0.4, random_state=42
     )
@@ -301,6 +341,8 @@ def test_generate_latin_hypercube_samples_fraction(regressor_data):
 def test_generate_latin_hypercube_samples_values_stay_within_column_bounds(
     regressor_data,
 ):
+    '''Test the samples are bounded by the max and min values in the
+    respective column for generate_latin_hypercube_samples().'''
     samples = generate_latin_hypercube_samples(
         regressor_data, n_samples=6, random_state=42
     )
@@ -313,6 +355,8 @@ def test_generate_latin_hypercube_samples_values_stay_within_column_bounds(
 def test_generate_latin_hypercube_samples_uses_each_quantile_interval_once(
     regressor_data,
 ):
+    '''Test samples are in distinct stratas/quantile intervals for
+    generate_latin_hypercube_samples()'''
     n_samples = 5
     samples = generate_latin_hypercube_samples(
         regressor_data, n_samples=n_samples, random_state=42
@@ -330,6 +374,7 @@ def test_generate_latin_hypercube_samples_uses_each_quantile_interval_once(
 
 
 def test_generate_latin_hypercube_samples_is_reproducible(regressor_data):
+    '''Test random_state arg for generate_latin_hypercube_samples()'''
     first = generate_latin_hypercube_samples(
         regressor_data, n_samples=5, random_state=17
     )
@@ -354,5 +399,6 @@ def test_generate_latin_hypercube_samples_is_reproducible(regressor_data):
 def test_generate_latin_hypercube_samples_rejects_invalid_arguments(
     regressor_data, kwargs, exception
 ):
+    '''Test invalid arguments for generate_latin_hypercube_samples()'''
     with pytest.raises(exception):
         generate_latin_hypercube_samples(regressor_data, **kwargs)
