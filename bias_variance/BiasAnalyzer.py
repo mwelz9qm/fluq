@@ -186,6 +186,26 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             )
             # store initial weights when model needs to be retrained
             self._init_weights = self._model.get_weights()
+    
+    def _build_model(self, hidden_layers) -> Model:
+        '''
+        Build model for studies. Uses default values specified in self.model_settings.
+        '''
+        inputs = Input(shape=(self.inputs_df.shape[1],))
+        x = inputs
+        for hidden_layer in hidden_layers:
+            x = Dense(hidden_layer, activation=self.model_settings['activation'])(x)
+        outputs = Dense(self.outputs_df.shape[1], name='predictions')(x)
+        model = Model(inputs=inputs, outputs=outputs, name='functional_model')
+        model.compile(
+            optimizer=self.model_settings['optimizer'],
+            loss=self.model_settings['loss'],
+            metrics=[
+                BiasAnalyzer.METRIC_OPTIONS[metric]
+                for metric in self.model_settings['metrics']
+            ],
+        )
+        return model
 
     def _save_predictions_and_actuals(self, predictions, y_test):
         '''
@@ -209,7 +229,15 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             hf.create_dataset('predictions', data=predictions)
             hf.create_dataset('actuals', data=y_test)
 
-    def _train_and_evaluate_model(self, X_train, y_train, X_test, y_test) -> dict:
+    def _train_and_evaluate_model(
+        self,
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        *,
+        hidden_layers=None,
+    ) -> dict:
         '''
         Trains and evaluates the model on a given train-test split.
         
@@ -232,23 +260,30 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         A dictionary object with the loss and metric values defined in self.model_settings,
         and the mean, variance, and 95% confidence interval on the predictions.
         '''
-        # reset weights
-        self._model.set_weights(self._init_weights)
+        if hidden_layers is None:
+            self._init_model()
+            model = self._model
+            # reset weights
+            model.set_weights(self._init_weights)
+        else:
+            model = self._build_model(hidden_layers)
+
         # train
-        self._model.fit(
+        model.fit(
             X_train,
             y_train,
             epochs=self.model_settings['epochs'],
+            batch_size=self.model_settings['batch_size'],
             verbose=self.model_settings['verbose']
         )
 
-        predictions = self._model.predict(X_test)
+        predictions = model.predict(X_test)
 
         # save predictions and actuals in directory
         self._save_predictions_and_actuals(predictions, y_test)
 
         # evaluate
-        scores = self._model.evaluate(X_test, y_test, batch_size=self.model_settings['batch_size'], return_dict=True)
+        scores = model.evaluate(X_test, y_test, batch_size=self.model_settings['batch_size'], return_dict=True)
         prediction_values = np.asarray(predictions).reshape(-1)
         variance = np.var(prediction_values)
         mean = np.mean(prediction_values)
@@ -268,12 +303,65 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         return scores | metrics
 
 
+    def _generate_hidden_layer_sizes(
+        self,
+        architecture_settings: dict[str, dict],
+        n_sizes: int,
+    ) -> dict[str, np.matrix]:
+        '''
+        Creates a 2D matrix of ints that define an array of architectures with a specified hidden layer size.
+
+        Parameters
+        -------------
+        architecture_settings: dict
+            Defines the architecture to generate and settings associated with it (i.e., max/min layer bounds, max/min neuron bounds, taper rate bounds, random state)
+        
+        n_sizes: int
+            Number of hidden layer sizes to generate per architecture.
+        
+        Returns
+        --------------
+        A dictionary with str keys of every architecture name that map to 2D numpy matrices of ints, specifying the hidden layer sizes
+        
+        Settings Example
+        -----------------
+        >>> architecture_settings = {
+        ...     'wide': {
+        ...         'layers': (1, 16), # (lower bound, upper bound): left val inclusive, right val exclusive
+        ...         'neurons': (64, 256),
+        ...     },
+        ...     'narrow': {
+        ...         'layers': (16, 64),
+        ...         'neurons': (2, 64),
+        ...     },
+        ...     'taper': {
+        ...         'layers': (16, 64),
+        ...         'init_neurons': (1, 9), # starting layer's number of neurons
+        ...         'taper_rate': (0.25, 0.5), # rate of layer size increase
+        ...         'max_neurons': 256, # maximum neurons for any layer
+        ...     },
+        ...     'reverse_taper': {
+        ...         'layers': (16, 64),
+        ...         'init_neurons': (128, 256),
+        ...         'taper_rate': (0.25, 0.5), # rate of layer size decrease
+        ...         'max_neurons': 256,
+        ...     },
+        ...     'combined_taper': {
+        ...         'layers': (16, 64),
+        ...         'init_neurons': (1, 9),
+        ...         'taper_rate': (0.25, 0.5), # rate of layer size increase and decrease
+        ...         'max_neurons': 256,
+        ...     }
+        ... }
+        '''
+        # TODO: Add implementation.
+        pass
+
     def run_model_bias_study(
-        self, 
-        architecture_types:list[str]=['wide','narrow','taper','reverse_taper','combined_taper'], 
-        n_architectures=10,
-        metrics:list[str]=['root_mean_squared_error','r2','mse','mae']
-    ) -> None:
+        self,
+        architectures: list[str] = ['wide','narrow','taper','reverse_taper','combined_taper'], 
+        n_iters: int = 100,
+    ) -> 'BiasAnalyzer':
         '''
         To create multiple model architectures based on shape types (i.e., wide, narrow, taper,
         reverse_taper, and combined_taper), train base dataset on all models with base train dataset,
@@ -281,29 +369,34 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
 
         Parameters
         ------------
-        architecture_configs : dict | None = None
-            Allows any user-defined configurations of architecture types for Keras model.
-
-        architecture_types : list[str], default = ['wide','narrow','taper','reverse_taper','combined_taper'] i.e. all model arch types
-            Must contain at least one architecture type to run.
+        architectures: list[str]
+            A list of architectures to use in study.
         
-        n_architectures : int, default = 10
-            The number of architectures per type.
-
-        metrics : list[str]=['rmse','r2','mse','mae']
-            Used to evaluate model based on different metrics.
+        n_iters: int = 100
+            Number of iterations to run in study.
 
         Returns
         ------------
-        None
-
-        TODO (implementation):
-        ------------
-        - Loop through each architecture in architecture_types.
-            - Build a model with that architecture.
-            - Train and evaluate model (helper function call).
+        BiasAnalyzer
         '''
-        pass
+        architecture_settings = dict.fromkeys(architectures)
+        hidden_layer_sizes = self._generate_hidden_layer_sizes(architecture_settings, n_iters)
+        X_train, X_test, y_train, y_test = train_test_split(
+            self.inputs_df,
+            self.outputs_df,
+            test_size=self.test_size,
+            random_state=self.random_state
+        )
+        results_df = pd.DataFrame()
+        for label, size in hidden_layer_sizes.items():
+            results_row = {
+                BiasAnalyzer.STUDY_FIELD_NAME: 'model',
+                BiasAnalyzer.VARIABLE_FIELD_NAME: label,
+            } | self._train_and_evaluate_model(X_train, y_train, X_test, y_test, hidden_layers=size)
+            results_df = pd.concat([results_df, pd.DataFrame([results_row])], ignore_index=True)
+        self._results_df = results_df # copy results
+        self._results_df.to_csv(BiasAnalyzer.RESULTS_FILENAME, index=False) # then export to csv
+        return self
 
     def run_sampling_bias_study(
         self,
