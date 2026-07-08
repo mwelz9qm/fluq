@@ -307,14 +307,14 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         self,
         architecture_settings: dict[str, dict],
         n_sizes: int,
-    ) -> dict[str, np.matrix]:
+    ) -> dict[str, np.ndarray]:
         '''
         Creates a 2D matrix of ints that define an array of architectures with a specified hidden layer size.
 
         Parameters
         -------------
         architecture_settings: dict
-            Defines the architecture to generate and settings associated with it (i.e., max/min layer bounds, max/min neuron bounds, taper rate bounds, random state)
+            Defines the architecture to generate and settings associated with it (i.e., max/min layer bounds, max/min neuron bounds, taper rate bounds)
         
         n_sizes: int
             Number of hidden layer sizes to generate per architecture.
@@ -354,8 +354,88 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         ...     }
         ... }
         '''
-        # TODO: Add implementation.
-        pass
+        if n_sizes <= 0:
+            raise ValueError('n_sizes must be greater than 0.')
+
+        default_settings = {
+            'wide': {
+                'layers': (1, 16),
+                'neurons': (64, 256),
+            },
+            'narrow': {
+                'layers': (16, 64),
+                'neurons': (2, 64),
+            },
+            'taper': {
+                'layers': (16, 64),
+                'init_neurons': (1, 9),
+                'taper_rate': (0.25, 0.5),
+                'max_neurons': 256,
+            },
+            'reverse_taper': {
+                'layers': (16, 64),
+                'init_neurons': (128, 256),
+                'taper_rate': (0.25, 0.5),
+                'max_neurons': 256,
+            },
+            'combined_taper': {
+                'layers': (16, 64),
+                'init_neurons': (1, 9),
+                'taper_rate': (0.25, 0.5),
+                'max_neurons': 256,
+            },
+        }
+
+        rng = np.random.default_rng(self.random_state)
+        hidden_layer_sizes = {}
+
+        for architecture_name, settings in architecture_settings.items():
+            if architecture_name not in default_settings:
+                raise ValueError(f'Unsupported architecture: {architecture_name}')
+
+            settings = default_settings[architecture_name] | (settings or {})
+            min_layers, max_layers = settings['layers']
+            n_columns = max_layers - 1
+            architecture_sizes = np.zeros((n_sizes, n_columns), dtype=int)
+
+            for row_idx in np.arange(n_sizes):
+                n_layers = rng.integers(min_layers, max_layers)
+
+                if architecture_name in ['wide', 'narrow']:
+                    min_neurons, max_neurons = settings['neurons']
+                    sizes = rng.integers(min_neurons, max_neurons, size=n_layers)
+                else:
+                    min_neurons, max_neurons = settings['init_neurons']
+                    init_neurons = rng.integers(min_neurons, max_neurons)
+                    taper_rate = rng.uniform(*settings['taper_rate'])
+                    max_allowed_neurons = settings['max_neurons']
+                    sizes = np.zeros(n_layers, dtype=int)
+
+                    if architecture_name == 'taper':
+                        for layer_idx in np.arange(n_layers):
+                            size = round(init_neurons * ((1 + taper_rate) ** layer_idx))
+                            sizes[layer_idx] = min(size, max_allowed_neurons)
+
+                    elif architecture_name == 'reverse_taper':
+                        for layer_idx in np.arange(n_layers):
+                            size = round(init_neurons * ((1 - taper_rate) ** layer_idx))
+                            sizes[layer_idx] = max(size, 1)
+
+                    else:
+                        midpoint = max(1, int(np.ceil(n_layers / 2)))
+                        for layer_idx in np.arange(n_layers):
+                            if layer_idx < midpoint:
+                                size = round(init_neurons * ((1 + taper_rate) ** layer_idx))
+                            else:
+                                peak = init_neurons * ((1 + taper_rate) ** (midpoint - 1))
+                                size = round(peak * ((1 - taper_rate) ** (layer_idx - midpoint + 1)))
+                            sizes[layer_idx] = min(max(size, 1), max_allowed_neurons)
+
+                architecture_sizes[row_idx, :n_layers] = sizes
+
+            hidden_layer_sizes[architecture_name] = architecture_sizes
+
+        return hidden_layer_sizes
 
     def run_model_bias_study(
         self,
@@ -388,12 +468,20 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             random_state=self.random_state
         )
         results_df = pd.DataFrame()
-        for label, size in hidden_layer_sizes.items():
-            results_row = {
-                BiasAnalyzer.STUDY_FIELD_NAME: 'model',
-                BiasAnalyzer.VARIABLE_FIELD_NAME: label,
-            } | self._train_and_evaluate_model(X_train, y_train, X_test, y_test, hidden_layers=size)
-            results_df = pd.concat([results_df, pd.DataFrame([results_row])], ignore_index=True)
+        for label, sizes in hidden_layer_sizes.items():
+            for size in sizes:
+                hidden_layers = size[size > 0].tolist()
+                results_row = {
+                    BiasAnalyzer.STUDY_FIELD_NAME: 'model',
+                    BiasAnalyzer.VARIABLE_FIELD_NAME: label,
+                } | self._train_and_evaluate_model(
+                    X_train,
+                    y_train,
+                    X_test,
+                    y_test,
+                    hidden_layers=hidden_layers
+                )
+                results_df = pd.concat([results_df, pd.DataFrame([results_row])], ignore_index=True)
         self._results_df = results_df # copy results
         self._results_df.to_csv(BiasAnalyzer.RESULTS_FILENAME, index=False) # then export to csv
         return self
