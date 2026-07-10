@@ -1,5 +1,5 @@
 import os
-import datetime
+import uuid
 import h5py
 import pandas as pd
 import numpy as np
@@ -21,6 +21,11 @@ from bias_variance._plotting import (
     plot_prediction_means_by_r2_scores,
     plot_variance_contribution,
     plot_variance_distribution,
+)
+from common.sampling._sampling import (
+    get_quantile_stratified_random_samples,
+    get_random_samples,
+    generate_latin_hypercube_samples
 )
 
 class BiasAnalyzerConfigMeta(type):
@@ -143,6 +148,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         _model: tf.keras.Model | None = None,
         _init_weights: list[np.ndarray] | None = None,
         _results_df: pd.DataFrame | None = None,
+        _run_id: str | None = None
     ) -> None:
         self.inputs_df = inputs_df
         self.outputs_df = outputs_df
@@ -152,51 +158,45 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         self._model = _model
         self._init_weights = _init_weights
         self._results_df = _results_df
+        self._run_id = _run_id
 
     def _init_results_csv(self):
         '''
-        Initializes the results csv file.
+        Initializes the results csv file. Use when retrieving a previous study run for
+        bias-variance decomposition or plotting.
         '''
+        columns = [
+            'run_id',
+            'iteration',
+            BiasAnalyzer.STUDY_FIELD_NAME,
+            BiasAnalyzer.VARIABLE_FIELD_NAME,
+            'loss',
+            *BiasAnalyzer.METRIC_OPTIONS.keys(),
+            'variance',
+            'mean',
+            'conf_interval_lower',
+            'conf_interval_upper',
+        ]
         if os.path.exists(BiasAnalyzer.RESULTS_FILENAME):
-            self._results_df = pd.read_csv(BiasAnalyzer.RESULTS_FILENAME)
+            self._results_df = pd.read_csv(
+                BiasAnalyzer.RESULTS_FILENAME
+            ).reindex(columns=columns)
         else:
-            columns = ['run_id', 'timestamp']
-            columns.append(list(BiasAnalyzer.METRIC_OPTIONS.keys()))
             self._results_df = pd.DataFrame(columns=columns)
         os.makedirs(BiasAnalyzer.FIT_ITERATIONS_DIR_NAME, exist_ok=True)
-
-    def _init_model(self):
-        '''
-        Initializes the base model for studies.
-        '''
-        if self._model is None:
-            # use keras functional api to build base model
-            inputs = Input(shape=(self.inputs_df.shape[1],))
-            x = inputs
-            for hidden_layer in self.model_settings['hidden_layers']:
-                x = Dense(hidden_layer, activation=self.model_settings['activation'])(x)
-            outputs = Dense(self.outputs_df.shape[1], name='predictions')(x)
-            self._model = Model(inputs=inputs, outputs=outputs, name='functional_model')
-            self._model.summary()
-            # compile base model with settings
-            self._model.compile(
-                optimizer=self.model_settings['optimizer'],
-                loss=self.model_settings['loss'],
-                metrics=[BiasAnalyzer.METRIC_OPTIONS[metric] for metric in self.model_settings['metrics']]
-            )
-            # store initial weights when model needs to be retrained
-            self._init_weights = self._model.get_weights()
     
     def _build_model(self, hidden_layers) -> Model:
         '''
         Build model for studies. Uses default values specified in self.model_settings.
         '''
+        # use keras functional api to build base model
         inputs = Input(shape=(self.inputs_df.shape[1],))
         x = inputs
         for hidden_layer in hidden_layers:
             x = Dense(hidden_layer, activation=self.model_settings['activation'])(x)
         outputs = Dense(self.outputs_df.shape[1], name='predictions')(x)
         model = Model(inputs=inputs, outputs=outputs, name='functional_model')
+        # compile base model with settings
         model.compile(
             optimizer=self.model_settings['optimizer'],
             loss=self.model_settings['loss'],
@@ -206,28 +206,400 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             ],
         )
         return model
+    
+    def _init_model(self):
+        '''
+        Initializes the base model for studies. Use when starting study run.
+        '''
+        if self._model is None:
+            self._model = self._build_model(self.model_settings['hidden_layers'])
+            # store initial weights when model needs to be retrained
+            self._init_weights = self._model.get_weights()
 
-    def _save_predictions_and_actuals(self, predictions, y_test):
+    def _save_predictions_and_actuals(
+        self,
+        predictions,
+        actuals,
+        *,
+        study: str,
+        label: str,
+        iteration: int,
+    ):
         '''
         Saves the predictions and actuals from a given trained model.
 
         Parameters
         -------------
-        X_test
-            Input data from test set.
-
-        y_test
-            Output data from test set.
+        predictions
+            model predictions
+        actuals
+            model actuals relative to predictions by row
+        study: str
+            study name
+        label: str
+            label or variable name in study
+        iteration: int
+            iteration id in a study run
 
         Returns
         --------------
         None
         '''
-        run_id = f'run_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}'
-        pred_file_path = f'{BiasAnalyzer.FIT_ITERATIONS_DIR_NAME}/{run_id}.h5'
-        with h5py.File(pred_file_path, 'w') as hf:
-            hf.create_dataset('predictions', data=predictions)
-            hf.create_dataset('actuals', data=y_test)
+        if self._run_id is None:
+            raise ValueError('_run_id is None.')
+        pred_file_path = os.path.join(
+            BiasAnalyzer.FIT_ITERATIONS_DIR_NAME,
+            f'{self._run_id}.h5'
+        )
+        group_path = f'{study}/{label}/iteration_{iteration}'
+        with h5py.File(pred_file_path, 'a') as hf:
+            group = hf.create_group(group_path)
+            group.create_dataset('predictions', data=predictions)
+            group.create_dataset('actuals', data=actuals)
+
+    class Architector:
+        def __init__(self, settings: dict | None = None):
+            supported = {
+                'wide',
+                'narrow',
+                'taper',
+                'reverse_taper',
+                'combined_taper'
+            }
+            default_settings = {
+                'wide': {
+                    'layers': (1, 16),
+                    'neurons': (64, 256),
+                },
+                'narrow': {
+                    'layers': (16, 64),
+                    'neurons': (2, 64),
+                },
+                'taper': {
+                    'layers': (16, 64),
+                    'init_neurons': (1, 9),
+                    'taper_rate': (0.25, 0.5),
+                    'max_neurons': 256,
+                },
+                'reverse_taper': {
+                    'layers': (16, 64),
+                    'init_neurons': (128, 256),
+                    'taper_rate': (0.25, 0.5),
+                    'max_neurons': 256,
+                },
+                'combined_taper': {
+                    'layers': (16, 64),
+                    'init_neurons': (1, 9),
+                    'taper_rate': (0.25, 0.5),
+                    'max_neurons': 256,
+                },
+            }
+            settings = settings or default_settings
+            normalized_settings = {}
+            for architecture_name, overrides in settings.items():
+                if architecture_name not in supported:
+                    raise ValueError(
+                        f'Unsupported architecture: {architecture_name}'
+                    )
+                normalized_settings[architecture_name] = (
+                    default_settings[architecture_name]
+                    | (overrides or {})
+                )
+            self.settings = normalized_settings
+        
+        def generate(self, random_state: int | None = None) -> dict[str, np.ndarray]:
+            rng = np.random.default_rng(random_state)
+            hidden_layers = {}
+
+            for architecture_name, settings in self.settings.items():
+                min_layers, max_layers = settings['layers']
+                n_layers = rng.integers(min_layers, max_layers)
+                sizes = np.zeros(n_layers, dtype=int)
+
+                if architecture_name in ['wide', 'narrow']:
+                    min_neurons, max_neurons = settings['neurons']
+                    sizes = rng.integers(min_neurons, max_neurons, size=n_layers)
+                elif architecture_name in ['taper', 'reverse_taper', 'combined_taper']:
+                    min_neurons, max_neurons = settings['init_neurons']
+                    init_neurons = rng.integers(min_neurons, max_neurons)
+                    taper_rate = rng.uniform(*settings['taper_rate'])
+                    max_allowed_neurons = settings['max_neurons']
+                    if architecture_name == 'taper':
+                        for i in np.arange(n_layers):
+                            size = round(init_neurons * ((1 + taper_rate) ** i))
+                            sizes[i] = min(size, max_allowed_neurons)
+                    elif architecture_name == 'reverse_taper':
+                        for i in np.arange(n_layers):
+                            size = round(init_neurons * ((1 - taper_rate) ** i))
+                            sizes[i] = max(size, 1)
+                    elif architecture_name == 'combined_taper':
+                        midpoint = max(1, int(np.ceil(n_layers / 2)))
+                        for i in np.arange(n_layers):
+                            if i < midpoint:
+                                size = round(init_neurons * ((1 + taper_rate) ** i))
+                            else:
+                                peak = init_neurons * ((1 + taper_rate) ** (midpoint  - 1))
+                                size = round(peak * ((1 - taper_rate) ** (i - midpoint + 1)))
+                            sizes[i] = min(max(size, 1), max_allowed_neurons)
+                
+                hidden_layers[architecture_name] = sizes
+
+            return hidden_layers
+
+    def _get_test_result_and_data(self, split = None, hidden_layers = None):
+        if hidden_layers is None:
+            self._init_model()
+            model = self._model
+            # reset weights
+            model.set_weights(self._init_weights)
+        else:
+            model = self._build_model(hidden_layers)
+        
+        X_train, X_test, y_train, y_test = split or train_test_split(
+            self.inputs_df,
+            self.outputs_df,
+            test_size=self.test_size,
+            random_state=self.random_state
+        )
+
+        # train
+        model.fit(
+            X_train,
+            y_train,
+            epochs=self.model_settings['epochs'],
+            batch_size=self.model_settings['batch_size'],
+            verbose=self.model_settings['verbose']
+        )
+
+        predictions = model.predict(X_test)
+
+        # evaluate
+        scores = model.evaluate(X_test, y_test, batch_size=self.model_settings['batch_size'], return_dict=True)
+        prediction_values = np.asarray(predictions).reshape(-1)
+        variance = np.var(prediction_values)
+        mean = np.mean(prediction_values)
+        conf_interval = stats.norm.interval(
+            0.95,
+            loc=mean,
+            scale=stats.sem(prediction_values),
+        )
+
+        metrics = {
+            'variance': variance,
+            'mean': mean,
+            'conf_interval_lower': conf_interval[0],
+            'conf_interval_upper': conf_interval[1],
+        }
+
+        return scores | metrics, predictions, y_test
+    
+    def _get_variations(self, study, generator, random_state):
+        injected_kwargs = {} # For injecting the random_state into sampling function.
+        if random_state is not None:
+            injected_kwargs['random_state'] = random_state
+
+        variations = {}
+        if study == 'model':
+            variations = generator.generate(random_state)
+        elif study == 'sampling':
+            variations = generator.generate(pd.concat([self.inputs_df, self.outputs_df], axis=1), injected_kwargs)
+        elif study == 'data':
+            variations = {}
+        return variations
+
+    def _get_results(self, n_iter, generator, study, save_predictions=True):
+        results = pd.DataFrame()
+
+        for i in np.arange(n_iter):
+            iteration_random_state = None
+            if self.random_state is not None:
+                iteration_random_state = self.random_state + i
+            variations = self._get_variations(study, generator, iteration_random_state)
+            for label, variation in variations.items():
+                hidden_layers = None
+                split = None
+                if study == 'model':
+                    hidden_layers = variation[variation > 0].tolist()
+                elif study == 'sampling':
+                    sampled_inputs_df = variation[self.inputs_df.columns]
+                    sampled_outputs_df = variation[self.outputs_df.columns]
+                    split = train_test_split(
+                        sampled_inputs_df,
+                        sampled_outputs_df,
+                        test_size=self.test_size,
+                        random_state=iteration_random_state
+                    )
+                elif study == 'data':
+                    split = None
+                result, predictions, actuals = self._get_test_result_and_data(hidden_layers=hidden_layers, split=split)
+                if save_predictions:
+                    self._save_predictions_and_actuals(
+                        predictions,
+                        actuals,
+                        study=study,
+                        label=label,
+                        iteration=int(i)
+                    )
+                df_row = {
+                    'run_id': self._run_id,
+                    'iteration': int(i),
+                    BiasAnalyzer.STUDY_FIELD_NAME: study,
+                    BiasAnalyzer.VARIABLE_FIELD_NAME: label
+                } | result
+                results = pd.concat([results, pd.DataFrame([df_row])], ignore_index=True)
+        
+        return results
+    
+    def run_bias_studies(
+        self,
+        settings: dict | None = None,
+        *,
+        save_results: bool = True,
+        save_predictions: bool = True
+    ) -> 'BiasAnalyzer':
+        '''
+        Default Settings
+        -------------
+        settings = {
+            'n_iter': 100,
+            'studies': {
+                'model': {
+                    'wide': {
+                        'layers': (1, 16),
+                        'neurons': (64, 256),
+                    },
+                    'narrow': {
+                        'layers': (16, 64),
+                        'neurons': (2, 64),
+                    },
+                    'taper': {
+                        'layers': (16, 64),
+                        'init_neurons': (1, 9),
+                        'taper_rate': (0.25, 0.5),
+                        'max_neurons': 256,
+                    },
+                    'reverse_taper': {
+                        'layers': (16, 64),
+                        'init_neurons': (128, 256),
+                        'taper_rate': (0.25, 0.5),
+                        'max_neurons': 256,
+                    },
+                    'combined_taper': {
+                        'layers': (16, 64),
+                        'init_neurons': (1, 9),
+                        'taper_rate': (0.25, 0.5),
+                        'max_neurons': 256,
+                    },
+                },
+                'sampling': {
+                    'strategies': [
+                        'bootstrap', 'stratified', 'lhs'
+                    ]
+                },
+            }
+        }
+        '''
+        default_settings = {
+            'n_iter': 100,
+            'studies': {
+                'model': {
+                    'wide': {
+                        'layers': (1, 16),
+                        'neurons': (64, 256),
+                    },
+                    'narrow': {
+                        'layers': (16, 64),
+                        'neurons': (2, 64),
+                    },
+                    'taper': {
+                        'layers': (16, 64),
+                        'init_neurons': (1, 9),
+                        'taper_rate': (0.25, 0.5),
+                        'max_neurons': 256,
+                    },
+                    'reverse_taper': {
+                        'layers': (16, 64),
+                        'init_neurons': (128, 256),
+                        'taper_rate': (0.25, 0.5),
+                        'max_neurons': 256,
+                    },
+                    'combined_taper': {
+                        'layers': (16, 64),
+                        'init_neurons': (1, 9),
+                        'taper_rate': (0.25, 0.5),
+                        'max_neurons': 256,
+                    },
+                },
+                'sampling': {
+                    'strategies': [
+                        'bootstrap', 'stratified', 'lhs'
+                    ]
+                },
+            }
+        }
+        settings = settings or default_settings
+
+        n_iter = settings['n_iter']
+        if not isinstance(n_iter, int) or isinstance(n_iter, bool):
+            raise TypeError('n_iter must be an integer.')
+        if n_iter <= 0:
+            raise ValueError('n_iter must be greater than 0.')
+        
+        if not settings['studies']:
+            raise ValueError('At least one study must be configured')
+        
+        supported_studies = {'model', 'sampling'}
+        unknown_studies = set(settings['studies']) - supported_studies
+        if unknown_studies:
+            raise ValueError(
+                f'Unsupported studies: {sorted(unknown_studies)}'
+            )
+        
+        supported_strategies = {'bootstrap', 'stratified', 'lhs'}
+        sampling_settings = settings['studies'].get('sampling')
+        if sampling_settings is not None:
+            requested_strategies = set(sampling_settings.get('strategies', []))
+            unknown_strategies = requested_strategies - supported_strategies
+            if unknown_strategies:
+                raise ValueError(
+                f'Unsupported sampling strategies: {sorted(unknown_strategies)}'
+            )
+        
+        self._init_model()
+        self._run_id = f'run_{uuid.uuid4().hex}'
+        os.makedirs(BiasAnalyzer.FIT_ITERATIONS_DIR_NAME, exist_ok=True)
+        
+        for study, study_settings in settings['studies'].items():
+            results = pd.DataFrame()
+            if study == 'model':
+                architector = self.Architector(settings=study_settings)
+                results = self._get_results(n_iter, architector, study, save_predictions=save_predictions)
+            elif study == 'sampling':
+                sampler = Sampler()
+                strategies = study_settings.get('strategies', [])
+                if 'bootstrap' in strategies:
+                    kwargs = {
+                        'sample_fraction': 1.0,
+                        'with_replacement': True
+                    }
+                    sampler.add_strategy('bootstrap', get_random_samples, **kwargs)
+                if 'stratified' in strategies:
+                    kwargs = {
+                        'stratify_col_index': self.inputs_df.shape[1],
+                        'sample_fraction': 1.0,
+                        'with_replacement': True
+                    }
+                    sampler.add_strategy('stratified', get_quantile_stratified_random_samples, **kwargs)
+                if 'lhs' in strategies:
+                    kwargs = {
+                        'sample_fraction': 1.0,
+                    }
+                    sampler.add_strategy('lhs', generate_latin_hypercube_samples, **kwargs)
+                results = self._get_results(n_iter, sampler, study, save_predictions=save_predictions)
+            self._results_df = pd.concat([self._results_df, results], ignore_index=True)
+        if save_results:
+            self._results_df.to_csv(BiasAnalyzer.RESULTS_FILENAME, index=False)
+        return self
 
     def _train_and_evaluate_model(
         self,
