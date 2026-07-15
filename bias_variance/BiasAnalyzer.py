@@ -15,7 +15,12 @@ from keras.metrics import (
 )
 from keras.models import Model
 from sklearn.model_selection import train_test_split
-from common.sampling.Sampler import Sampler
+from bias_variance.generators.ArchitectureGenerator import ArchitectureGenerator
+from bias_variance.generators.Generator import Generator
+from bias_variance.generators.SamplingGenerator import (
+    SamplingGenerator,
+    SamplingStrategy
+)
 from bias_variance._plotting import (
     plot_mean_distribution,
     plot_prediction_means_by_r2_scores,
@@ -256,95 +261,6 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             group = hf.create_group(group_path)
             group.create_dataset('predictions', data=predictions)
             group.create_dataset('actuals', data=actuals)
-
-    class Architector:
-        def __init__(self, settings: dict | None = None):
-            supported = {
-                'wide',
-                'narrow',
-                'taper',
-                'reverse_taper',
-                'combined_taper'
-            }
-            default_settings = {
-                'wide': {
-                    'layers': (1, 16),
-                    'neurons': (64, 256),
-                },
-                'narrow': {
-                    'layers': (16, 64),
-                    'neurons': (2, 64),
-                },
-                'taper': {
-                    'layers': (16, 64),
-                    'init_neurons': (1, 9),
-                    'taper_rate': (0.25, 0.5),
-                    'max_neurons': 256,
-                },
-                'reverse_taper': {
-                    'layers': (16, 64),
-                    'init_neurons': (128, 256),
-                    'taper_rate': (0.25, 0.5),
-                    'max_neurons': 256,
-                },
-                'combined_taper': {
-                    'layers': (16, 64),
-                    'init_neurons': (1, 9),
-                    'taper_rate': (0.25, 0.5),
-                    'max_neurons': 256,
-                },
-            }
-            settings = settings or default_settings
-            normalized_settings = {}
-            for architecture_name, overrides in settings.items():
-                if architecture_name not in supported:
-                    raise ValueError(
-                        f'Unsupported architecture: {architecture_name}'
-                    )
-                normalized_settings[architecture_name] = (
-                    default_settings[architecture_name]
-                    | (overrides or {})
-                )
-            self.settings = normalized_settings
-        
-        def generate(self, random_state: int | None = None) -> dict[str, np.ndarray]:
-            rng = np.random.default_rng(random_state)
-            hidden_layers = {}
-
-            for architecture_name, settings in self.settings.items():
-                min_layers, max_layers = settings['layers']
-                n_layers = rng.integers(min_layers, max_layers)
-                sizes = np.zeros(n_layers, dtype=int)
-
-                if architecture_name in ['wide', 'narrow']:
-                    min_neurons, max_neurons = settings['neurons']
-                    sizes = rng.integers(min_neurons, max_neurons, size=n_layers)
-                elif architecture_name in ['taper', 'reverse_taper', 'combined_taper']:
-                    min_neurons, max_neurons = settings['init_neurons']
-                    init_neurons = rng.integers(min_neurons, max_neurons)
-                    taper_rate = rng.uniform(*settings['taper_rate'])
-                    max_allowed_neurons = settings['max_neurons']
-                    if architecture_name == 'taper':
-                        for i in np.arange(n_layers):
-                            size = round(init_neurons * ((1 + taper_rate) ** i))
-                            sizes[i] = min(size, max_allowed_neurons)
-                    elif architecture_name == 'reverse_taper':
-                        for i in np.arange(n_layers):
-                            size = round(init_neurons * ((1 - taper_rate) ** i))
-                            sizes[i] = max(size, 1)
-                    elif architecture_name == 'combined_taper':
-                        midpoint = max(1, int(np.ceil(n_layers / 2)))
-                        for i in np.arange(n_layers):
-                            if i < midpoint:
-                                size = round(init_neurons * ((1 + taper_rate) ** i))
-                            else:
-                                peak = init_neurons * ((1 + taper_rate) ** (midpoint  - 1))
-                                size = round(peak * ((1 - taper_rate) ** (i - midpoint + 1)))
-                            sizes[i] = min(max(size, 1), max_allowed_neurons)
-                
-                hidden_layers[architecture_name] = sizes
-
-            return hidden_layers
 
     def _get_test_result_and_data(self, split = None, hidden_layers = None):
         if hidden_layers is None:
