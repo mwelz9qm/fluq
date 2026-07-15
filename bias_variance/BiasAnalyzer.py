@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import uuid
 import h5py
@@ -190,15 +192,15 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             self._results_df = pd.DataFrame(columns=columns)
         os.makedirs(BiasAnalyzer.FIT_ITERATIONS_DIR_NAME, exist_ok=True)
     
-    def _build_model(self, hidden_layers) -> Model:
+    def _build_model(self, hidden_layers: list[int]) -> Model:
         '''
         Build model for studies. Uses default values specified in self.model_settings.
         '''
         # use keras functional api to build base model
         inputs = Input(shape=(self.inputs_df.shape[1],))
         x = inputs
-        for hidden_layer in hidden_layers:
-            x = Dense(hidden_layer, activation=self.model_settings['activation'])(x)
+        for size in hidden_layers:
+            x = Dense(size, activation=self.model_settings['activation'])(x)
         outputs = Dense(self.outputs_df.shape[1], name='predictions')(x)
         model = Model(inputs=inputs, outputs=outputs, name='functional_model')
         # compile base model with settings
@@ -223,31 +225,31 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
 
     def _save_predictions_and_actuals(
         self,
-        predictions,
-        actuals,
+        predictions: np.ndarray,
+        actuals: pd.DataFrame,
         *,
         study: str,
         label: str,
         iteration: int,
-    ):
+    ) -> None:
         '''
-        Saves the predictions and actuals from a given trained model.
+        Save one iteration's predictions and actual values to the run's HDF5 file.
 
         Parameters
-        -------------
-        predictions
-            model predictions
-        actuals
-            model actuals relative to predictions by row
-        study: str
-            study name
-        label: str
-            label or variable name in study
-        iteration: int
-            iteration id in a study run
+        ----------
+        predictions : numpy.ndarray
+            Values predicted by the trained model.
+        actuals : pandas.DataFrame
+            Expected output values corresponding by row to ``predictions``.
+        study : str
+            Name of the study that produced the predictions.
+        label : str
+            Label of the generated variation within the study.
+        iteration : int
+            Zero-based study iteration number.
 
         Returns
-        --------------
+        -------
         None
         '''
         if self._run_id is None:
@@ -262,7 +264,35 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             group.create_dataset('predictions', data=predictions)
             group.create_dataset('actuals', data=actuals)
 
-    def _get_test_result_and_data(self, split = None, hidden_layers = None):
+    def _get_test_result_and_data(
+        self,
+        split: tuple[
+            pd.DataFrame,
+            pd.DataFrame,
+            pd.DataFrame,
+            pd.DataFrame,
+        ] | None = None,
+        hidden_layers: list[int] | None = None,
+    ) -> tuple[dict[str, float], np.ndarray, pd.DataFrame]:
+        '''
+        Train and evaluate a model for one generated study variation.
+
+        Parameters
+        ----------
+        split : tuple[pandas.DataFrame, pandas.DataFrame, pandas.DataFrame, pandas.DataFrame] | None
+            Optional ``X_train``, ``X_test``, ``y_train``, and ``y_test`` data.
+            When omitted, the analyzer's base data is split using its configured
+            ``test_size`` and ``random_state``.
+        hidden_layers : list[int] | None
+            Hidden-layer sizes for a generated model architecture. When omitted,
+            the analyzer's base model is reused with its initial weights restored.
+
+        Returns
+        -------
+        tuple[dict[str, float], numpy.ndarray, pandas.DataFrame]
+            Evaluation metrics, model predictions, and the corresponding actual
+            output values.
+        '''
         if hidden_layers is None:
             self._init_model()
             model = self._model
@@ -312,11 +342,31 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
     def _get_results(
         self,
         n_iter: int,
-        generator: Generator,
+        generator: Generator[tuple[int, ...]] | Generator[pd.DataFrame],
         study: str,
         *,
-        save_predictions: bool = True
+        save_predictions: bool = True,
     ) -> pd.DataFrame:
+        '''
+        Generate, train, and evaluate all variations for a configured study.
+
+        Parameters
+        ----------
+        n_iter : int
+            Number of times to invoke the generator.
+        generator : Generator[tuple[int, ...]] | Generator[pandas.DataFrame]
+            Architecture or sampled-dataset generator used by the study.
+        study : str
+            Study type that determines how generated variations are prepared.
+            Currently supports ``'model'`` and ``'sampling'``.
+        save_predictions : bool, default=True
+            Whether to persist predictions and actual values for each variation.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One result row per generated label and iteration.
+        '''
         results = pd.DataFrame()
 
         for i in np.arange(n_iter):
@@ -373,8 +423,30 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
     def _build_generator(
         self,
         study: str,
-        settings: dict,
-    ) -> Generator:
+        settings: dict[str, object],
+    ) -> ArchitectureGenerator | SamplingGenerator:
+        '''
+        Construct the concrete generator configured for a study.
+
+        Parameters
+        ----------
+        study : str
+            Study type. Supported values are ``'model'`` and ``'sampling'``.
+        settings : dict[str, object]
+            Generator settings for the selected study. Model settings describe
+            architecture families; sampling settings contain strategy names.
+
+        Returns
+        -------
+        ArchitectureGenerator | SamplingGenerator
+            Generator initialized with the study settings and, for sampling,
+            the analyzer's combined input and output dataset.
+
+        Raises
+        ------
+        ValueError
+            If ``study`` is unsupported.
+        '''
         if study == 'model':
             return ArchitectureGenerator(settings=settings)
         if study == 'sampling':
@@ -907,11 +979,6 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         Returns
         ------------
         None
-
-        TODO (implementation):
-        ------------
-        - Loop through each fold in folds.
-            - Train and evaluate model on each fold (helper function call).
         '''
         pass
 
