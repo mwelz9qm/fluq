@@ -264,6 +264,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             BiasAnalyzer.FIT_ITERATIONS_DIR_NAME,
             f'{self._run_id}.h5'
         )
+        os.makedirs(BiasAnalyzer.FIT_ITERATIONS_DIR_NAME, exist_ok=True)
         group_path = f'{study}/{label}/iteration_{iteration}'
         with h5py.File(pred_file_path, 'a') as hf:
             group = hf.create_group(group_path)
