@@ -308,34 +308,33 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         }
 
         return scores | metrics, predictions, y_test
-    
-    def _get_variations(self, study, generator, random_state):
-        injected_kwargs = {} # For injecting the random_state into sampling function.
-        if random_state is not None:
-            injected_kwargs['random_state'] = random_state
 
-        variations = {}
-        if study == 'model':
-            variations = generator.generate(random_state)
-        elif study == 'sampling':
-            variations = generator.generate(pd.concat([self.inputs_df, self.outputs_df], axis=1), injected_kwargs)
-        elif study == 'data':
-            variations = {}
-        return variations
-
-    def _get_results(self, n_iter, generator, study, save_predictions=True):
+    def _get_results(
+        self,
+        n_iter: int,
+        generator: Generator,
+        study: str,
+        *,
+        save_predictions: bool = True
+    ) -> pd.DataFrame:
         results = pd.DataFrame()
 
         for i in np.arange(n_iter):
-            iteration_random_state = None
-            if self.random_state is not None:
-                iteration_random_state = self.random_state + i
-            variations = self._get_variations(study, generator, iteration_random_state)
+            iteration_random_state = (
+                None
+                if self.random_state is None
+                else self.random_state + i
+            )
+
+            variations = generator.generate(random_state=iteration_random_state)
+
             for label, variation in variations.items():
                 hidden_layers = None
                 split = None
+
                 if study == 'model':
-                    hidden_layers = variation[variation > 0].tolist()
+                    hidden_layers = list(variation)
+                
                 elif study == 'sampling':
                     sampled_inputs_df = variation[self.inputs_df.columns]
                     sampled_outputs_df = variation[self.outputs_df.columns]
@@ -345,9 +344,12 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                         test_size=self.test_size,
                         random_state=iteration_random_state
                     )
+                
                 elif study == 'data':
                     split = None
+                
                 result, predictions, actuals = self._get_test_result_and_data(hidden_layers=hidden_layers, split=split)
+
                 if save_predictions:
                     self._save_predictions_and_actuals(
                         predictions,
@@ -356,15 +358,69 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                         label=label,
                         iteration=int(i)
                     )
+                
                 df_row = {
                     'run_id': self._run_id,
                     'iteration': int(i),
                     BiasAnalyzer.STUDY_FIELD_NAME: study,
                     BiasAnalyzer.VARIABLE_FIELD_NAME: label
                 } | result
+
                 results = pd.concat([results, pd.DataFrame([df_row])], ignore_index=True)
         
         return results
+    
+    def _build_generator(
+        self,
+        study: str,
+        settings: dict,
+    ) -> Generator:
+        if study == 'model':
+            return ArchitectureGenerator(settings=settings)
+        if study == 'sampling':
+            sampling_strategies = []
+            strategies = settings.get('strategies', [])
+
+            if 'bootstrap' in strategies:
+                sampling_strategies.append(
+                    SamplingStrategy(
+                        label='bootstrap',
+                        function=get_random_samples,
+                        kwargs={
+                            'sample_fraction': 1.0,
+                            'with_replacement': True
+                        }
+                    )
+                )
+                
+            if 'stratified' in strategies:
+                sampling_strategies.append(
+                    SamplingStrategy(
+                        label='stratified',
+                        function=get_quantile_stratified_random_samples,
+                        kwargs={
+                            'stratify_col_index': self.inputs_df.shape[1],
+                            'sample_fraction': 1.0,
+                            'with_replacement': True
+                        }
+                    )
+                )
+            
+            if 'lhs' in strategies:
+                sampling_strategies.append(
+                    SamplingStrategy(
+                        label='lhs',
+                        function=generate_latin_hypercube_samples,
+                        kwargs={
+                            'sample_fraction': 1.0,
+                        }
+                    )
+                )
+            
+            dataset = pd.concat([self.inputs_df, self.outputs_df], axis=1)
+            return SamplingGenerator(dataset=dataset, strategies=sampling_strategies)
+        
+        raise ValueError(f'Unsupported study: {study!r}')
     
     def run_bias_studies(
         self,
@@ -486,35 +542,13 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         os.makedirs(BiasAnalyzer.FIT_ITERATIONS_DIR_NAME, exist_ok=True)
         
         for study, study_settings in settings['studies'].items():
-            results = pd.DataFrame()
-            if study == 'model':
-                architector = self.Architector(settings=study_settings)
-                results = self._get_results(n_iter, architector, study, save_predictions=save_predictions)
-            elif study == 'sampling':
-                sampler = Sampler()
-                strategies = study_settings.get('strategies', [])
-                if 'bootstrap' in strategies:
-                    kwargs = {
-                        'sample_fraction': 1.0,
-                        'with_replacement': True
-                    }
-                    sampler.add_strategy('bootstrap', get_random_samples, **kwargs)
-                if 'stratified' in strategies:
-                    kwargs = {
-                        'stratify_col_index': self.inputs_df.shape[1],
-                        'sample_fraction': 1.0,
-                        'with_replacement': True
-                    }
-                    sampler.add_strategy('stratified', get_quantile_stratified_random_samples, **kwargs)
-                if 'lhs' in strategies:
-                    kwargs = {
-                        'sample_fraction': 1.0,
-                    }
-                    sampler.add_strategy('lhs', generate_latin_hypercube_samples, **kwargs)
-                results = self._get_results(n_iter, sampler, study, save_predictions=save_predictions)
+            generator = self._build_generator(study, study_settings)
+            results = self._get_results(n_iter, generator, study, save_predictions=save_predictions)
             self._results_df = pd.concat([self._results_df, results], ignore_index=True)
+        
         if save_results:
             self._results_df.to_csv(BiasAnalyzer.RESULTS_FILENAME, index=False)
+        
         return self
 
     def _train_and_evaluate_model(
