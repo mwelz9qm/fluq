@@ -35,6 +35,7 @@ from common.sampling._sampling import (
     generate_latin_hypercube_samples
 )
 
+
 class BiasAnalyzerConfigMeta(type):
     '''
     Provides static, const member variables for the BiasAnalyzer class.
@@ -127,6 +128,8 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
     _results_df: pandas.DataFrame | None = None
         Caches the results after a study has ran.
     
+    _run_id: str | None = None
+        The associated run id. Updates after run_bias_studies() is called.
 
     Questions
     ------------
@@ -166,31 +169,6 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         self._init_weights = _init_weights
         self._results_df = _results_df
         self._run_id = _run_id
-
-    def _init_results_csv(self):
-        '''
-        Initializes the results csv file. Use when retrieving a previous study run for
-        bias-variance decomposition or plotting.
-        '''
-        columns = [
-            'run_id',
-            'iteration',
-            BiasAnalyzer.STUDY_FIELD_NAME,
-            BiasAnalyzer.VARIABLE_FIELD_NAME,
-            'loss',
-            *BiasAnalyzer.METRIC_OPTIONS.keys(),
-            'variance',
-            'mean',
-            'conf_interval_lower',
-            'conf_interval_upper',
-        ]
-        if os.path.exists(BiasAnalyzer.RESULTS_FILENAME):
-            self._results_df = pd.read_csv(
-                BiasAnalyzer.RESULTS_FILENAME
-            ).reindex(columns=columns)
-        else:
-            self._results_df = pd.DataFrame(columns=columns)
-        os.makedirs(BiasAnalyzer.FIT_ITERATIONS_DIR_NAME, exist_ok=True)
     
     def _build_model(self, hidden_layers: list[int]) -> Model:
         '''
@@ -214,7 +192,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         )
         return model
     
-    def _init_model(self):
+    def _init_model(self) -> None:
         '''
         Initializes the base model for studies. Use when starting study run.
         '''
@@ -222,6 +200,34 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             self._model = self._build_model(self.model_settings['hidden_layers'])
             # store initial weights when model needs to be retrained
             self._init_weights = self._model.get_weights()
+
+    def _init_results_csv(self) -> None:
+        '''
+        Initializes the results csv file. Use when retrieving a previous study run for
+        bias-variance decomposition or plotting.
+        '''
+        columns = [
+            'run_id',
+            'iteration',
+            BiasAnalyzer.STUDY_FIELD_NAME,
+            BiasAnalyzer.VARIABLE_FIELD_NAME,
+            'loss',
+            *BiasAnalyzer.METRIC_OPTIONS.keys(),
+            'variance',
+            'mean',
+            'conf_interval_lower',
+            'conf_interval_upper',
+        ]
+
+        if os.path.exists(BiasAnalyzer.RESULTS_FILENAME):
+            self._results_df = pd.read_csv(
+                BiasAnalyzer.RESULTS_FILENAME
+            ).reindex(columns=columns)
+        
+        else:
+            self._results_df = pd.DataFrame(columns=columns)
+        
+        os.makedirs(BiasAnalyzer.FIT_ITERATIONS_DIR_NAME, exist_ok=True)
 
     def _save_predictions_and_actuals(
         self,
@@ -395,9 +401,6 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                         random_state=iteration_random_state
                     )
                 
-                elif study == 'data':
-                    split = None
-                
                 result, predictions, actuals = self._get_test_result_and_data(hidden_layers=hidden_layers, split=split)
 
                 if save_predictions:
@@ -504,44 +507,44 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         '''
         Default Settings
         -------------
-        settings = {
-            'n_iter': 100,
-            'studies': {
-                'model': {
-                    'wide': {
-                        'layers': (1, 16),
-                        'neurons': (64, 256),
-                    },
-                    'narrow': {
-                        'layers': (16, 64),
-                        'neurons': (2, 64),
-                    },
-                    'taper': {
-                        'layers': (16, 64),
-                        'init_neurons': (1, 9),
-                        'taper_rate': (0.25, 0.5),
-                        'max_neurons': 256,
-                    },
-                    'reverse_taper': {
-                        'layers': (16, 64),
-                        'init_neurons': (128, 256),
-                        'taper_rate': (0.25, 0.5),
-                        'max_neurons': 256,
-                    },
-                    'combined_taper': {
-                        'layers': (16, 64),
-                        'init_neurons': (1, 9),
-                        'taper_rate': (0.25, 0.5),
-                        'max_neurons': 256,
-                    },
-                },
-                'sampling': {
-                    'strategies': [
-                        'bootstrap', 'stratified', 'lhs'
-                    ]
-                },
-            }
-        }
+        >>> settings = {
+        ...     'n_iter': 100,
+        ...     'studies': {
+        ...         'model': {
+        ...             'wide': {
+        ...                 'layers': (1, 16),
+        ...                 'neurons': (64, 256),
+        ...             },
+        ...             'narrow': {
+        ...                 'layers': (16, 64),
+        ...                 'neurons': (2, 64),
+        ...             },
+        ...             'taper': {
+        ...                 'layers': (16, 64),
+        ...                 'init_neurons': (1, 9),
+        ...                 'taper_rate': (0.25, 0.5),
+        ...                 'max_neurons': 256,
+        ...             },
+        ...             'reverse_taper': {
+        ...                 'layers': (16, 64),
+        ...                 'init_neurons': (128, 256),
+        ...                 'taper_rate': (0.25, 0.5),
+        ...                 'max_neurons': 256,
+        ...             },
+        ...             'combined_taper': {
+        ...                 'layers': (16, 64),
+        ...                 'init_neurons': (1, 9),
+        ...                 'taper_rate': (0.25, 0.5),
+        ...                 'max_neurons': 256,
+        ...             },
+        ...         },
+        ...         'sampling': {
+        ...             'strategies': [
+        ...                 'bootstrap', 'stratified', 'lhs'
+        ...             ]
+        ...         },
+        ...     }
+        ... }
         '''
         default_settings = {
             'n_iter': 100,
@@ -604,6 +607,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         if sampling_settings is not None:
             requested_strategies = set(sampling_settings.get('strategies', []))
             unknown_strategies = requested_strategies - supported_strategies
+
             if unknown_strategies:
                 raise ValueError(
                 f'Unsupported sampling strategies: {sorted(unknown_strategies)}'
@@ -700,12 +704,6 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                 }
         
         return views
-
-    def _get_result_df(self):
-        results_df = self._results_df
-        if results_df is None:
-            results_df = pd.read_csv(BiasAnalyzer.RESULTS_FILENAME)
-        return results_df
     
     def plot_disagreement_map(
         self,
@@ -733,7 +731,10 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         view = view or ['model', 'sampling', 'data']
         plot_type = plot_type or ['variance_contribution']
 
-        results_df = self._get_result_df()
+        results_df = self._results_df
+        if results_df is None:
+            results_df = pd.read_csv(BiasAnalyzer.RESULTS_FILENAME)
+        
         filtered_df = results_df[results_df[BiasAnalyzer.STUDY_FIELD_NAME].isin(view)]
 
         if filtered_df.empty:
