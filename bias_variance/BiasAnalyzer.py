@@ -17,6 +17,28 @@ from keras.metrics import (
 )
 from keras.models import Model
 from sklearn.model_selection import train_test_split
+from bias_variance._constants import (
+    ACTUALS_DATASET_NAME,
+    CONF_INTERVAL_LOWER_FIELD_NAME,
+    CONF_INTERVAL_UPPER_FIELD_NAME,
+    FIT_ITERATIONS_DIR_NAME,
+    ITERATION_FIELD_NAME,
+    LOSS_FIELD_NAME,
+    MEAN_FIELD_NAME,
+    MetricName,
+    MODEL_NAME,
+    PlotType,
+    PREDICTIONS_DATASET_NAME,
+    PREDICTIONS_LAYER_NAME,
+    RESULTS_FILENAME,
+    RUN_ID_FIELD_NAME,
+    SamplingStrategyName,
+    STUDY_FIELD_NAME,
+    StudyName,
+    TIMESTAMP_FIELD_NAME,
+    VARIABLE_FIELD_NAME,
+    VARIANCE_FIELD_NAME,
+)
 from bias_variance.generators.ArchitectureGenerator import ArchitectureGenerator
 from bias_variance.generators.Generator import Generator
 from bias_variance.generators.SamplingGenerator import (
@@ -36,51 +58,6 @@ from common.sampling._sampling import (
 )
 
 
-class BiasAnalyzerConfigMeta(type):
-    '''
-    Provides static, const member variables for the BiasAnalyzer class.
-    '''
-    @property
-    def METRIC_OPTIONS(cls):
-        '''
-        Returns all keras functional model metric selections for analysis.
-        '''
-        return {
-            'rmse' : RootMeanSquaredError(name='rmse'),
-            'mse' : MeanSquaredError(name='mse'),
-            'mae' : MeanAbsoluteError(name='mae'),
-            'r2' : R2Score(name='r2')
-        }
-    
-    @property
-    def RESULTS_FILENAME(cls):
-        '''
-        Returns the saved results dataframe filename (w/ file extension) for later analysis.
-        '''
-        return 'bias_variance_results.csv'
-    
-    @property
-    def FIT_ITERATIONS_DIR_NAME(cls):
-        '''
-        Returns directory name for saved predictions and actuals from model training/fitting.
-        '''
-        return 'iterations'
-    
-    @property
-    def STUDY_FIELD_NAME(cls):
-        '''
-        Returns study field name for results table.
-        '''
-        return 'study'
-    
-    @property
-    def VARIABLE_FIELD_NAME(cls):
-        '''
-        Returns variable field name for results table. This is dependent on the type of study.
-        '''
-        return 'variable'
-
-
 # General workflow
 # analyzer = BiasAnalyzer(...)
 # analyzer.run_model_bias_study(...)
@@ -89,7 +66,7 @@ class BiasAnalyzerConfigMeta(type):
 # analyzer.decompose_variance(...)
 # analyzer.plot_disagreement_map(...)
 
-class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
+class BiasAnalyzer:
     '''
     Analyzes each bias by comparing to the base model and dataset to
     the generated predictions' 95% confidence interval.
@@ -136,6 +113,17 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
     - Should we select all plots by default or only select the best representation w/ an auto selection feature?
     '''
 
+    METRIC_OPTIONS = {
+        MetricName.RMSE: RootMeanSquaredError(name=MetricName.RMSE),
+        MetricName.MSE: MeanSquaredError(name=MetricName.MSE),
+        MetricName.MAE: MeanAbsoluteError(name=MetricName.MAE),
+        MetricName.R2: R2Score(name=MetricName.R2),
+    }
+    RESULTS_FILENAME = RESULTS_FILENAME
+    FIT_ITERATIONS_DIR_NAME = FIT_ITERATIONS_DIR_NAME
+    STUDY_FIELD_NAME = STUDY_FIELD_NAME
+    VARIABLE_FIELD_NAME = VARIABLE_FIELD_NAME
+
     def __init__(
         self,
         inputs_df: pd.DataFrame,
@@ -179,8 +167,8 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         x = inputs
         for size in hidden_layers:
             x = Dense(size, activation=self.model_settings['activation'])(x)
-        outputs = Dense(self.outputs_df.shape[1], name='predictions')(x)
-        model = Model(inputs=inputs, outputs=outputs, name='functional_model')
+        outputs = Dense(self.outputs_df.shape[1], name=PREDICTIONS_LAYER_NAME)(x)
+        model = Model(inputs=inputs, outputs=outputs, name=MODEL_NAME)
         # compile base model with settings
         model.compile(
             optimizer=self.model_settings['optimizer'],
@@ -207,27 +195,27 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         bias-variance decomposition or plotting.
         '''
         columns = [
-            'run_id',
-            'iteration',
-            BiasAnalyzer.STUDY_FIELD_NAME,
-            BiasAnalyzer.VARIABLE_FIELD_NAME,
-            'loss',
+            RUN_ID_FIELD_NAME,
+            ITERATION_FIELD_NAME,
+            STUDY_FIELD_NAME,
+            VARIABLE_FIELD_NAME,
+            LOSS_FIELD_NAME,
             *BiasAnalyzer.METRIC_OPTIONS.keys(),
-            'variance',
-            'mean',
-            'conf_interval_lower',
-            'conf_interval_upper',
+            VARIANCE_FIELD_NAME,
+            MEAN_FIELD_NAME,
+            CONF_INTERVAL_LOWER_FIELD_NAME,
+            CONF_INTERVAL_UPPER_FIELD_NAME,
         ]
 
-        if os.path.exists(BiasAnalyzer.RESULTS_FILENAME):
+        if os.path.exists(RESULTS_FILENAME):
             self._results_df = pd.read_csv(
-                BiasAnalyzer.RESULTS_FILENAME
+                RESULTS_FILENAME
             ).reindex(columns=columns)
         
         else:
             self._results_df = pd.DataFrame(columns=columns)
         
-        os.makedirs(BiasAnalyzer.FIT_ITERATIONS_DIR_NAME, exist_ok=True)
+        os.makedirs(FIT_ITERATIONS_DIR_NAME, exist_ok=True)
 
     def _save_predictions_and_actuals(
         self,
@@ -261,15 +249,15 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         if self._run_id is None:
             raise ValueError('_run_id is None.')
         pred_file_path = os.path.join(
-            BiasAnalyzer.FIT_ITERATIONS_DIR_NAME,
+            FIT_ITERATIONS_DIR_NAME,
             f'{self._run_id}.h5'
         )
-        os.makedirs(BiasAnalyzer.FIT_ITERATIONS_DIR_NAME, exist_ok=True)
+        os.makedirs(FIT_ITERATIONS_DIR_NAME, exist_ok=True)
         group_path = f'{study}/{label}/iteration_{iteration}'
         with h5py.File(pred_file_path, 'a') as hf:
             group = hf.create_group(group_path)
-            group.create_dataset('predictions', data=predictions)
-            group.create_dataset('actuals', data=actuals)
+            group.create_dataset(PREDICTIONS_DATASET_NAME, data=predictions)
+            group.create_dataset(ACTUALS_DATASET_NAME, data=actuals)
 
     def _get_test_result_and_data(
         self,
@@ -338,10 +326,10 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         )
 
         metrics = {
-            'variance': variance,
-            'mean': mean,
-            'conf_interval_lower': conf_interval[0],
-            'conf_interval_upper': conf_interval[1],
+            VARIANCE_FIELD_NAME: variance,
+            MEAN_FIELD_NAME: mean,
+            CONF_INTERVAL_LOWER_FIELD_NAME: conf_interval[0],
+            CONF_INTERVAL_UPPER_FIELD_NAME: conf_interval[1],
         }
 
         return scores | metrics, predictions, y_test
@@ -389,10 +377,10 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                 hidden_layers = None
                 split = None
 
-                if study == 'model':
+                if study == StudyName.MODEL:
                     hidden_layers = list(variation)
                 
-                elif study == 'sampling':
+                elif study == StudyName.SAMPLING:
                     sampled_inputs_df = variation[self.inputs_df.columns]
                     sampled_outputs_df = variation[self.outputs_df.columns]
                     split = train_test_split(
@@ -414,10 +402,10 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                     )
                 
                 df_row = {
-                    'run_id': self._run_id,
-                    'iteration': int(i),
-                    BiasAnalyzer.STUDY_FIELD_NAME: study,
-                    BiasAnalyzer.VARIABLE_FIELD_NAME: label
+                    RUN_ID_FIELD_NAME: self._run_id,
+                    ITERATION_FIELD_NAME: int(i),
+                    STUDY_FIELD_NAME: study,
+                    VARIABLE_FIELD_NAME: label
                 } | result
 
                 results = pd.concat([results, pd.DataFrame([df_row])], ignore_index=True)
@@ -451,16 +439,16 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         ValueError
             If ``study`` is unsupported.
         '''
-        if study == 'model':
+        if study == StudyName.MODEL:
             return ArchitectureGenerator(settings=settings)
-        if study == 'sampling':
+        if study == StudyName.SAMPLING:
             sampling_strategies = []
             strategies = settings.get('strategies', [])
 
-            if 'bootstrap' in strategies:
+            if SamplingStrategyName.BOOTSTRAP in strategies:
                 sampling_strategies.append(
                     SamplingStrategy(
-                        label='bootstrap',
+                        label=SamplingStrategyName.BOOTSTRAP,
                         function=get_random_samples,
                         kwargs={
                             'sample_fraction': 1.0,
@@ -469,10 +457,10 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                     )
                 )
                 
-            if 'stratified' in strategies:
+            if SamplingStrategyName.STRATIFIED in strategies:
                 sampling_strategies.append(
                     SamplingStrategy(
-                        label='stratified',
+                        label=SamplingStrategyName.STRATIFIED,
                         function=get_quantile_stratified_random_samples,
                         kwargs={
                             'stratify_col_index': self.inputs_df.shape[1],
@@ -482,10 +470,10 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                     )
                 )
             
-            if 'lhs' in strategies:
+            if SamplingStrategyName.LHS in strategies:
                 sampling_strategies.append(
                     SamplingStrategy(
-                        label='lhs',
+                        label=SamplingStrategyName.LHS,
                         function=generate_latin_hypercube_samples,
                         kwargs={
                             'sample_fraction': 1.0,
@@ -596,15 +584,15 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         if not settings['studies']:
             raise ValueError('At least one study must be configured')
         
-        supported_studies = {'model', 'sampling'}
+        supported_studies = {StudyName.MODEL, StudyName.SAMPLING}
         unknown_studies = set(settings['studies']) - supported_studies
         if unknown_studies:
             raise ValueError(
                 f'Unsupported studies: {sorted(unknown_studies)}'
             )
         
-        supported_strategies = {'bootstrap', 'stratified', 'lhs'}
-        sampling_settings = settings['studies'].get('sampling')
+        supported_strategies = set(SamplingStrategyName)
+        sampling_settings = settings['studies'].get(StudyName.SAMPLING)
         if sampling_settings is not None:
             requested_strategies = set(sampling_settings.get('strategies', []))
             unknown_strategies = requested_strategies - supported_strategies
@@ -616,7 +604,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         
         self._init_model()
         self._run_id = f'run_{uuid.uuid4().hex}'
-        os.makedirs(BiasAnalyzer.FIT_ITERATIONS_DIR_NAME, exist_ok=True)
+        os.makedirs(FIT_ITERATIONS_DIR_NAME, exist_ok=True)
         
         for study, study_settings in settings['studies'].items():
             generator = self._build_generator(study, study_settings)
@@ -624,7 +612,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             self._results_df = pd.concat([self._results_df, results], ignore_index=True)
         
         if save_results:
-            self._results_df.to_csv(BiasAnalyzer.RESULTS_FILENAME, index=False)
+            self._results_df.to_csv(RESULTS_FILENAME, index=False)
         
         return self
 
@@ -658,23 +646,23 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
 
         df = self._results_df
         if df is None:
-            df = pd.read_csv(BiasAnalyzer.RESULTS_FILENAME)
+            df = pd.read_csv(RESULTS_FILENAME)
         
         views = {}
 
-        for study_group_name, study_group_df in df.groupby(BiasAnalyzer.STUDY_FIELD_NAME):
+        for study_group_name, study_group_df in df.groupby(STUDY_FIELD_NAME):
             if study_group_name not in view:
                 continue
 
             views[study_group_name] = {}
-            for var_group_name, var_group_df in study_group_df.groupby(BiasAnalyzer.VARIABLE_FIELD_NAME):
+            for var_group_name, var_group_df in study_group_df.groupby(VARIABLE_FIELD_NAME):
                 metric_cols = [
                     col for col in var_group_df.columns
                     if col not in {
-                        BiasAnalyzer.STUDY_FIELD_NAME,
-                        BiasAnalyzer.VARIABLE_FIELD_NAME,
-                        'run_id',
-                        'timestamp'
+                        STUDY_FIELD_NAME,
+                        VARIABLE_FIELD_NAME,
+                        RUN_ID_FIELD_NAME,
+                        TIMESTAMP_FIELD_NAME,
                     }
                 ]
 
@@ -729,39 +717,39 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         None
         '''
         # variance-contribution
-        view = view or ['model', 'sampling', 'data']
-        plot_type = plot_type or ['variance_contribution']
+        view = view or list(StudyName)
+        plot_type = plot_type or [PlotType.VARIANCE_CONTRIBUTION]
 
         results_df = self._results_df
         if results_df is None:
-            results_df = pd.read_csv(BiasAnalyzer.RESULTS_FILENAME)
+            results_df = pd.read_csv(RESULTS_FILENAME)
         
-        filtered_df = results_df[results_df[BiasAnalyzer.STUDY_FIELD_NAME].isin(view)]
+        filtered_df = results_df[results_df[STUDY_FIELD_NAME].isin(view)]
 
         if filtered_df.empty:
             raise ValueError(
                 'No results are available for the selected studies.'
             )
 
-        if 'variance_contribution' in plot_type:
+        if PlotType.VARIANCE_CONTRIBUTION in plot_type:
             plot_variance_contribution(
                 filtered_df,
                 settings=plot_settings,
             )
 
-        if 'prediction_means_by_r2_scores' in plot_type:
+        if PlotType.PREDICTION_MEANS_BY_R2_SCORES in plot_type:
             plot_prediction_means_by_r2_scores(
                 filtered_df,
                 settings=plot_settings,
             )
 
-        if 'variance_distribution' in plot_type:
+        if PlotType.VARIANCE_DISTRIBUTION in plot_type:
             plot_variance_distribution(
                 filtered_df,
                 settings=plot_settings,
             )
 
-        if 'mean_distribution' in plot_type:
+        if PlotType.MEAN_DISTRIBUTION in plot_type:
             plot_mean_distribution(
                 filtered_df,
                 settings=plot_settings,
