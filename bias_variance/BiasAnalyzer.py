@@ -435,7 +435,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         Parameters
         ----------
         study : str
-            Study type. Supported values are ``'model'`` and ``'sampling'``.
+            Study type. Supported values are ``'model'``, ``'sampling'``, and ``'data'``.
         settings : dict[str, object]
             Generator settings for the selected study. Model settings describe
             architecture families; sampling settings contain strategy names.
@@ -456,7 +456,6 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         if study == 'sampling':
             sampling_strategies = []
             strategies = settings.get('strategies', [])
-
             if 'bootstrap' in strategies:
                 sampling_strategies.append(
                     SamplingStrategy(
@@ -468,7 +467,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                         }
                     )
                 )
-                
+
             if 'stratified' in strategies:
                 sampling_strategies.append(
                     SamplingStrategy(
@@ -492,10 +491,14 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                         }
                     )
                 )
-            
+
             dataset = pd.concat([self.inputs_df, self.outputs_df], axis=1)
             return SamplingGenerator(dataset=dataset, strategies=sampling_strategies)
-        
+        if study == 'data':
+            raise NotImplementedError(
+                "Data study generator is not implemented yet. "
+                "This should connect to NoiseGenerator/DataNoiseGenerator."
+            )
         raise ValueError(f'Unsupported study: {study!r}')
     
     def run_bias_studies(
@@ -596,7 +599,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         if not settings['studies']:
             raise ValueError('At least one study must be configured')
         
-        supported_studies = {'model', 'sampling'}
+        supported_studies = {'model', 'sampling', 'data'}
         unknown_studies = set(settings['studies']) - supported_studies
         if unknown_studies:
             raise ValueError(
