@@ -55,3 +55,21 @@ PREDICTIONS_DATASET_NAME = "predictions"
 ACTUALS_DATASET_NAME = "actuals"
 PREDICTIONS_LAYER_NAME = "predictions"
 MODEL_NAME = "functional_model"
+
+RUN_METADATA_FILENAME = "bias_variance_runs.csv"
+
+CREATED_AT_FIELD_NAME = "created_at"
+RANDOM_STATE_FIELD_NAME = "random_state"
+TEST_SIZE_FIELD_NAME = "test_size"
+N_ITER_FIELD_NAME = "n_iter"
+
+OPTIMIZER_FIELD_NAME = "optimizer"
+LEARNING_RATE_FIELD_NAME = "learning_rate"
+METRICS_FIELD_NAME = "metrics"
+EPOCHS_FIELD_NAME = "epochs"
+BATCH_SIZE_FIELD_NAME = "batch_size"
+DEVICE_FIELD_NAME = "device"
+
+BASELINE_ARCHITECTURE_FIELD_NAME = "baseline_architecture"
+ARCHITECTURE_FIELD_NAME = "architecture"
+MODEL_SEED_FIELD_NAME = "model_seed"
