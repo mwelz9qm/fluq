@@ -881,10 +881,15 @@ class BiasAnalyzer:
         predictions_values = predictions.reshape(-1)
         variance = float(np.var(predictions_values))
         mean = float(np.mean(predictions_values))
-        conf_interval = stats.norm.interval(
-            0.95,
-            loc=mean,
-            scale=stats.sem(predictions_values),
+        standard_error = float(stats.sem(predictions_values))
+        conf_interval = (
+            (mean, mean)
+            if standard_error == 0.0
+            else stats.norm.interval(
+                0.95,
+                loc=mean,
+                scale=standard_error,
+            )
         )
 
         scores.update(
