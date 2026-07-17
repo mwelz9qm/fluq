@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from torch import nn
 
-from FnnArchitecture import FnnArchitecture
+from .FnnArchitecture import FnnArchitecture
 
 
 @dataclass(frozen=True, slots=True)
@@ -12,6 +12,14 @@ class FnnConfig:
     output_size: int
     activation_factory: Callable[[], nn.Module] = nn.ReLU
     bias: bool = True
+
+    def __post_init__(self) -> None:
+        if self.input_size <= 0:
+            raise ValueError('input_size must be greater than 0.')
+        
+        if self.output_size <= 0:
+            raise ValueError('output_size must be greater than 0.')
+
 
 class FnnBuilder:
     def __init__(self, config: FnnConfig) -> None:
