@@ -5,6 +5,7 @@ import os
 import uuid
 import h5py
 import json
+from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
 import scipy.stats as stats
@@ -30,6 +31,8 @@ from bias_variance._constants import (
     MetricName,
     MODEL_NAME,
     PlotType,
+    MODEL_SEED_FIELD_NAME,
+    ARCHITECTURE_FIELD_NAME,
     PREDICTIONS_DATASET_NAME,
     PREDICTIONS_LAYER_NAME,
     RESULTS_FILENAME,
@@ -40,6 +43,18 @@ from bias_variance._constants import (
     TIMESTAMP_FIELD_NAME,
     VARIABLE_FIELD_NAME,
     VARIANCE_FIELD_NAME,
+    CREATED_AT_FIELD_NAME,
+    RANDOM_STATE_FIELD_NAME,
+    TEST_SIZE_FIELD_NAME,
+    N_ITER_FIELD_NAME,
+    OPTIMIZER_FIELD_NAME,
+    LEARNING_RATE_FIELD_NAME,
+    METRICS_FIELD_NAME,
+    EPOCHS_FIELD_NAME,
+    BATCH_SIZE_FIELD_NAME,
+    DEVICE_FIELD_NAME,
+    BASELINE_ARCHITECTURE_FIELD_NAME,
+    RUN_METADATA_FILENAME
 )
 from bias_variance.generators.FnnArchitectureGenerator import FnnArchitectureGenerator
 from bias_variance.generators.Generator import Generator
@@ -87,20 +102,11 @@ class BiasAnalyzer:
         'batch_size': int = Number of training samples.
         'verbose': int = logging infomation display modes.
     
-    test_size : float = 0.2
-        Fraction used for initial train/test split.
-
-    random_state : int | None = None
-        Seed used for reproducibility.
-
-    _model: tensorflow.keras.Model | None = None
-        Holds the base model.
-    
-    _init_weights: list[numpy.ndarray] | None = None
-        Holds the initial weights before any training data is fitted on the base model.
-    
     _results_df: pandas.DataFrame | None = None
         Caches the results after a study has ran.
+
+    _runs_metadata_df: pandas.DataFrame | None = None
+        Caches one metadata row per completed study run.
     
     _run_id: str | None = None
         The associated run id. Updates after run_bias_studies() is called.
@@ -112,9 +118,44 @@ class BiasAnalyzer:
 
     METRIC_OPTIONS = frozenset(MetricName)
     RESULTS_FILENAME = RESULTS_FILENAME
+    RUN_METADATA_FILENAME = RUN_METADATA_FILENAME
     FIT_ITERATIONS_DIR_NAME = FIT_ITERATIONS_DIR_NAME
     STUDY_FIELD_NAME = STUDY_FIELD_NAME
     VARIABLE_FIELD_NAME = VARIABLE_FIELD_NAME
+
+    RESULT_COLUMNS = (
+        RUN_ID_FIELD_NAME,
+        ITERATION_FIELD_NAME,
+        STUDY_FIELD_NAME,
+        VARIABLE_FIELD_NAME,
+        MODEL_SEED_FIELD_NAME,
+        ARCHITECTURE_FIELD_NAME,
+        LOSS_FIELD_NAME,
+        MetricName.RMSE,
+        MetricName.R2,
+        MetricName.MSE,
+        MetricName.MAE,
+        VARIANCE_FIELD_NAME,
+        MEAN_FIELD_NAME,
+        CONF_INTERVAL_LOWER_FIELD_NAME,
+        CONF_INTERVAL_UPPER_FIELD_NAME,
+    )
+
+    RUN_METADATA_COLUMNS = (
+        RUN_ID_FIELD_NAME,
+        CREATED_AT_FIELD_NAME,
+        RANDOM_STATE_FIELD_NAME,
+        TEST_SIZE_FIELD_NAME,
+        N_ITER_FIELD_NAME,
+        OPTIMIZER_FIELD_NAME,
+        LEARNING_RATE_FIELD_NAME,
+        LOSS_FIELD_NAME,
+        METRICS_FIELD_NAME,
+        EPOCHS_FIELD_NAME,
+        BATCH_SIZE_FIELD_NAME,
+        DEVICE_FIELD_NAME,
+        BASELINE_ARCHITECTURE_FIELD_NAME,
+    )
 
     def __init__(
         self,
@@ -124,9 +165,8 @@ class BiasAnalyzer:
         fnn_builder: FnnBuilder,
         baseline_architecture: FnnArchitecture,
         training_config: TrainingConfig,
-        test_size: float = 0.2,
-        random_state: int | None = None,
         _results_df: pd.DataFrame | None = None,
+        _runs_metadata_df: pd.DataFrame | None = None,
         _run_id: str | None = None,
     ) -> None:
         if len(inputs_df) != len(outputs_df):
@@ -134,11 +174,6 @@ class BiasAnalyzer:
                 'inputs_df and outputs_df must have the same number of rows.'
             )
         
-        if not 0 < test_size < 1:
-            raise ValueError(
-                'test_size must be between 0 and 1.'
-            )
-
         if fnn_builder.config.input_size != inputs_df.shape[1]:
             raise ValueError(
                 'FnnBuilder input_size must match the number of input columns.'
@@ -154,44 +189,129 @@ class BiasAnalyzer:
         self.fnn_builder = fnn_builder
         self.baseline_architecture = baseline_architecture
         self.training_config = training_config
-        self.test_size = test_size
-        self.random_state = random_state
         self._results_df = _results_df
+        self._runs_metadata_df = _runs_metadata_df
         self._run_id = _run_id
-    
+
     def _build_model(
         self,
         architecture: FnnArchitecture,
     ) -> nn.Sequential:
         return self.fnn_builder.build(architecture).to(self.training_config.resolved_device)
 
-    def _init_results_csv(self) -> None:
-        '''
-        Initializes the results csv file. Use when retrieving a previous study run for
-        bias-variance decomposition or plotting.
-        '''
-        columns = [
-            RUN_ID_FIELD_NAME,
-            ITERATION_FIELD_NAME,
-            STUDY_FIELD_NAME,
-            VARIABLE_FIELD_NAME,
-            LOSS_FIELD_NAME,
-            *(str(metric) for metric in MetricName),
-            VARIANCE_FIELD_NAME,
-            MEAN_FIELD_NAME,
-            CONF_INTERVAL_LOWER_FIELD_NAME,
-            CONF_INTERVAL_UPPER_FIELD_NAME,
+    def _build_run_metadata(
+        self,
+        *,
+        n_iter: int,
+        random_state: int | None,
+        test_size: float,
+    ) -> dict[str, object]:
+        if self._run_id is None:
+            raise ValueError('_run_id is None.')
+
+        return {
+            RUN_ID_FIELD_NAME: self._run_id,
+            CREATED_AT_FIELD_NAME: datetime.now(
+                timezone.utc
+            ).isoformat(),
+            RANDOM_STATE_FIELD_NAME: random_state,
+            TEST_SIZE_FIELD_NAME: test_size,
+            N_ITER_FIELD_NAME: n_iter,
+            OPTIMIZER_FIELD_NAME: self.training_config.optimizer,
+            LEARNING_RATE_FIELD_NAME: (
+                self.training_config.learning_rate
+            ),
+            LOSS_FIELD_NAME: self.training_config.loss,
+            METRICS_FIELD_NAME: json.dumps(
+                list(self.training_config.metrics)
+            ),
+            EPOCHS_FIELD_NAME: self.training_config.epochs,
+            BATCH_SIZE_FIELD_NAME: (
+                self.training_config.batch_size
+            ),
+            DEVICE_FIELD_NAME: str(
+                self.training_config.resolved_device
+            ),
+            BASELINE_ARCHITECTURE_FIELD_NAME: json.dumps(
+                list(self.baseline_architecture.hidden_layers)
+            ),
+        }
+
+    def _record_run_metadata(
+        self,
+        *,
+        n_iter: int,
+        random_state: int | None,
+        test_size: float,
+    ) -> None:
+        if self._runs_metadata_df is None:
+            raise ValueError('_runs_metadata_df is not initialized.')
+        if self._run_id in set(
+            self._runs_metadata_df[RUN_ID_FIELD_NAME].dropna()
+        ):
+            raise ValueError(f'Duplicate run ID: {self._run_id}')
+
+        metadata = self._build_run_metadata(
+            n_iter=n_iter,
+            random_state=random_state,
+            test_size=test_size,
+        )
+
+        self._runs_metadata_df = pd.concat(
+            [
+                self._runs_metadata_df,
+                pd.DataFrame([metadata])
+            ],
+            ignore_index=True
+        )
+
+    @staticmethod
+    def _load_or_initialize_table(
+        filename: str,
+        columns: tuple[str, ...],
+    ) -> pd.DataFrame:
+        if os.path.exists(filename):
+            return pd.read_csv(filename).reindex(columns=columns)
+        
+        return pd.DataFrame(columns=columns)
+
+    def get_runs_metadata(self) -> pd.DataFrame:
+        '''Return a copy of the persisted and in-memory run metadata.'''
+        if self._runs_metadata_df is None:
+            self._runs_metadata_df = self._load_or_initialize_table(
+                RUN_METADATA_FILENAME,
+                self.RUN_METADATA_COLUMNS,
+            )
+
+        return self._runs_metadata_df.copy()
+
+    def get_run_metadata(self, run_id: str) -> pd.Series:
+        '''Return the metadata row for one run ID.'''
+        runs_metadata = self.get_runs_metadata()
+        matches = runs_metadata[
+            runs_metadata[RUN_ID_FIELD_NAME] == run_id
         ]
 
-        if os.path.exists(RESULTS_FILENAME):
-            self._results_df = pd.read_csv(
-                RESULTS_FILENAME
-            ).reindex(columns=columns)
-        
-        else:
-            self._results_df = pd.DataFrame(columns=columns)
-        
-        os.makedirs(FIT_ITERATIONS_DIR_NAME, exist_ok=True)
+        if matches.empty:
+            raise KeyError(f'Unknown run ID: {run_id}')
+
+        return matches.iloc[0].copy()
+
+    def get_results_with_metadata(self) -> pd.DataFrame:
+        '''Join result rows to their run metadata using ``run_id``.'''
+        if self._results_df is None:
+            self._results_df = self._load_or_initialize_table(
+                RESULTS_FILENAME,
+                self.RESULT_COLUMNS,
+            )
+
+        return self._results_df.merge(
+            self.get_runs_metadata(),
+            on=RUN_ID_FIELD_NAME,
+            how='left',
+            validate='many_to_one',
+            suffixes=('_result', '_run'),
+        )
 
     def _save_predictions_and_actuals(
         self,
@@ -394,7 +514,8 @@ class BiasAnalyzer:
         ] | None = None,
         architecture: FnnArchitecture | None = None,
         *,
-        random_state: int | None = None
+        random_state: int | None,
+        test_size: float,
     ) -> tuple[dict[str, float], np.ndarray, pd.DataFrame]:
         '''
         Train and evaluate a model for one generated study variation.
@@ -415,17 +536,11 @@ class BiasAnalyzer:
             Evaluation metrics, model predictions, and the corresponding actual
             output values.
         '''
-        seed = (
-            self.random_state
-            if random_state is None
-            else random_state
-        )
-        
         X_train, X_test, y_train, y_test = split or train_test_split(
             self.inputs_df,
             self.outputs_df,
-            test_size=self.test_size,
-            random_state=seed
+            test_size=test_size,
+            random_state=random_state
         )
 
         selected_architecture  = (
@@ -434,7 +549,7 @@ class BiasAnalyzer:
             else architecture
         )
 
-        self._set_random_state(seed)
+        self._set_random_state(random_state)
         model = self._build_model(selected_architecture)
 
         X_train_tensor = self._to_tensor(X_train)
@@ -447,7 +562,7 @@ class BiasAnalyzer:
             model,
             X_train_tensor,
             y_train_tensor,
-            random_state=seed
+            random_state=random_state
         )
 
         predictions, test_loss = self._predict(model, X_test_tensor, y_test_tensor)
@@ -491,6 +606,8 @@ class BiasAnalyzer:
         generator: Generator[FnnArchitecture] | Generator[pd.DataFrame],
         study: str,
         *,
+        random_state: int | None,
+        test_size: float,
         save_predictions: bool = True,
     ) -> pd.DataFrame:
         '''
@@ -518,11 +635,19 @@ class BiasAnalyzer:
         for i in np.arange(n_iter):
             iteration_random_state = (
                 None
-                if self.random_state is None
-                else self.random_state + i
+                if random_state is None
+                else random_state + int(i)
             )
 
             variations = generator.generate(random_state=iteration_random_state)
+            model_study_split = None
+            if study == StudyName.MODEL:
+                model_study_split = train_test_split(
+                    self.inputs_df,
+                    self.outputs_df,
+                    test_size=test_size,
+                    random_state=iteration_random_state,
+                )
 
             for j, (label, variation) in enumerate(variations.items()):
                 model_random_state = (
@@ -537,9 +662,10 @@ class BiasAnalyzer:
                     if not isinstance(variation, FnnArchitecture):
                         raise TypeError(
                             'Model studies must generate FnnArchitecture values.'
-                        )
+                    )
                     
                     architecture = variation
+                    split = model_study_split
                 
                 elif study == StudyName.SAMPLING:
                     sampled_inputs_df = variation[self.inputs_df.columns]
@@ -547,14 +673,15 @@ class BiasAnalyzer:
                     split = train_test_split(
                         sampled_inputs_df,
                         sampled_outputs_df,
-                        test_size=self.test_size,
+                        test_size=test_size,
                         random_state=iteration_random_state
                     )
                 
                 result, predictions, actuals = self._get_test_result_and_data(
                     architecture=architecture,
                     split=split,
-                    random_state=model_random_state
+                    random_state=model_random_state,
+                    test_size=test_size,
                 )
 
                 if save_predictions:
@@ -570,7 +697,15 @@ class BiasAnalyzer:
                     RUN_ID_FIELD_NAME: self._run_id,
                     ITERATION_FIELD_NAME: int(i),
                     STUDY_FIELD_NAME: study,
-                    VARIABLE_FIELD_NAME: label
+                    VARIABLE_FIELD_NAME: label,
+                    MODEL_SEED_FIELD_NAME: model_random_state,
+                    ARCHITECTURE_FIELD_NAME: json.dumps(
+                        list(
+                            architecture.hidden_layers
+                            if architecture is not None
+                            else self.baseline_architecture.hidden_layers
+                        )
+                    ),
                 } | result
 
                 results = pd.concat([results, pd.DataFrame([df_row])], ignore_index=True)
@@ -663,7 +798,8 @@ class BiasAnalyzer:
         -------------
         >>> settings = {
         ...     'n_iter': 100,
-        ...     'random_state': 42,
+        ...     'random_state': None,
+        ...     'test_size': 0.2,
         ...     'studies': {
         ...         'model': {
         ...             'wide': {
@@ -703,7 +839,8 @@ class BiasAnalyzer:
         '''
         default_settings = {
             'n_iter': 100,
-            'random_state': 42,
+            'random_state': None,
+            'test_size': 0.2,
             'studies': {
                 'model': {
                     'wide': {
@@ -743,10 +880,30 @@ class BiasAnalyzer:
         settings = settings or default_settings
 
         n_iter = settings['n_iter']
+        random_state = settings.get('random_state')
+        test_size = settings.get('test_size', 0.2)
+
         if not isinstance(n_iter, int) or isinstance(n_iter, bool):
             raise TypeError('n_iter must be an integer.')
         if n_iter <= 0:
             raise ValueError('n_iter must be greater than 0.')
+
+        if (
+            random_state is not None
+            and (
+                not isinstance(random_state, int)
+                or isinstance(random_state, bool)
+            )
+        ):
+            raise TypeError('random_state must be an integer or None.')
+
+        if (
+            not isinstance(test_size, (int, float))
+            or isinstance(test_size, bool)
+        ):
+            raise TypeError('test_size must be numeric.')
+        if not 0 < test_size < 1:
+            raise ValueError('test_size must be between 0 and 1.')
         
         if not settings['studies']:
             raise ValueError('At least one study must be configured')
@@ -769,17 +926,40 @@ class BiasAnalyzer:
                 f'Unsupported sampling strategies: {sorted(unknown_strategies)}'
             )
         
-        self._init_results_csv()
         self._run_id = f'run_{uuid.uuid4().hex}'
-        os.makedirs(FIT_ITERATIONS_DIR_NAME, exist_ok=True)
+        if self._results_df is None:
+            self._results_df = self._load_or_initialize_table(
+                RESULTS_FILENAME,
+                self.RESULT_COLUMNS
+            )
+
+        if self._runs_metadata_df is None:
+            self._runs_metadata_df = self._load_or_initialize_table(
+                RUN_METADATA_FILENAME,
+                self.RUN_METADATA_COLUMNS
+            )
         
         for study, study_settings in settings['studies'].items():
             generator = self._build_generator(study, study_settings)
-            results = self._get_results(n_iter, generator, study, save_predictions=save_predictions)
+            results = self._get_results(
+                n_iter,
+                generator,
+                study,
+                random_state=random_state,
+                test_size=test_size,
+                save_predictions=save_predictions,
+            )
             self._results_df = pd.concat([self._results_df, results], ignore_index=True)
-        
+
+        self._record_run_metadata(
+            n_iter=n_iter,
+            random_state=random_state,
+            test_size=test_size,
+        )
+
         if save_results:
             self._results_df.to_csv(RESULTS_FILENAME, index=False)
+            self._runs_metadata_df.to_csv(RUN_METADATA_FILENAME, index=False)
         
         return self
 
