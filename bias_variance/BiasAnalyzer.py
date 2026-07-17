@@ -1,22 +1,24 @@
 from __future__ import annotations
+from typing import Any
 
 import os
 import uuid
 import h5py
+import json
 import pandas as pd
 import numpy as np
 import scipy.stats as stats
-import tensorflow as tf
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
 import matplotlib.pyplot as plt
-from keras.layers import Input, Dense
-from keras.metrics import (
-    R2Score,
-    MeanSquaredError,
-    RootMeanSquaredError,
-    MeanAbsoluteError
-)
-from keras.models import Model
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score
+)
 from bias_variance._constants import (
     ACTUALS_DATASET_NAME,
     CONF_INTERVAL_LOWER_FIELD_NAME,
@@ -39,7 +41,7 @@ from bias_variance._constants import (
     VARIABLE_FIELD_NAME,
     VARIANCE_FIELD_NAME,
 )
-from bias_variance.generators.ArchitectureGenerator import ArchitectureGenerator
+from bias_variance.generators.FnnArchitectureGenerator import FnnArchitectureGenerator
 from bias_variance.generators.Generator import Generator
 from bias_variance.generators.SamplingGenerator import (
     SamplingGenerator,
@@ -56,15 +58,10 @@ from common.sampling._sampling import (
     get_random_samples,
     generate_latin_hypercube_samples
 )
+from bias_variance.models.TrainingConfig import TrainingConfig
+from bias_variance.models.fnn.FnnArchitecture import FnnArchitecture
+from bias_variance.models.fnn.FnnBuilder import FnnBuilder
 
-
-# General workflow
-# analyzer = BiasAnalyzer(...)
-# analyzer.run_model_bias_study(...)
-# analyzer.run_sampling_bias_study(...)
-# analyzer.run_data_bias_study(...)
-# analyzer.decompose_variance(...)
-# analyzer.plot_disagreement_map(...)
 
 class BiasAnalyzer:
     '''
@@ -113,12 +110,7 @@ class BiasAnalyzer:
     - Should we select all plots by default or only select the best representation w/ an auto selection feature?
     '''
 
-    METRIC_OPTIONS = {
-        MetricName.RMSE: RootMeanSquaredError(name=MetricName.RMSE),
-        MetricName.MSE: MeanSquaredError(name=MetricName.MSE),
-        MetricName.MAE: MeanAbsoluteError(name=MetricName.MAE),
-        MetricName.R2: R2Score(name=MetricName.R2),
-    }
+    METRIC_OPTIONS = frozenset(MetricName)
     RESULTS_FILENAME = RESULTS_FILENAME
     FIT_ITERATIONS_DIR_NAME = FIT_ITERATIONS_DIR_NAME
     STUDY_FIELD_NAME = STUDY_FIELD_NAME
@@ -129,65 +121,49 @@ class BiasAnalyzer:
         inputs_df: pd.DataFrame,
         outputs_df: pd.DataFrame,
         *,
-        model_settings: dict = {
-            'hidden_layers': [
-                32, 32
-            ],
-            'activation' : 'relu',
-            'optimizer' : 'adam',
-            'loss' : 'mse',
-            'metrics' : ['rmse','r2','mse','mae'],
-            'epochs' : 100,
-            'batch_size' : 10,
-            'verbose' : 0
-        },
+        fnn_builder: FnnBuilder,
+        baseline_architecture: FnnArchitecture,
+        training_config: TrainingConfig,
         test_size: float = 0.2,
         random_state: int | None = None,
-        _model: tf.keras.Model | None = None,
-        _init_weights: list[np.ndarray] | None = None,
         _results_df: pd.DataFrame | None = None,
-        _run_id: str | None = None
+        _run_id: str | None = None,
     ) -> None:
+        if len(inputs_df) != len(outputs_df):
+            raise ValueError(
+                'inputs_df and outputs_df must have the same number of rows.'
+            )
+        
+        if not 0 < test_size < 1:
+            raise ValueError(
+                'test_size must be between 0 and 1.'
+            )
+
+        if fnn_builder.config.input_size != inputs_df.shape[1]:
+            raise ValueError(
+                'FnnBuilder input_size must match the number of input columns.'
+            )
+        
+        if fnn_builder.config.output_size != outputs_df.shape[1]:
+            raise ValueError(
+                'FnnBuilder output_size must match the number of output columns.'
+            )
+        
         self.inputs_df = inputs_df
         self.outputs_df = outputs_df
-        self.model_settings = model_settings
+        self.fnn_builder = fnn_builder
+        self.baseline_architecture = baseline_architecture
+        self.training_config = training_config
         self.test_size = test_size
         self.random_state = random_state
-        self._model = _model
-        self._init_weights = _init_weights
         self._results_df = _results_df
         self._run_id = _run_id
     
-    def _build_model(self, hidden_layers: list[int]) -> Model:
-        '''
-        Build model for studies. Uses default values specified in self.model_settings.
-        '''
-        # use keras functional api to build base model
-        inputs = Input(shape=(self.inputs_df.shape[1],))
-        x = inputs
-        for size in hidden_layers:
-            x = Dense(size, activation=self.model_settings['activation'])(x)
-        outputs = Dense(self.outputs_df.shape[1], name=PREDICTIONS_LAYER_NAME)(x)
-        model = Model(inputs=inputs, outputs=outputs, name=MODEL_NAME)
-        # compile base model with settings
-        model.compile(
-            optimizer=self.model_settings['optimizer'],
-            loss=self.model_settings['loss'],
-            metrics=[
-                BiasAnalyzer.METRIC_OPTIONS[metric]
-                for metric in self.model_settings['metrics']
-            ],
-        )
-        return model
-    
-    def _init_model(self) -> None:
-        '''
-        Initializes the base model for studies. Use when starting study run.
-        '''
-        if self._model is None:
-            self._model = self._build_model(self.model_settings['hidden_layers'])
-            # store initial weights when model needs to be retrained
-            self._init_weights = self._model.get_weights()
+    def _build_model(
+        self,
+        architecture: FnnArchitecture,
+    ) -> nn.Sequential:
+        return self.fnn_builder.build(architecture).to(self.training_config.resolved_device)
 
     def _init_results_csv(self) -> None:
         '''
@@ -200,7 +176,7 @@ class BiasAnalyzer:
             STUDY_FIELD_NAME,
             VARIABLE_FIELD_NAME,
             LOSS_FIELD_NAME,
-            *BiasAnalyzer.METRIC_OPTIONS.keys(),
+            *(str(metric) for metric in MetricName),
             VARIANCE_FIELD_NAME,
             MEAN_FIELD_NAME,
             CONF_INTERVAL_LOWER_FIELD_NAME,
@@ -259,6 +235,155 @@ class BiasAnalyzer:
             group.create_dataset(PREDICTIONS_DATASET_NAME, data=predictions)
             group.create_dataset(ACTUALS_DATASET_NAME, data=actuals)
 
+    def _to_tensor(
+        self,
+        dataframe: pd.DataFrame,
+    ) -> torch.Tensor:
+        array = dataframe.to_numpy(
+            dtype=np.float32,
+            copy=True
+        )
+
+        return torch.from_numpy(array)
+    
+    def _build_loss(self) -> nn.Module:
+        losses: dict[str, type[nn.Module]] = {
+            'mse': nn.MSELoss,
+            'mae': nn.L1Loss
+        }
+
+        try:
+            loss_type = losses[self.training_config.loss]
+        except KeyError:
+            raise ValueError(
+                f'Unsupported loss: {self.training_config.loss!r}.'
+                f'Expected one of {sorted(losses)}.'
+            ) from None
+        
+        return loss_type()
+    
+    def _build_optimizer(
+        self,
+        model: nn.Module,
+    ) -> optim.Optimizer:
+        optimizers: dict[
+            str,
+            type[optim.Optimizer],
+        ] = {
+            'adam': optim.Adam,
+            'sgd': optim.SGD
+        }
+
+        try:
+            optimizer_type = optimizers[self.training_config.optimizer]
+        except KeyError:
+            raise ValueError(
+                f'Unsupported optimizer: '
+                f'{self.training_config.optimizer!r}.'
+                f'Expected one of {sorted(optimizers)}.'
+            ) from None
+        
+        return optimizer_type(
+            model.parameters(),
+            lr=self.training_config.learning_rate
+        )
+    
+    def _set_random_state(
+        self,
+        random_state: int | None,
+    ) -> None:
+        if random_state is None:
+            return
+        
+        np.random.seed(random_state)
+        torch.manual_seed(random_state)
+
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(random_state)
+
+    def _train_model(
+        self,
+        model: nn.Module,
+        X_train: torch.Tensor,
+        y_train: torch.Tensor,
+        *,
+        random_state: int | None,
+    ) -> None:
+        dataset = TensorDataset(X_train, y_train)
+
+        loader_generator = torch.Generator()
+        if random_state is not None:
+            loader_generator.manual_seed(random_state)
+
+        loader = DataLoader(
+            dataset,
+            batch_size=self.training_config.batch_size,
+            shuffle=True,
+            generator=loader_generator
+        )
+
+        criterion = self._build_loss()
+        optimizer = self._build_optimizer(model)
+
+        model.train()
+
+        for _ in np.arange(self.training_config.epochs):
+            for batch_X, batch_y in loader:
+                batch_X = batch_X.to(self.training_config.resolved_device)
+                batch_y = batch_y.to(self.training_config.resolved_device)
+                optimizer.zero_grad()
+                predictions = model(batch_X)
+                loss = criterion(predictions, batch_y)
+                loss.backward()
+                optimizer.step()
+
+    def _predict(
+        self,
+        model: nn.Module,
+        X_test: torch.Tensor,
+        y_test: torch.Tensor,
+    ) -> tuple[np.ndarray, float]:
+        model.eval()
+
+        with torch.inference_mode():
+            predictions = model(
+                X_test.to(self.training_config.resolved_device)
+            )
+            test_loss = self._build_loss()(
+                predictions,
+                y_test.to(self.training_config.resolved_device)
+            )
+
+        return predictions.cpu().numpy(), float(test_loss.item())
+    
+    def _calculate_scores(
+        self,
+        actuals: np.ndarray,
+        predictions: np.ndarray,
+    ) -> dict[str, float]:
+        mse = mean_squared_error(actuals, predictions)
+
+        scores = {
+            MetricName.MSE: float(mse),
+            MetricName.RMSE: float(np.sqrt(mse)),
+            MetricName.MAE: float(
+                mean_absolute_error(actuals, predictions)
+            ),
+            MetricName.R2: float(
+                r2_score(
+                    actuals,
+                    predictions,
+                    multioutput='uniform_average',
+                )
+            )
+        }
+
+        return {
+            str(metric): value
+            for metric, value in scores.items()
+            if metric in self.training_config.metrics
+        }
+
     def _get_test_result_and_data(
         self,
         split: tuple[
@@ -267,7 +392,9 @@ class BiasAnalyzer:
             pd.DataFrame,
             pd.DataFrame,
         ] | None = None,
-        hidden_layers: list[int] | None = None,
+        architecture: FnnArchitecture | None = None,
+        *,
+        random_state: int | None = None
     ) -> tuple[dict[str, float], np.ndarray, pd.DataFrame]:
         '''
         Train and evaluate a model for one generated study variation.
@@ -288,56 +415,80 @@ class BiasAnalyzer:
             Evaluation metrics, model predictions, and the corresponding actual
             output values.
         '''
-        if hidden_layers is None:
-            self._init_model()
-            model = self._model
-            # reset weights
-            model.set_weights(self._init_weights)
-        else:
-            model = self._build_model(hidden_layers)
+        seed = (
+            self.random_state
+            if random_state is None
+            else random_state
+        )
         
         X_train, X_test, y_train, y_test = split or train_test_split(
             self.inputs_df,
             self.outputs_df,
             test_size=self.test_size,
-            random_state=self.random_state
+            random_state=seed
         )
+
+        selected_architecture  = (
+            self.baseline_architecture
+            if architecture is None
+            else architecture
+        )
+
+        self._set_random_state(seed)
+        model = self._build_model(selected_architecture)
+
+        X_train_tensor = self._to_tensor(X_train)
+        X_test_tensor = self._to_tensor(X_test)
+        y_train_tensor = self._to_tensor(y_train)
+        y_test_tensor = self._to_tensor(y_test)
 
         # train
-        model.fit(
-            X_train,
-            y_train,
-            epochs=self.model_settings['epochs'],
-            batch_size=self.model_settings['batch_size'],
-            verbose=self.model_settings['verbose']
+        self._train_model(
+            model,
+            X_train_tensor,
+            y_train_tensor,
+            random_state=seed
         )
 
-        predictions = model.predict(X_test)
+        predictions, test_loss = self._predict(model, X_test_tensor, y_test_tensor)
+        actuals_values = y_test.to_numpy(dtype=np.float32)
 
-        # evaluate
-        scores = model.evaluate(X_test, y_test, batch_size=self.model_settings['batch_size'], return_dict=True)
-        prediction_values = np.asarray(predictions).reshape(-1)
-        variance = np.var(prediction_values)
-        mean = np.mean(prediction_values)
+        scores = {
+            LOSS_FIELD_NAME: test_loss,
+            **self._calculate_scores(
+                actuals_values,
+                predictions
+            )
+        }
+
+        predictions_values = predictions.reshape(-1)
+        variance = float(np.var(predictions_values))
+        mean = float(np.mean(predictions_values))
         conf_interval = stats.norm.interval(
             0.95,
             loc=mean,
-            scale=stats.sem(prediction_values),
+            scale=stats.sem(predictions_values),
         )
 
-        metrics = {
-            VARIANCE_FIELD_NAME: variance,
-            MEAN_FIELD_NAME: mean,
-            CONF_INTERVAL_LOWER_FIELD_NAME: conf_interval[0],
-            CONF_INTERVAL_UPPER_FIELD_NAME: conf_interval[1],
-        }
+        scores.update(
+            {
+                VARIANCE_FIELD_NAME: variance,
+                MEAN_FIELD_NAME: mean,
+                CONF_INTERVAL_LOWER_FIELD_NAME: float(
+                    conf_interval[0]
+                ),
+                CONF_INTERVAL_UPPER_FIELD_NAME: float(
+                    conf_interval[1]
+                )
+            }
+        )
 
-        return scores | metrics, predictions, y_test
+        return scores, predictions, y_test
 
     def _get_results(
         self,
         n_iter: int,
-        generator: Generator[tuple[int, ...]] | Generator[pd.DataFrame],
+        generator: Generator[FnnArchitecture] | Generator[pd.DataFrame],
         study: str,
         *,
         save_predictions: bool = True,
@@ -373,12 +524,22 @@ class BiasAnalyzer:
 
             variations = generator.generate(random_state=iteration_random_state)
 
-            for label, variation in variations.items():
-                hidden_layers = None
+            for j, (label, variation) in enumerate(variations.items()):
+                model_random_state = (
+                    None
+                    if iteration_random_state is None
+                    else iteration_random_state + j
+                )
+                architecture = None
                 split = None
 
                 if study == StudyName.MODEL:
-                    hidden_layers = list(variation)
+                    if not isinstance(variation, FnnArchitecture):
+                        raise TypeError(
+                            'Model studies must generate FnnArchitecture values.'
+                        )
+                    
+                    architecture = variation
                 
                 elif study == StudyName.SAMPLING:
                     sampled_inputs_df = variation[self.inputs_df.columns]
@@ -390,7 +551,11 @@ class BiasAnalyzer:
                         random_state=iteration_random_state
                     )
                 
-                result, predictions, actuals = self._get_test_result_and_data(hidden_layers=hidden_layers, split=split)
+                result, predictions, actuals = self._get_test_result_and_data(
+                    architecture=architecture,
+                    split=split,
+                    random_state=model_random_state
+                )
 
                 if save_predictions:
                     self._save_predictions_and_actuals(
@@ -416,7 +581,7 @@ class BiasAnalyzer:
         self,
         study: str,
         settings: dict[str, object],
-    ) -> ArchitectureGenerator | SamplingGenerator:
+    ) -> FnnArchitectureGenerator | SamplingGenerator:
         '''
         Construct the concrete generator configured for a study.
 
@@ -440,7 +605,7 @@ class BiasAnalyzer:
             If ``study`` is unsupported.
         '''
         if study == StudyName.MODEL:
-            return ArchitectureGenerator(settings=settings)
+            return FnnArchitectureGenerator(settings=settings)
         if study == StudyName.SAMPLING:
             sampling_strategies = []
             strategies = settings.get('strategies', [])
@@ -488,7 +653,7 @@ class BiasAnalyzer:
     
     def run_bias_studies(
         self,
-        settings: dict | None = None,
+        settings: dict[str, Any] | None = None,
         *,
         save_results: bool = True,
         save_predictions: bool = True
@@ -498,6 +663,7 @@ class BiasAnalyzer:
         -------------
         >>> settings = {
         ...     'n_iter': 100,
+        ...     'random_state': 42,
         ...     'studies': {
         ...         'model': {
         ...             'wide': {
@@ -537,6 +703,7 @@ class BiasAnalyzer:
         '''
         default_settings = {
             'n_iter': 100,
+            'random_state': 42,
             'studies': {
                 'model': {
                     'wide': {
@@ -602,7 +769,7 @@ class BiasAnalyzer:
                 f'Unsupported sampling strategies: {sorted(unknown_strategies)}'
             )
         
-        self._init_model()
+        self._init_results_csv()
         self._run_id = f'run_{uuid.uuid4().hex}'
         os.makedirs(FIT_ITERATIONS_DIR_NAME, exist_ok=True)
         
