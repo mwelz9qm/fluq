@@ -31,6 +31,34 @@ def analyzer(test_input_and_output_dfs) -> BiasAnalyzer:
     return BiasAnalyzer(inputs_df, outputs_df, random_state=40)
 
 
+@pytest.fixture
+def small_regression_data() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Small deterministic dataset for framework-level behavioral tests."""
+    x = np.linspace(-1.0, 1.0, 30, dtype=np.float32)
+    inputs = pd.DataFrame(
+        {
+            "x1": x,
+            "x2": x**2,
+            "x3": np.sin(x),
+        }
+    )
+    outputs = pd.DataFrame({"y": 1.5 * x - 0.25})
+    return inputs, outputs
+
+
+def short_model_settings() -> dict[str, object]:
+    return {
+        "hidden_layers": [6, 4],
+        "activation": "relu",
+        "optimizer": "adam",
+        "loss": "mse",
+        "metrics": ["rmse", "r2", "mse", "mae"],
+        "epochs": 2,
+        "batch_size": 5,
+        "verbose": 0,
+    }
+
+
 class RecordingGenerator(Generator[object]):
     def __init__(self, variations: dict[str, object]) -> None:
         self.variations = variations
@@ -66,6 +94,138 @@ def test_constructor(test_input_and_output_dfs):
     assert analyzer._model is None
     assert analyzer._init_weights is None
     assert analyzer._results_df is None
+
+
+def test_build_model_preserves_dense_regression_architecture(
+    small_regression_data,
+):
+    inputs, outputs = small_regression_data
+    analyzer = BiasAnalyzer(
+        inputs,
+        outputs,
+        model_settings=short_model_settings(),
+    )
+
+    model = analyzer._build_model([6, 4])
+    dense_layers = [layer for layer in model.layers if hasattr(layer, "units")]
+
+    assert model.input_shape == (None, 3)
+    assert model.output_shape == (None, 1)
+    assert [layer.units for layer in dense_layers] == [6, 4, 1]
+    assert [layer.activation.__name__ for layer in dense_layers] == [
+        "relu",
+        "relu",
+        "linear",
+    ]
+
+
+def test_short_training_preserves_prediction_and_metric_contract(
+    small_regression_data,
+):
+    inputs, outputs = small_regression_data
+    analyzer = BiasAnalyzer(
+        inputs,
+        outputs,
+        model_settings=short_model_settings(),
+        test_size=0.2,
+        random_state=17,
+    )
+
+    scores, predictions, actuals = analyzer._get_test_result_and_data()
+
+    assert set(scores) == {
+        "loss",
+        "rmse",
+        "r2",
+        "mse",
+        "mae",
+        "variance",
+        "mean",
+        "conf_interval_lower",
+        "conf_interval_upper",
+    }
+    assert predictions.shape == actuals.shape == (6, 1)
+    assert all(np.isscalar(value) for value in scores.values())
+    assert all(np.isfinite(value) for value in scores.values())
+
+
+def test_get_test_result_restores_initial_weights_before_fitting(
+    small_regression_data,
+    monkeypatch,
+):
+    inputs, outputs = small_regression_data
+    settings = short_model_settings()
+    settings["epochs"] = 1
+    analyzer = BiasAnalyzer(inputs, outputs, model_settings=settings, random_state=5)
+    analyzer._init_model()
+    initial_weights = [weight.copy() for weight in analyzer._init_weights]
+    analyzer._model.set_weights(
+        [np.full_like(weight, 42.0) for weight in analyzer._model.get_weights()]
+    )
+    weights_at_fit = []
+
+    def record_fit(*args, **kwargs):
+        weights_at_fit.extend(
+            weight.copy() for weight in analyzer._model.get_weights()
+        )
+
+    monkeypatch.setattr(analyzer._model, "fit", record_fit)
+    monkeypatch.setattr(
+        analyzer._model,
+        "predict",
+        lambda X: np.arange(len(X), dtype=np.float32).reshape(-1, 1),
+    )
+    monkeypatch.setattr(
+        analyzer._model,
+        "evaluate",
+        lambda *args, **kwargs: {"loss": 0.0},
+    )
+
+    analyzer._get_test_result_and_data()
+
+    assert len(weights_at_fit) == len(initial_weights)
+    for restored, initial in zip(weights_at_fit, initial_weights):
+        np.testing.assert_array_equal(restored, initial)
+
+
+def test_random_state_preserves_test_split_across_analyzers(
+    small_regression_data,
+):
+    inputs, outputs = small_regression_data
+    settings = short_model_settings()
+    settings["epochs"] = 0
+    first = BiasAnalyzer(inputs, outputs, model_settings=settings, random_state=23)
+    second = BiasAnalyzer(inputs, outputs, model_settings=settings, random_state=23)
+
+    _, _, first_actuals = first._get_test_result_and_data()
+    _, _, second_actuals = second._get_test_result_and_data()
+
+    pd.testing.assert_frame_equal(first_actuals, second_actuals)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "The shared Keras R2Score is initialized for one output and cannot be "
+        "reused by a two-output model."
+    ),
+)
+def test_short_training_supports_multi_output_shape(small_regression_data):
+    inputs, single_output = small_regression_data
+    outputs = single_output.assign(y_squared=single_output["y"] ** 2)
+    analyzer = BiasAnalyzer(
+        inputs,
+        outputs,
+        model_settings=short_model_settings(),
+        test_size=0.2,
+        random_state=11,
+    )
+
+    scores, predictions, actuals = analyzer._get_test_result_and_data()
+
+    assert analyzer._model.output_shape == (None, 2)
+    assert predictions.shape == actuals.shape == (6, 2)
+    assert set(("loss", "rmse", "r2", "mse", "mae")).issubset(scores)
 
 
 def test_build_generator_returns_configured_architecture_generator(analyzer):
