@@ -1,39 +1,25 @@
-from pathlib import Path
+import json
 
 import h5py
 import numpy as np
 import pandas as pd
 import pytest
+import torch
+from torch import nn, optim
 
 from bias_variance.BiasAnalyzer import BiasAnalyzer
-from bias_variance.generators.ArchitectureGenerator import ArchitectureGenerator
+from bias_variance.generators.FnnArchitectureGenerator import (
+    FnnArchitectureGenerator,
+)
 from bias_variance.generators.Generator import Generator
 from bias_variance.generators.SamplingGenerator import SamplingGenerator
+from bias_variance.models.TrainingConfig import TrainingConfig
+from bias_variance.models.fnn.FnnArchitecture import FnnArchitecture
+from bias_variance.models.fnn.FnnBuilder import FnnBuilder, FnnConfig
 
 
 @pytest.fixture
-def test_input_and_output_dfs() -> tuple[pd.DataFrame, pd.DataFrame]:
-    benchmarks = Path(__file__).resolve().parents[1] / "benchmarks"
-    df = pd.concat(
-        [
-            pd.read_csv(benchmarks / "chf_train_synth.csv"),
-            pd.read_csv(benchmarks / "chf_test_synth.csv"),
-        ]
-    )
-    inputs_df = df.iloc[:, :6]
-    outputs_df = df.iloc[:, 6:]
-    return inputs_df, outputs_df
-
-
-@pytest.fixture
-def analyzer(test_input_and_output_dfs) -> BiasAnalyzer:
-    inputs_df, outputs_df = test_input_and_output_dfs
-    return BiasAnalyzer(inputs_df, outputs_df, random_state=40)
-
-
-@pytest.fixture
-def small_regression_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Small deterministic dataset for framework-level behavioral tests."""
+def regression_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     x = np.linspace(-1.0, 1.0, 30, dtype=np.float32)
     inputs = pd.DataFrame(
         {
@@ -46,17 +32,25 @@ def small_regression_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     return inputs, outputs
 
 
-def short_model_settings() -> dict[str, object]:
-    return {
-        "hidden_layers": [6, 4],
-        "activation": "relu",
-        "optimizer": "adam",
-        "loss": "mse",
-        "metrics": ["rmse", "r2", "mse", "mae"],
-        "epochs": 2,
-        "batch_size": 5,
-        "verbose": 0,
-    }
+@pytest.fixture
+def analyzer(regression_data) -> BiasAnalyzer:
+    inputs, outputs = regression_data
+    return BiasAnalyzer(
+        inputs,
+        outputs,
+        fnn_builder=FnnBuilder(
+            FnnConfig(
+                input_size=inputs.shape[1],
+                output_size=outputs.shape[1],
+            )
+        ),
+        baseline_architecture=FnnArchitecture((6, 4)),
+        training_config=TrainingConfig(
+            epochs=1,
+            batch_size=5,
+            device="cpu",
+        ),
+    )
 
 
 class RecordingGenerator(Generator[object]):
@@ -73,65 +67,130 @@ class RecordingGenerator(Generator[object]):
         return self.variations
 
 
-def test_constructor(test_input_and_output_dfs):
-    inputs_df, outputs_df = test_input_and_output_dfs
-    analyzer = BiasAnalyzer(inputs_df, outputs_df)
+def empty_results() -> pd.DataFrame:
+    return pd.DataFrame(columns=BiasAnalyzer.RESULT_COLUMNS)
 
-    pd.testing.assert_frame_equal(analyzer.inputs_df, inputs_df)
-    pd.testing.assert_frame_equal(analyzer.outputs_df, outputs_df)
-    assert analyzer.model_settings == {
-        "hidden_layers": [32, 32],
-        "activation": "relu",
-        "optimizer": "adam",
-        "loss": "mse",
-        "metrics": ["rmse", "r2", "mse", "mae"],
-        "epochs": 100,
-        "batch_size": 10,
-        "verbose": 0,
-    }
-    assert analyzer.test_size == 0.2
-    assert analyzer.random_state is None
-    assert analyzer._model is None
-    assert analyzer._init_weights is None
+
+def empty_runs_metadata() -> pd.DataFrame:
+    return pd.DataFrame(columns=BiasAnalyzer.RUN_METADATA_COLUMNS)
+
+
+def test_constructor_stores_pytorch_configuration(analyzer, regression_data):
+    inputs, outputs = regression_data
+
+    pd.testing.assert_frame_equal(analyzer.inputs_df, inputs)
+    pd.testing.assert_frame_equal(analyzer.outputs_df, outputs)
+    assert analyzer.fnn_builder.config.input_size == 3
+    assert analyzer.fnn_builder.config.output_size == 1
+    assert analyzer.baseline_architecture.hidden_layers == (6, 4)
+    assert analyzer.training_config.device == "cpu"
     assert analyzer._results_df is None
+    assert analyzer._runs_metadata_df is None
+    assert analyzer._run_id is None
+    assert not hasattr(analyzer, "random_state")
+    assert not hasattr(analyzer, "test_size")
 
 
-def test_build_model_preserves_dense_regression_architecture(
-    small_regression_data,
+@pytest.mark.parametrize(
+    ("mutation", "error", "message"),
+    [
+        (lambda X, y: (X.iloc[:0], y.iloc[:0]), ValueError, "must not be empty"),
+        (
+            lambda X, y: (X, y.iloc[:-1]),
+            ValueError,
+            "same number of rows",
+        ),
+        (
+            lambda X, y: (X, y.rename(columns={"y": "x1"})),
+            ValueError,
+            "distinct column names",
+        ),
+        (
+            lambda X, y: (X.assign(text="bad"), y),
+            TypeError,
+            "only numeric columns",
+        ),
+        (
+            lambda X, y: (X.assign(x1=np.nan), y),
+            ValueError,
+            "only finite values",
+        ),
+    ],
+)
+def test_constructor_rejects_invalid_dataframes(
+    regression_data,
+    mutation,
+    error,
+    message,
 ):
-    inputs, outputs = small_regression_data
-    analyzer = BiasAnalyzer(
-        inputs,
-        outputs,
-        model_settings=short_model_settings(),
-    )
+    inputs, outputs = mutation(*regression_data)
+    builder = FnnBuilder(FnnConfig(inputs.shape[1], outputs.shape[1]))
 
-    model = analyzer._build_model([6, 4])
-    dense_layers = [layer for layer in model.layers if hasattr(layer, "units")]
-
-    assert model.input_shape == (None, 3)
-    assert model.output_shape == (None, 1)
-    assert [layer.units for layer in dense_layers] == [6, 4, 1]
-    assert [layer.activation.__name__ for layer in dense_layers] == [
-        "relu",
-        "relu",
-        "linear",
-    ]
+    with pytest.raises(error, match=message):
+        BiasAnalyzer(
+            inputs,
+            outputs,
+            fnn_builder=builder,
+            baseline_architecture=FnnArchitecture((4,)),
+            training_config=TrainingConfig(device="cpu"),
+        )
 
 
-def test_short_training_preserves_prediction_and_metric_contract(
-    small_regression_data,
-):
-    inputs, outputs = small_regression_data
-    analyzer = BiasAnalyzer(
-        inputs,
-        outputs,
-        model_settings=short_model_settings(),
-        test_size=0.2,
+def test_constructor_rejects_builder_dimension_mismatch(regression_data):
+    inputs, outputs = regression_data
+    builder = FnnBuilder(FnnConfig(input_size=2, output_size=1))
+
+    with pytest.raises(ValueError, match="input_size"):
+        BiasAnalyzer(
+            inputs,
+            outputs,
+            fnn_builder=builder,
+            baseline_architecture=FnnArchitecture((4,)),
+            training_config=TrainingConfig(device="cpu"),
+        )
+
+
+def test_build_model_uses_generated_architecture(analyzer):
+    model = analyzer._build_model(FnnArchitecture((8, 5)))
+    linear_layers = [layer for layer in model if isinstance(layer, nn.Linear)]
+
+    assert isinstance(model, nn.Sequential)
+    assert [
+        (layer.in_features, layer.out_features)
+        for layer in linear_layers
+    ] == [(3, 8), (8, 5), (5, 1)]
+    assert sum(isinstance(layer, nn.ReLU) for layer in model) == 2
+
+
+def test_build_model_rejects_non_architecture(analyzer):
+    with pytest.raises(TypeError, match="FnnArchitecture"):
+        analyzer._build_model((4, 2))
+
+
+def test_tensor_conversion_copies_numeric_dataframe(analyzer):
+    tensor = analyzer._to_tensor(analyzer.inputs_df)
+    original_value = analyzer.inputs_df.iloc[0, 0]
+    tensor[0, 0] = 99.0
+
+    assert tensor.dtype == torch.float32
+    assert tensor.shape == (30, 3)
+    assert analyzer.inputs_df.iloc[0, 0] == original_value
+
+
+def test_loss_and_optimizer_factories(analyzer):
+    model = analyzer._build_model(analyzer.baseline_architecture)
+
+    assert isinstance(analyzer._build_loss(), nn.MSELoss)
+    optimizer = analyzer._build_optimizer(model)
+    assert isinstance(optimizer, optim.Adam)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(1e-3)
+
+
+def test_short_training_preserves_prediction_and_metric_contract(analyzer):
+    scores, predictions, actuals = analyzer._get_test_result_and_data(
         random_state=17,
+        test_size=0.2,
     )
-
-    scores, predictions, actuals = analyzer._get_test_result_and_data()
 
     assert set(scores) == {
         "loss",
@@ -149,86 +208,82 @@ def test_short_training_preserves_prediction_and_metric_contract(
     assert all(np.isfinite(value) for value in scores.values())
 
 
-def test_get_test_result_restores_initial_weights_before_fitting(
-    small_regression_data,
-    monkeypatch,
-):
-    inputs, outputs = small_regression_data
-    settings = short_model_settings()
-    settings["epochs"] = 1
-    analyzer = BiasAnalyzer(inputs, outputs, model_settings=settings, random_state=5)
-    analyzer._init_model()
-    initial_weights = [weight.copy() for weight in analyzer._init_weights]
-    analyzer._model.set_weights(
-        [np.full_like(weight, 42.0) for weight in analyzer._model.get_weights()]
-    )
-    weights_at_fit = []
-
-    def record_fit(*args, **kwargs):
-        weights_at_fit.extend(
-            weight.copy() for weight in analyzer._model.get_weights()
+def test_training_is_reproducible_for_same_run_seed(analyzer):
+    first_scores, first_predictions, first_actuals = (
+        analyzer._get_test_result_and_data(
+            random_state=23,
+            test_size=0.2,
         )
-
-    monkeypatch.setattr(analyzer._model, "fit", record_fit)
-    monkeypatch.setattr(
-        analyzer._model,
-        "predict",
-        lambda X: np.arange(len(X), dtype=np.float32).reshape(-1, 1),
     )
-    monkeypatch.setattr(
-        analyzer._model,
-        "evaluate",
-        lambda *args, **kwargs: {"loss": 0.0},
+    second_scores, second_predictions, second_actuals = (
+        analyzer._get_test_result_and_data(
+            random_state=23,
+            test_size=0.2,
+        )
     )
 
-    analyzer._get_test_result_and_data()
-
-    assert len(weights_at_fit) == len(initial_weights)
-    for restored, initial in zip(weights_at_fit, initial_weights):
-        np.testing.assert_array_equal(restored, initial)
-
-
-def test_random_state_preserves_test_split_across_analyzers(
-    small_regression_data,
-):
-    inputs, outputs = small_regression_data
-    settings = short_model_settings()
-    settings["epochs"] = 0
-    first = BiasAnalyzer(inputs, outputs, model_settings=settings, random_state=23)
-    second = BiasAnalyzer(inputs, outputs, model_settings=settings, random_state=23)
-
-    _, _, first_actuals = first._get_test_result_and_data()
-    _, _, second_actuals = second._get_test_result_and_data()
-
+    np.testing.assert_allclose(first_predictions, second_predictions)
     pd.testing.assert_frame_equal(first_actuals, second_actuals)
+    assert first_scores == pytest.approx(second_scores)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "The shared Keras R2Score is initialized for one output and cannot be "
-        "reused by a two-output model."
-    ),
-)
-def test_short_training_supports_multi_output_shape(small_regression_data):
-    inputs, single_output = small_regression_data
-    outputs = single_output.assign(y_squared=single_output["y"] ** 2)
+def test_multi_output_training_is_supported(regression_data):
+    inputs, output = regression_data
+    outputs = output.assign(y_squared=output["y"] ** 2)
     analyzer = BiasAnalyzer(
         inputs,
         outputs,
-        model_settings=short_model_settings(),
-        test_size=0.2,
-        random_state=11,
+        fnn_builder=FnnBuilder(FnnConfig(3, 2)),
+        baseline_architecture=FnnArchitecture((5,)),
+        training_config=TrainingConfig(
+            epochs=1,
+            batch_size=5,
+            device="cpu",
+        ),
     )
 
-    scores, predictions, actuals = analyzer._get_test_result_and_data()
+    scores, predictions, actuals = analyzer._get_test_result_and_data(
+        random_state=11,
+        test_size=0.2,
+    )
 
-    assert analyzer._model.output_shape == (None, 2)
     assert predictions.shape == actuals.shape == (6, 2)
-    assert set(("loss", "rmse", "r2", "mse", "mae")).issubset(scores)
+    assert "r2" in scores
 
 
-def test_build_generator_returns_configured_architecture_generator(analyzer):
+@pytest.mark.parametrize(
+    ("random_state", "test_size", "error", "message"),
+    [
+        (True, 0.2, TypeError, "random_state"),
+        (1.5, 0.2, TypeError, "random_state"),
+        (1, True, TypeError, "test_size"),
+        (1, 0.0, ValueError, "between 0 and 1"),
+        (1, 1.0, ValueError, "between 0 and 1"),
+    ],
+)
+def test_training_rejects_invalid_run_split_settings(
+    analyzer,
+    random_state,
+    test_size,
+    error,
+    message,
+):
+    with pytest.raises(error, match=message):
+        analyzer._get_test_result_and_data(
+            random_state=random_state,
+            test_size=test_size,
+        )
+
+
+def test_calculate_scores_rejects_shape_mismatch(analyzer):
+    with pytest.raises(ValueError, match="matching shapes"):
+        analyzer._calculate_scores(
+            np.zeros((3, 1), dtype=np.float32),
+            np.zeros((3, 2), dtype=np.float32),
+        )
+
+
+def test_build_generator_returns_fnn_architecture_generator(analyzer):
     settings = {
         "wide": {
             "layers": (2, 3),
@@ -237,167 +292,104 @@ def test_build_generator_returns_configured_architecture_generator(analyzer):
     }
 
     generator = analyzer._build_generator("model", settings)
+    generated = generator.generate(random_state=42)
 
-    assert isinstance(generator, ArchitectureGenerator)
-    assert generator.settings == settings
-    assert set(generator.generate(random_state=42)) == {"wide"}
+    assert isinstance(generator, FnnArchitectureGenerator)
+    assert set(generated) == {"wide"}
+    assert isinstance(generated["wide"], FnnArchitecture)
 
 
-@pytest.mark.parametrize(
-    "strategies",
-    [
-        ["bootstrap"],
-        ["stratified"],
-        ["lhs"],
-        ["bootstrap", "stratified", "lhs"],
-    ],
-)
-def test_build_generator_returns_configured_sampling_generator(
-    analyzer,
-    strategies,
-):
+def test_build_generator_returns_sampling_generator(analyzer):
     generator = analyzer._build_generator(
         "sampling",
-        {"strategies": strategies},
+        {"strategies": ["bootstrap", "lhs"]},
     )
 
     assert isinstance(generator, SamplingGenerator)
-    assert set(generator._strategies) == set(strategies)
-    generated = generator.generate(random_state=42)
-    assert set(generated) == set(strategies)
-    assert all(len(dataset) == len(analyzer.inputs_df) for dataset in generated.values())
+    assert set(generator.generate(random_state=42)) == {"bootstrap", "lhs"}
 
 
-def test_build_generator_rejects_unsupported_study(analyzer):
+def test_build_generator_rejects_invalid_study_and_strategies(analyzer):
     with pytest.raises(ValueError, match="Unsupported study"):
         analyzer._build_generator("unknown", {})
 
+    with pytest.raises(ValueError, match="Unsupported sampling strategies"):
+        analyzer._build_generator(
+            "sampling",
+            {"strategies": ["unknown"]},
+        )
 
-def test_get_results_generates_model_variations_for_each_seed(
+    with pytest.raises(ValueError, match="must not contain duplicates"):
+        analyzer._build_generator(
+            "sampling",
+            {"strategies": ["lhs", "lhs"]},
+        )
+
+
+def test_get_results_injects_seeds_and_records_architecture(
     analyzer,
     monkeypatch,
 ):
     generator = RecordingGenerator(
         {
-            "wide": (16, 12),
-            "narrow": (6, 4, 2),
+            "wide": FnnArchitecture((16, 12)),
+            "narrow": FnnArchitecture((6, 4, 2)),
         }
     )
     analyzer._run_id = "run_test"
-    training_calls = []
-    saved_calls = []
+    calls = []
 
-    def fake_train(*, split=None, hidden_layers=None):
-        training_calls.append((split, hidden_layers))
-        return {"loss": float(len(hidden_layers))}, np.array([[1.0]]), pd.DataFrame({"y": [1.0]})
-
-    def fake_save(predictions, actuals, *, study, label, iteration):
-        saved_calls.append((study, label, iteration))
+    def fake_train(*, split, architecture, random_state, test_size):
+        calls.append((split, architecture, random_state, test_size))
+        actuals = split[3]
+        return {"loss": 1.0}, np.zeros(actuals.shape), actuals
 
     monkeypatch.setattr(analyzer, "_get_test_result_and_data", fake_train)
-    monkeypatch.setattr(analyzer, "_save_predictions_and_actuals", fake_save)
-
-    results = analyzer._get_results(2, generator, "model")
-
-    assert generator.random_states == [40, 41]
-    assert training_calls == [
-        (None, [16, 12]),
-        (None, [6, 4, 2]),
-        (None, [16, 12]),
-        (None, [6, 4, 2]),
-    ]
-    assert saved_calls == [
-        ("model", "wide", 0),
-        ("model", "narrow", 0),
-        ("model", "wide", 1),
-        ("model", "narrow", 1),
-    ]
-    assert results["run_id"].tolist() == ["run_test"] * 4
-    assert results["iteration"].tolist() == [0, 0, 1, 1]
-    assert results["study"].tolist() == ["model"] * 4
-    assert results["variable"].tolist() == ["wide", "narrow"] * 2
-    assert results["loss"].tolist() == [2.0, 3.0, 2.0, 3.0]
-
-
-def test_get_results_splits_sampling_variation_and_can_skip_saving(
-    analyzer,
-    monkeypatch,
-):
-    sampled_df = pd.concat(
-        [analyzer.inputs_df, analyzer.outputs_df],
-        axis=1,
-    )
-    generator = RecordingGenerator({"bootstrap": sampled_df})
-    received = []
-
-    def fake_train(*, split=None, hidden_layers=None):
-        received.append((split, hidden_layers))
-        return {"loss": 1.5}, np.array([[1.0]]), split[3]
-
-    def fail_if_saved(*args, **kwargs):
-        pytest.fail("Predictions should not be saved")
-
-    monkeypatch.setattr(analyzer, "_get_test_result_and_data", fake_train)
-    monkeypatch.setattr(analyzer, "_save_predictions_and_actuals", fail_if_saved)
 
     results = analyzer._get_results(
-        1,
+        2,
         generator,
-        "sampling",
+        "model",
+        random_state=40,
+        test_size=0.25,
         save_predictions=False,
     )
 
-    assert generator.random_states == [40]
-    split, hidden_layers = received[0]
-    X_train, X_test, y_train, y_test = split
-    assert hidden_layers is None
-    assert list(X_train.columns) == list(analyzer.inputs_df.columns)
-    assert list(X_test.columns) == list(analyzer.inputs_df.columns)
-    assert list(y_train.columns) == list(analyzer.outputs_df.columns)
-    assert list(y_test.columns) == list(analyzer.outputs_df.columns)
-    assert len(X_train) + len(X_test) == len(sampled_df)
-    assert results.loc[0, "study"] == "sampling"
-    assert results.loc[0, "variable"] == "bootstrap"
+    assert generator.random_states == [40, 41]
+    assert [call[2] for call in calls] == [40, 41, 41, 42]
+    assert all(call[3] == 0.25 for call in calls)
+    assert calls[0][0] is calls[1][0]
+    assert calls[2][0] is calls[3][0]
+    assert results["run_id"].tolist() == ["run_test"] * 4
+    assert results["model_seed"].tolist() == [40, 41, 41, 42]
+    assert results["architecture"].tolist() == [
+        "[16, 12]",
+        "[6, 4, 2]",
+        "[16, 12]",
+        "[6, 4, 2]",
+    ]
 
 
-def test_get_results_passes_none_seed_when_random_state_is_unset(
-    test_input_and_output_dfs,
-    monkeypatch,
-):
-    inputs_df, outputs_df = test_input_and_output_dfs
-    analyzer = BiasAnalyzer(inputs_df, outputs_df)
-    generator = RecordingGenerator({"wide": (8,)})
-
-    monkeypatch.setattr(
-        analyzer,
-        "_get_test_result_and_data",
-        lambda **kwargs: ({"loss": 1.0}, np.array([[1.0]]), outputs_df.iloc[:1]),
-    )
-
-    analyzer._get_results(2, generator, "model", save_predictions=False)
-
-    assert generator.random_states == [None, None]
-
-
-def test_save_predictions_and_actuals_requires_run_id(analyzer):
+def test_get_results_requires_run_id(analyzer):
     with pytest.raises(ValueError, match="_run_id is None"):
-        analyzer._save_predictions_and_actuals(
-            np.array([[1.0]]),
-            pd.DataFrame({"y": [1.0]}),
-            study="model",
-            label="wide",
-            iteration=0,
+        analyzer._get_results(
+            1,
+            RecordingGenerator({"wide": FnnArchitecture((4,))}),
+            "model",
+            random_state=1,
+            test_size=0.2,
+            save_predictions=False,
         )
 
 
-def test_save_predictions_and_actuals_writes_expected_hdf5_group(
+def test_save_predictions_writes_expected_hdf5_group(
     analyzer,
     monkeypatch,
     tmp_path,
 ):
     monkeypatch.chdir(tmp_path)
     analyzer._run_id = "run_test"
-    predictions = np.array([[1.0], [2.0]])
+    predictions = np.array([[1.0], [2.0]], dtype=np.float32)
     actuals = pd.DataFrame({"y": [1.5, 2.5]})
 
     analyzer._save_predictions_and_actuals(
@@ -414,11 +406,73 @@ def test_save_predictions_and_actuals_writes_expected_hdf5_group(
         np.testing.assert_array_equal(group["actuals"][:], actuals.to_numpy())
 
 
+def test_save_predictions_rejects_shape_mismatch(analyzer):
+    analyzer._run_id = "run_test"
+
+    with pytest.raises(ValueError, match="matching shapes"):
+        analyzer._save_predictions_and_actuals(
+            np.zeros((2, 1)),
+            pd.DataFrame({"y": [1.0]}),
+            study="model",
+            label="wide",
+            iteration=0,
+        )
+
+
+def test_run_metadata_build_record_lookup_and_join(analyzer):
+    analyzer._run_id = "run_test"
+    analyzer._runs_metadata_df = empty_runs_metadata()
+    analyzer._results_df = pd.DataFrame(
+        [
+            {
+                "run_id": "run_test",
+                "iteration": 0,
+                "study": "model",
+                "variable": "wide",
+            }
+        ]
+    ).reindex(columns=BiasAnalyzer.RESULT_COLUMNS)
+
+    analyzer._record_run_metadata(
+        n_iter=2,
+        random_state=42,
+        test_size=0.2,
+    )
+
+    metadata = analyzer.get_run_metadata("run_test")
+    assert metadata["random_state"] == 42
+    assert metadata["test_size"] == pytest.approx(0.2)
+    assert metadata["n_iter"] == 2
+    assert json.loads(metadata["baseline_architecture"]) == [6, 4]
+    assert len(analyzer.get_results_with_metadata()) == 1
+
+
+def test_record_run_metadata_rejects_duplicate_run_id(analyzer):
+    analyzer._run_id = "run_test"
+    analyzer._runs_metadata_df = pd.DataFrame(
+        [{"run_id": "run_test"}]
+    ).reindex(columns=BiasAnalyzer.RUN_METADATA_COLUMNS)
+
+    with pytest.raises(ValueError, match="Duplicate run ID"):
+        analyzer._record_run_metadata(
+            n_iter=1,
+            random_state=None,
+            test_size=0.2,
+        )
+
+
+def test_get_run_metadata_rejects_unknown_id(analyzer):
+    analyzer._runs_metadata_df = empty_runs_metadata()
+
+    with pytest.raises(KeyError, match="Unknown run ID"):
+        analyzer.get_run_metadata("missing")
+
+
 @pytest.mark.parametrize("n_iter", [1.5, "2", True, None])
 def test_run_bias_studies_rejects_non_integer_iterations(analyzer, n_iter):
     with pytest.raises(TypeError, match="n_iter must be an integer"):
         analyzer.run_bias_studies(
-            {"n_iter": n_iter, "studies": {"model": {}}},
+            {"n_iter": n_iter, "studies": {"model": {"wide": {}}}},
             save_results=False,
             save_predictions=False,
         )
@@ -428,13 +482,13 @@ def test_run_bias_studies_rejects_non_integer_iterations(analyzer, n_iter):
 def test_run_bias_studies_rejects_non_positive_iterations(analyzer, n_iter):
     with pytest.raises(ValueError, match="n_iter must be greater than 0"):
         analyzer.run_bias_studies(
-            {"n_iter": n_iter, "studies": {"model": {}}},
+            {"n_iter": n_iter, "studies": {"model": {"wide": {}}}},
             save_results=False,
             save_predictions=False,
         )
 
 
-def test_run_bias_studies_requires_at_least_one_study(analyzer):
+def test_run_bias_studies_rejects_invalid_settings(analyzer):
     with pytest.raises(ValueError, match="At least one study"):
         analyzer.run_bias_studies(
             {"n_iter": 1, "studies": {}},
@@ -442,8 +496,6 @@ def test_run_bias_studies_requires_at_least_one_study(analyzer):
             save_predictions=False,
         )
 
-
-def test_run_bias_studies_rejects_unknown_study(analyzer):
     with pytest.raises(ValueError, match="Unsupported studies"):
         analyzer.run_bias_studies(
             {"n_iter": 1, "studies": {"unknown": {}}},
@@ -451,109 +503,109 @@ def test_run_bias_studies_rejects_unknown_study(analyzer):
             save_predictions=False,
         )
 
-
-def test_run_bias_studies_rejects_unknown_sampling_strategy(analyzer):
-    with pytest.raises(ValueError, match="Unsupported sampling strategies"):
+    with pytest.raises(ValueError, match="Unsupported run settings"):
         analyzer.run_bias_studies(
-            {
-                "n_iter": 1,
-                "studies": {"sampling": {"strategies": ["unknown"]}},
-            },
+            {"n_iter": 1, "studies": {"model": {}}, "extra": True},
             save_results=False,
             save_predictions=False,
         )
 
 
-def test_run_bias_studies_orchestrates_generators_and_accumulates_results(
+def test_run_bias_studies_records_one_metadata_row_and_persists_tables(
     analyzer,
     monkeypatch,
     tmp_path,
 ):
     monkeypatch.chdir(tmp_path)
-    built = []
-    result_calls = []
-
-    def fake_build(study, settings):
-        generator = RecordingGenerator({})
-        built.append((study, settings, generator))
-        return generator
-
-    def fake_results(n_iter, generator, study, *, save_predictions=True):
-        result_calls.append((n_iter, generator, study, save_predictions))
-        return pd.DataFrame(
-            {
-                "run_id": [analyzer._run_id],
-                "iteration": [0],
-                "study": [study],
-                "variable": [f"{study}_variation"],
-                "loss": [1.0],
-            }
-        )
-
-    monkeypatch.setattr(analyzer, "_init_model", lambda: None)
-    monkeypatch.setattr(analyzer, "_build_generator", fake_build)
-    monkeypatch.setattr(analyzer, "_get_results", fake_results)
-
-    settings = {
-        "n_iter": 2,
-        "studies": {
-            "model": {"wide": None},
-            "sampling": {"strategies": ["bootstrap"]},
-        },
-    }
-
-    returned = analyzer.run_bias_studies(
-        settings,
-        save_results=False,
-        save_predictions=False,
-    )
-
-    assert returned is analyzer
-    assert analyzer._run_id.startswith("run_")
-    assert [item[:2] for item in built] == [
-        ("model", {"wide": None}),
-        ("sampling", {"strategies": ["bootstrap"]}),
-    ]
-    assert [(n, study, save) for n, _, study, save in result_calls] == [
-        (2, "model", False),
-        (2, "sampling", False),
-    ]
-    assert analyzer._results_df["study"].tolist() == ["model", "sampling"]
-    assert not (tmp_path / BiasAnalyzer.RESULTS_FILENAME).exists()
-
-
-def test_run_bias_studies_saves_accumulated_results(
-    analyzer,
-    monkeypatch,
-    tmp_path,
-):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(analyzer, "_init_model", lambda: None)
-    monkeypatch.setattr(
-        analyzer,
-        "_build_generator",
-        lambda study, settings: RecordingGenerator({}),
-    )
-    monkeypatch.setattr(
-        analyzer,
-        "_get_results",
-        lambda *args, **kwargs: pd.DataFrame(
-            {
-                "run_id": [analyzer._run_id],
-                "iteration": [0],
-                "study": ["model"],
-                "variable": ["wide"],
-                "loss": [1.0],
-            }
-        ),
-    )
 
     analyzer.run_bias_studies(
-        {"n_iter": 1, "studies": {"model": {"wide": None}}},
+        {
+            "n_iter": 1,
+            "random_state": 9,
+            "test_size": 0.2,
+            "studies": {
+                "model": {
+                    "wide": {
+                        "layers": (1, 2),
+                        "neurons": (4, 6),
+                    }
+                }
+            },
+        },
         save_results=True,
         save_predictions=False,
     )
 
-    saved = pd.read_csv(tmp_path / BiasAnalyzer.RESULTS_FILENAME)
-    assert saved["study"].tolist() == ["model"]
-    assert saved["variable"].tolist() == ["wide"]
+    assert len(analyzer._results_df) == 1
+    assert len(analyzer._runs_metadata_df) == 1
+    assert analyzer._results_df["run_id"].iloc[0] == analyzer._run_id
+    assert analyzer._runs_metadata_df["run_id"].iloc[0] == analyzer._run_id
+    assert analyzer._runs_metadata_df["random_state"].iloc[0] == 9
+    assert (tmp_path / BiasAnalyzer.RESULTS_FILENAME).exists()
+    assert (tmp_path / BiasAnalyzer.RUN_METADATA_FILENAME).exists()
+
+
+def test_run_bias_studies_save_false_keeps_data_in_memory(analyzer, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    analyzer.run_bias_studies(
+        {
+            "n_iter": 1,
+            "random_state": 4,
+            "test_size": 0.2,
+            "studies": {
+                "model": {
+                    "wide": {
+                        "layers": (1, 2),
+                        "neurons": (4, 6),
+                    }
+                }
+            },
+        },
+        save_results=False,
+        save_predictions=False,
+    )
+
+    assert len(analyzer._results_df) == 1
+    assert len(analyzer._runs_metadata_df) == 1
+    assert not (tmp_path / BiasAnalyzer.RESULTS_FILENAME).exists()
+    assert not (tmp_path / BiasAnalyzer.RUN_METADATA_FILENAME).exists()
+
+
+def test_decompose_variance_rejects_invalid_inputs(analyzer):
+    with pytest.raises(TypeError, match="confidence must be numeric"):
+        analyzer.decompose_variance(confidence="0.95")
+
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        analyzer.decompose_variance(confidence=1.0)
+
+    with pytest.raises(ValueError, match="Unsupported study views"):
+        analyzer.decompose_variance(view=["unknown"])
+
+
+def test_decompose_variance_uses_numeric_result_fields(analyzer):
+    analyzer._results_df = pd.DataFrame(
+        {
+            "run_id": ["run_test", "run_test"],
+            "iteration": [0, 1],
+            "study": ["model", "model"],
+            "variable": ["wide", "wide"],
+            "architecture": ["[4]", "[6]"],
+            "loss": [1.0, 3.0],
+            "mse": [1.0, 3.0],
+        }
+    ).reindex(columns=BiasAnalyzer.RESULT_COLUMNS)
+
+    decomposition = analyzer.decompose_variance(view=["model"])
+    wide = decomposition["model"]["wide"]["wide"]
+
+    assert wide["averages"]["loss"] == pytest.approx(2.0)
+    assert "architecture" not in wide["averages"]
+
+
+def test_plot_disagreement_map_rejects_invalid_selections(analyzer):
+    with pytest.raises(ValueError, match="Unsupported study views"):
+        analyzer.plot_disagreement_map(view=["unknown"])
+
+    with pytest.raises(ValueError, match="Unsupported plot types"):
+        analyzer.plot_disagreement_map(plot_type=["unknown"])
