@@ -1,23 +1,63 @@
 from __future__ import annotations
+from typing import Any
+from collections.abc import Mapping, Sequence
 
 import os
 import uuid
 import h5py
+import json
+from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
 import scipy.stats as stats
-import tensorflow as tf
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
 import matplotlib.pyplot as plt
-from keras.layers import Input, Dense
-from keras.metrics import (
-    R2Score,
-    MeanSquaredError,
-    RootMeanSquaredError,
-    MeanAbsoluteError
-)
-from keras.models import Model
 from sklearn.model_selection import train_test_split
-from bias_variance.generators.ArchitectureGenerator import ArchitectureGenerator
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score
+)
+from bias_variance._constants import (
+    ACTUALS_DATASET_NAME,
+    CONF_INTERVAL_LOWER_FIELD_NAME,
+    CONF_INTERVAL_UPPER_FIELD_NAME,
+    FIT_ITERATIONS_DIR_NAME,
+    ITERATION_FIELD_NAME,
+    LOSS_FIELD_NAME,
+    MEAN_FIELD_NAME,
+    MetricName,
+    MODEL_NAME,
+    PlotType,
+    MODEL_SEED_FIELD_NAME,
+    ARCHITECTURE_FIELD_NAME,
+    PREDICTIONS_DATASET_NAME,
+    PREDICTIONS_LAYER_NAME,
+    RESULTS_FILENAME,
+    RUN_ID_FIELD_NAME,
+    SamplingStrategyName,
+    STUDY_FIELD_NAME,
+    StudyName,
+    TIMESTAMP_FIELD_NAME,
+    VARIABLE_FIELD_NAME,
+    VARIANCE_FIELD_NAME,
+    CREATED_AT_FIELD_NAME,
+    RANDOM_STATE_FIELD_NAME,
+    TEST_SIZE_FIELD_NAME,
+    N_ITER_FIELD_NAME,
+    OPTIMIZER_FIELD_NAME,
+    LEARNING_RATE_FIELD_NAME,
+    METRICS_FIELD_NAME,
+    EPOCHS_FIELD_NAME,
+    BATCH_SIZE_FIELD_NAME,
+    DEVICE_FIELD_NAME,
+    BASELINE_ARCHITECTURE_FIELD_NAME,
+    RUN_METADATA_FILENAME
+)
+from bias_variance.generators.FnnArchitectureGenerator import FnnArchitectureGenerator
 from bias_variance.generators.Generator import Generator
 from bias_variance.generators.SamplingGenerator import (
     SamplingGenerator,
@@ -34,62 +74,12 @@ from common.sampling._sampling import (
     get_random_samples,
     generate_latin_hypercube_samples
 )
+from bias_variance.models.TrainingConfig import TrainingConfig
+from bias_variance.models.fnn.FnnArchitecture import FnnArchitecture
+from bias_variance.models.fnn.FnnBuilder import FnnBuilder
 
 
-class BiasAnalyzerConfigMeta(type):
-    '''
-    Provides static, const member variables for the BiasAnalyzer class.
-    '''
-    @property
-    def METRIC_OPTIONS(cls):
-        '''
-        Returns all keras functional model metric selections for analysis.
-        '''
-        return {
-            'rmse' : RootMeanSquaredError(name='rmse'),
-            'mse' : MeanSquaredError(name='mse'),
-            'mae' : MeanAbsoluteError(name='mae'),
-            'r2' : R2Score(name='r2')
-        }
-    
-    @property
-    def RESULTS_FILENAME(cls):
-        '''
-        Returns the saved results dataframe filename (w/ file extension) for later analysis.
-        '''
-        return 'bias_variance_results.csv'
-    
-    @property
-    def FIT_ITERATIONS_DIR_NAME(cls):
-        '''
-        Returns directory name for saved predictions and actuals from model training/fitting.
-        '''
-        return 'iterations'
-    
-    @property
-    def STUDY_FIELD_NAME(cls):
-        '''
-        Returns study field name for results table.
-        '''
-        return 'study'
-    
-    @property
-    def VARIABLE_FIELD_NAME(cls):
-        '''
-        Returns variable field name for results table. This is dependent on the type of study.
-        '''
-        return 'variable'
-
-
-# General workflow
-# analyzer = BiasAnalyzer(...)
-# analyzer.run_model_bias_study(...)
-# analyzer.run_sampling_bias_study(...)
-# analyzer.run_data_bias_study(...)
-# analyzer.decompose_variance(...)
-# analyzer.plot_disagreement_map(...)
-
-class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
+class BiasAnalyzer:
     '''
     Analyzes each bias by comparing to the base model and dataset to
     the generated predictions' 95% confidence interval.
@@ -113,20 +103,11 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         'batch_size': int = Number of training samples.
         'verbose': int = logging infomation display modes.
     
-    test_size : float = 0.2
-        Fraction used for initial train/test split.
-
-    random_state : int | None = None
-        Seed used for reproducibility.
-
-    _model: tensorflow.keras.Model | None = None
-        Holds the base model.
-    
-    _init_weights: list[numpy.ndarray] | None = None
-        Holds the initial weights before any training data is fitted on the base model.
-    
     _results_df: pandas.DataFrame | None = None
         Caches the results after a study has ran.
+
+    _runs_metadata_df: pandas.DataFrame | None = None
+        Caches one metadata row per completed study run.
     
     _run_id: str | None = None
         The associated run id. Updates after run_bias_studies() is called.
@@ -136,98 +117,393 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
     - Should we select all plots by default or only select the best representation w/ an auto selection feature?
     '''
 
+    METRIC_OPTIONS = frozenset(MetricName)
+    RESULTS_FILENAME = RESULTS_FILENAME
+    RUN_METADATA_FILENAME = RUN_METADATA_FILENAME
+    FIT_ITERATIONS_DIR_NAME = FIT_ITERATIONS_DIR_NAME
+    STUDY_FIELD_NAME = STUDY_FIELD_NAME
+    VARIABLE_FIELD_NAME = VARIABLE_FIELD_NAME
+
+    RESULT_COLUMNS = (
+        RUN_ID_FIELD_NAME,
+        ITERATION_FIELD_NAME,
+        STUDY_FIELD_NAME,
+        VARIABLE_FIELD_NAME,
+        MODEL_SEED_FIELD_NAME,
+        ARCHITECTURE_FIELD_NAME,
+        LOSS_FIELD_NAME,
+        MetricName.RMSE,
+        MetricName.R2,
+        MetricName.MSE,
+        MetricName.MAE,
+        VARIANCE_FIELD_NAME,
+        MEAN_FIELD_NAME,
+        CONF_INTERVAL_LOWER_FIELD_NAME,
+        CONF_INTERVAL_UPPER_FIELD_NAME,
+    )
+
+    RUN_METADATA_COLUMNS = (
+        RUN_ID_FIELD_NAME,
+        CREATED_AT_FIELD_NAME,
+        RANDOM_STATE_FIELD_NAME,
+        TEST_SIZE_FIELD_NAME,
+        N_ITER_FIELD_NAME,
+        OPTIMIZER_FIELD_NAME,
+        LEARNING_RATE_FIELD_NAME,
+        LOSS_FIELD_NAME,
+        METRICS_FIELD_NAME,
+        EPOCHS_FIELD_NAME,
+        BATCH_SIZE_FIELD_NAME,
+        DEVICE_FIELD_NAME,
+        BASELINE_ARCHITECTURE_FIELD_NAME,
+    )
+
+    @staticmethod
+    def _validate_random_state(random_state: int | None) -> None:
+        if (
+            random_state is not None
+            and (
+                not isinstance(random_state, int)
+                or isinstance(random_state, bool)
+            )
+        ):
+            raise TypeError('random_state must be an integer or None.')
+
+    @staticmethod
+    def _validate_test_size(test_size: float) -> None:
+        if (
+            not isinstance(test_size, (int, float))
+            or isinstance(test_size, bool)
+        ):
+            raise TypeError('test_size must be numeric.')
+        if not 0 < test_size < 1:
+            raise ValueError('test_size must be between 0 and 1.')
+
+    @staticmethod
+    def _validate_n_iter(n_iter: int) -> None:
+        if not isinstance(n_iter, int) or isinstance(n_iter, bool):
+            raise TypeError('n_iter must be an integer.')
+        if n_iter <= 0:
+            raise ValueError('n_iter must be greater than 0.')
+
+    @staticmethod
+    def _validate_dataframe(
+        dataframe: pd.DataFrame,
+        *,
+        name: str,
+        require_numeric: bool = True,
+    ) -> None:
+        if not isinstance(dataframe, pd.DataFrame):
+            raise TypeError(f'{name} must be a pandas DataFrame.')
+        if dataframe.empty:
+            raise ValueError(f'{name} must not be empty.')
+        if dataframe.columns.has_duplicates:
+            raise ValueError(f'{name} must not contain duplicate columns.')
+        if require_numeric:
+            non_numeric = list(
+                dataframe.select_dtypes(exclude=[np.number]).columns
+            )
+            if non_numeric:
+                raise TypeError(
+                    f'{name} must contain only numeric columns; '
+                    f'found {non_numeric}.'
+                )
+            values = dataframe.to_numpy(dtype=float, copy=False)
+            if not np.isfinite(values).all():
+                raise ValueError(f'{name} must contain only finite values.')
+
+    @classmethod
+    def _validate_split(
+        cls,
+        split: object,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        if not isinstance(split, (tuple, list)) or len(split) != 4:
+            raise TypeError(
+                'split must contain X_train, X_test, y_train, and y_test.'
+            )
+
+        X_train, X_test, y_train, y_test = split
+        for name, dataframe in zip(
+            ('X_train', 'X_test', 'y_train', 'y_test'),
+            (X_train, X_test, y_train, y_test),
+        ):
+            cls._validate_dataframe(dataframe, name=name)
+
+        if len(X_train) != len(y_train):
+            raise ValueError('X_train and y_train must have the same row count.')
+        if len(X_test) != len(y_test):
+            raise ValueError('X_test and y_test must have the same row count.')
+        if not X_train.index.equals(y_train.index):
+            raise ValueError('X_train and y_train indexes must match.')
+        if not X_test.index.equals(y_test.index):
+            raise ValueError('X_test and y_test indexes must match.')
+
+        return X_train, X_test, y_train, y_test
+
     def __init__(
         self,
         inputs_df: pd.DataFrame,
         outputs_df: pd.DataFrame,
         *,
-        model_settings: dict = {
-            'hidden_layers': [
-                32, 32
-            ],
-            'activation' : 'relu',
-            'optimizer' : 'adam',
-            'loss' : 'mse',
-            'metrics' : ['rmse','r2','mse','mae'],
-            'epochs' : 100,
-            'batch_size' : 10,
-            'verbose' : 0
-        },
-        test_size: float = 0.2,
-        random_state: int | None = None,
-        _model: tf.keras.Model | None = None,
-        _init_weights: list[np.ndarray] | None = None,
+        fnn_builder: FnnBuilder,
+        baseline_architecture: FnnArchitecture,
+        training_config: TrainingConfig,
         _results_df: pd.DataFrame | None = None,
-        _run_id: str | None = None
+        _runs_metadata_df: pd.DataFrame | None = None,
+        _run_id: str | None = None,
     ) -> None:
+        self._validate_dataframe(inputs_df, name='inputs_df')
+        self._validate_dataframe(outputs_df, name='outputs_df')
+        if len(inputs_df) != len(outputs_df):
+            raise ValueError(
+                'inputs_df and outputs_df must have the same number of rows.'
+            )
+        if not inputs_df.index.equals(outputs_df.index):
+            raise ValueError('inputs_df and outputs_df indexes must match.')
+        overlapping_columns = set(inputs_df.columns) & set(outputs_df.columns)
+        if overlapping_columns:
+            raise ValueError(
+                'inputs_df and outputs_df must have distinct column names; '
+                f'overlap: {sorted(overlapping_columns)}.'
+            )
+        if not isinstance(fnn_builder, FnnBuilder):
+            raise TypeError('fnn_builder must be an FnnBuilder.')
+        if not isinstance(baseline_architecture, FnnArchitecture):
+            raise TypeError(
+                'baseline_architecture must be an FnnArchitecture.'
+            )
+        if not isinstance(training_config, TrainingConfig):
+            raise TypeError('training_config must be a TrainingConfig.')
+        if training_config.optimizer not in {'adam', 'sgd'}:
+            raise ValueError(
+                f'Unsupported optimizer: {training_config.optimizer!r}.'
+            )
+        if training_config.loss not in {'mse', 'mae'}:
+            raise ValueError(f'Unsupported loss: {training_config.loss!r}.')
+        if not training_config.metrics:
+            raise ValueError('training_config.metrics must not be empty.')
+        unknown_metrics = set(training_config.metrics) - set(MetricName)
+        if unknown_metrics:
+            raise ValueError(f'Unsupported metrics: {sorted(unknown_metrics)}')
+        if len(set(training_config.metrics)) != len(training_config.metrics):
+            raise ValueError('training_config.metrics must not contain duplicates.')
+        try:
+            training_config.resolved_device
+        except (RuntimeError, TypeError) as error:
+            raise ValueError(
+                f'Unsupported device: {training_config.device!r}.'
+            ) from error
+        if _results_df is not None and not isinstance(_results_df, pd.DataFrame):
+            raise TypeError('_results_df must be a pandas DataFrame or None.')
+        if (
+            _runs_metadata_df is not None
+            and not isinstance(_runs_metadata_df, pd.DataFrame)
+        ):
+            raise TypeError(
+                '_runs_metadata_df must be a pandas DataFrame or None.'
+            )
+        if _results_df is not None:
+            missing_columns = set(self.RESULT_COLUMNS) - set(_results_df.columns)
+            if missing_columns:
+                raise ValueError(
+                    '_results_df is missing columns: '
+                    f'{sorted(missing_columns)}.'
+                )
+        if _runs_metadata_df is not None:
+            missing_columns = set(self.RUN_METADATA_COLUMNS) - set(
+                _runs_metadata_df.columns
+            )
+            if missing_columns:
+                raise ValueError(
+                    '_runs_metadata_df is missing columns: '
+                    f'{sorted(missing_columns)}.'
+                )
+        if _run_id is not None and (
+            not isinstance(_run_id, str) or not _run_id.strip()
+        ):
+            raise TypeError('_run_id must be a non-empty string or None.')
+        
+        if fnn_builder.config.input_size != inputs_df.shape[1]:
+            raise ValueError(
+                'FnnBuilder input_size must match the number of input columns.'
+            )
+        
+        if fnn_builder.config.output_size != outputs_df.shape[1]:
+            raise ValueError(
+                'FnnBuilder output_size must match the number of output columns.'
+            )
+        
         self.inputs_df = inputs_df
         self.outputs_df = outputs_df
-        self.model_settings = model_settings
-        self.test_size = test_size
-        self.random_state = random_state
-        self._model = _model
-        self._init_weights = _init_weights
+        self.fnn_builder = fnn_builder
+        self.baseline_architecture = baseline_architecture
+        self.training_config = training_config
         self._results_df = _results_df
+        self._runs_metadata_df = _runs_metadata_df
         self._run_id = _run_id
-    
-    def _build_model(self, hidden_layers: list[int]) -> Model:
-        '''
-        Build model for studies. Uses default values specified in self.model_settings.
-        '''
-        # use keras functional api to build base model
-        inputs = Input(shape=(self.inputs_df.shape[1],))
-        x = inputs
-        for size in hidden_layers:
-            x = Dense(size, activation=self.model_settings['activation'])(x)
-        outputs = Dense(self.outputs_df.shape[1], name='predictions')(x)
-        model = Model(inputs=inputs, outputs=outputs, name='functional_model')
-        # compile base model with settings
-        model.compile(
-            optimizer=self.model_settings['optimizer'],
-            loss=self.model_settings['loss'],
-            metrics=[
-                BiasAnalyzer.METRIC_OPTIONS[metric]
-                for metric in self.model_settings['metrics']
-            ],
-        )
-        return model
-    
-    def _init_model(self) -> None:
-        '''
-        Initializes the base model for studies. Use when starting study run.
-        '''
-        if self._model is None:
-            self._model = self._build_model(self.model_settings['hidden_layers'])
-            # store initial weights when model needs to be retrained
-            self._init_weights = self._model.get_weights()
 
-    def _init_results_csv(self) -> None:
-        '''
-        Initializes the results csv file. Use when retrieving a previous study run for
-        bias-variance decomposition or plotting.
-        '''
-        columns = [
-            'run_id',
-            'iteration',
-            BiasAnalyzer.STUDY_FIELD_NAME,
-            BiasAnalyzer.VARIABLE_FIELD_NAME,
-            'loss',
-            *BiasAnalyzer.METRIC_OPTIONS.keys(),
-            'variance',
-            'mean',
-            'conf_interval_lower',
-            'conf_interval_upper',
+    def _build_model(
+        self,
+        architecture: FnnArchitecture,
+    ) -> nn.Sequential:
+        if not isinstance(architecture, FnnArchitecture):
+            raise TypeError('architecture must be an FnnArchitecture.')
+        model = self.fnn_builder.build(architecture)
+        if not isinstance(model, nn.Sequential):
+            raise TypeError('FnnBuilder.build() must return nn.Sequential.')
+        return model.to(self.training_config.resolved_device)
+
+    def _build_run_metadata(
+        self,
+        *,
+        n_iter: int,
+        random_state: int | None,
+        test_size: float,
+    ) -> dict[str, object]:
+        self._validate_n_iter(n_iter)
+        self._validate_random_state(random_state)
+        self._validate_test_size(test_size)
+        if self._run_id is None:
+            raise ValueError('_run_id is None.')
+
+        return {
+            RUN_ID_FIELD_NAME: self._run_id,
+            CREATED_AT_FIELD_NAME: datetime.now(
+                timezone.utc
+            ).isoformat(),
+            RANDOM_STATE_FIELD_NAME: random_state,
+            TEST_SIZE_FIELD_NAME: test_size,
+            N_ITER_FIELD_NAME: n_iter,
+            OPTIMIZER_FIELD_NAME: self.training_config.optimizer,
+            LEARNING_RATE_FIELD_NAME: (
+                self.training_config.learning_rate
+            ),
+            LOSS_FIELD_NAME: self.training_config.loss,
+            METRICS_FIELD_NAME: json.dumps(
+                list(self.training_config.metrics)
+            ),
+            EPOCHS_FIELD_NAME: self.training_config.epochs,
+            BATCH_SIZE_FIELD_NAME: (
+                self.training_config.batch_size
+            ),
+            DEVICE_FIELD_NAME: str(
+                self.training_config.resolved_device
+            ),
+            BASELINE_ARCHITECTURE_FIELD_NAME: json.dumps(
+                list(self.baseline_architecture.hidden_layers)
+            ),
+        }
+
+    def _record_run_metadata(
+        self,
+        *,
+        n_iter: int,
+        random_state: int | None,
+        test_size: float,
+    ) -> None:
+        self._validate_n_iter(n_iter)
+        self._validate_random_state(random_state)
+        self._validate_test_size(test_size)
+        if self._runs_metadata_df is None:
+            raise ValueError('_runs_metadata_df is not initialized.')
+        if self._run_id in set(
+            self._runs_metadata_df[RUN_ID_FIELD_NAME].dropna()
+        ):
+            raise ValueError(f'Duplicate run ID: {self._run_id}')
+
+        metadata = self._build_run_metadata(
+            n_iter=n_iter,
+            random_state=random_state,
+            test_size=test_size,
+        )
+
+        self._runs_metadata_df = pd.concat(
+            [
+                self._runs_metadata_df,
+                pd.DataFrame([metadata])
+            ],
+            ignore_index=True
+        )
+
+    @staticmethod
+    def _load_or_initialize_table(
+        filename: str,
+        columns: tuple[str, ...],
+    ) -> pd.DataFrame:
+        if not isinstance(filename, str) or not filename.strip():
+            raise TypeError('filename must be a non-empty string.')
+        if not isinstance(columns, tuple) or not columns:
+            raise TypeError('columns must be a non-empty tuple.')
+        if any(not isinstance(column, str) or not column for column in columns):
+            raise TypeError('Every column name must be a non-empty string.')
+        if len(set(columns)) != len(columns):
+            raise ValueError('columns must not contain duplicates.')
+        if os.path.exists(filename):
+            try:
+                table = pd.read_csv(filename)
+            except (OSError, pd.errors.ParserError) as error:
+                raise ValueError(
+                    f'Unable to load table from {filename!r}.'
+                ) from error
+            if table.columns.has_duplicates:
+                raise ValueError(
+                    f'Table {filename!r} contains duplicate columns.'
+                )
+            return table.reindex(columns=columns)
+        
+        return pd.DataFrame(columns=columns)
+
+    def get_runs_metadata(self) -> pd.DataFrame:
+        '''Return a copy of the persisted and in-memory run metadata.'''
+        if self._runs_metadata_df is None:
+            self._runs_metadata_df = self._load_or_initialize_table(
+                RUN_METADATA_FILENAME,
+                self.RUN_METADATA_COLUMNS,
+            )
+
+        return self._runs_metadata_df.copy()
+
+    def get_run_metadata(self, run_id: str) -> pd.Series:
+        '''Return the metadata row for one run ID.'''
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise TypeError('run_id must be a non-empty string.')
+        runs_metadata = self.get_runs_metadata()
+        matches = runs_metadata[
+            runs_metadata[RUN_ID_FIELD_NAME] == run_id
         ]
 
-        if os.path.exists(BiasAnalyzer.RESULTS_FILENAME):
-            self._results_df = pd.read_csv(
-                BiasAnalyzer.RESULTS_FILENAME
-            ).reindex(columns=columns)
-        
-        else:
-            self._results_df = pd.DataFrame(columns=columns)
-        
-        os.makedirs(BiasAnalyzer.FIT_ITERATIONS_DIR_NAME, exist_ok=True)
+        if matches.empty:
+            raise KeyError(f'Unknown run ID: {run_id}')
+
+        return matches.iloc[0].copy()
+
+    def get_results_with_metadata(self) -> pd.DataFrame:
+        '''Join result rows to their run metadata using ``run_id``.'''
+        if self._results_df is None:
+            self._results_df = self._load_or_initialize_table(
+                RESULTS_FILENAME,
+                self.RESULT_COLUMNS,
+            )
+
+        joined = self._results_df.merge(
+            self.get_runs_metadata(),
+            on=RUN_ID_FIELD_NAME,
+            how='left',
+            validate='many_to_one',
+            suffixes=('_result', '_run'),
+        )
+        metadata_run_ids = set(
+            self.get_runs_metadata()[RUN_ID_FIELD_NAME].dropna()
+        )
+        orphaned_run_ids = set(
+            self._results_df[RUN_ID_FIELD_NAME].dropna()
+        ) - metadata_run_ids
+        if orphaned_run_ids:
+            raise ValueError(
+                'Results reference unknown run IDs: '
+                f'{sorted(orphaned_run_ids)}.'
+            )
+        return joined
 
     def _save_predictions_and_actuals(
         self,
@@ -260,16 +536,253 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         '''
         if self._run_id is None:
             raise ValueError('_run_id is None.')
+        if not isinstance(predictions, np.ndarray):
+            raise TypeError('predictions must be a NumPy array.')
+        self._validate_dataframe(actuals, name='actuals')
+        if predictions.ndim != 2:
+            raise ValueError('predictions must be a two-dimensional array.')
+        if predictions.shape != actuals.shape:
+            raise ValueError(
+                'predictions and actuals must have matching shapes.'
+            )
+        if not np.issubdtype(predictions.dtype, np.number):
+            raise TypeError('predictions must contain numeric values.')
+        if not np.isfinite(predictions).all():
+            raise ValueError('predictions must contain only finite values.')
+        if not isinstance(study, str) or not study.strip() or '/' in study:
+            raise ValueError('study must be a non-empty HDF5-safe label.')
+        if not isinstance(label, str) or not label.strip() or '/' in label:
+            raise ValueError('label must be a non-empty HDF5-safe label.')
+        if not isinstance(iteration, int) or isinstance(iteration, bool):
+            raise TypeError('iteration must be an integer.')
+        if iteration < 0:
+            raise ValueError('iteration must be non-negative.')
         pred_file_path = os.path.join(
-            BiasAnalyzer.FIT_ITERATIONS_DIR_NAME,
+            FIT_ITERATIONS_DIR_NAME,
             f'{self._run_id}.h5'
         )
-        os.makedirs(BiasAnalyzer.FIT_ITERATIONS_DIR_NAME, exist_ok=True)
+        os.makedirs(FIT_ITERATIONS_DIR_NAME, exist_ok=True)
         group_path = f'{study}/{label}/iteration_{iteration}'
         with h5py.File(pred_file_path, 'a') as hf:
             group = hf.create_group(group_path)
-            group.create_dataset('predictions', data=predictions)
-            group.create_dataset('actuals', data=actuals)
+            group.create_dataset(PREDICTIONS_DATASET_NAME, data=predictions)
+            group.create_dataset(ACTUALS_DATASET_NAME, data=actuals)
+
+    def _to_tensor(
+        self,
+        dataframe: pd.DataFrame,
+    ) -> torch.Tensor:
+        self._validate_dataframe(dataframe, name='dataframe')
+        array = dataframe.to_numpy(
+            dtype=np.float32,
+            copy=True
+        )
+
+        return torch.from_numpy(array)
+    
+    def _build_loss(self) -> nn.Module:
+        losses: dict[str, type[nn.Module]] = {
+            'mse': nn.MSELoss,
+            'mae': nn.L1Loss
+        }
+
+        try:
+            loss_type = losses[self.training_config.loss]
+        except KeyError:
+            raise ValueError(
+                f'Unsupported loss: {self.training_config.loss!r}.'
+                f'Expected one of {sorted(losses)}.'
+            ) from None
+        
+        return loss_type()
+    
+    def _build_optimizer(
+        self,
+        model: nn.Module,
+    ) -> optim.Optimizer:
+        if not isinstance(model, nn.Module):
+            raise TypeError('model must be a torch.nn.Module.')
+        if not any(True for _ in model.parameters()):
+            raise ValueError('model must contain trainable parameters.')
+        optimizers: dict[
+            str,
+            type[optim.Optimizer],
+        ] = {
+            'adam': optim.Adam,
+            'sgd': optim.SGD
+        }
+
+        try:
+            optimizer_type = optimizers[self.training_config.optimizer]
+        except KeyError:
+            raise ValueError(
+                f'Unsupported optimizer: '
+                f'{self.training_config.optimizer!r}.'
+                f'Expected one of {sorted(optimizers)}.'
+            ) from None
+        
+        return optimizer_type(
+            model.parameters(),
+            lr=self.training_config.learning_rate
+        )
+    
+    def _set_random_state(
+        self,
+        random_state: int | None,
+    ) -> None:
+        self._validate_random_state(random_state)
+        if random_state is None:
+            return
+        
+        np.random.seed(random_state)
+        torch.manual_seed(random_state)
+
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(random_state)
+
+    def _train_model(
+        self,
+        model: nn.Module,
+        X_train: torch.Tensor,
+        y_train: torch.Tensor,
+        *,
+        random_state: int | None,
+    ) -> None:
+        if not isinstance(model, nn.Module):
+            raise TypeError('model must be a torch.nn.Module.')
+        if not isinstance(X_train, torch.Tensor):
+            raise TypeError('X_train must be a torch.Tensor.')
+        if not isinstance(y_train, torch.Tensor):
+            raise TypeError('y_train must be a torch.Tensor.')
+        self._validate_random_state(random_state)
+        if X_train.ndim != 2 or y_train.ndim != 2:
+            raise ValueError('Training tensors must be two-dimensional.')
+        if X_train.shape[0] == 0:
+            raise ValueError('Training tensors must not be empty.')
+        if X_train.shape[0] != y_train.shape[0]:
+            raise ValueError(
+                'X_train and y_train must have the same sample count.'
+            )
+        if X_train.shape[1] != self.fnn_builder.config.input_size:
+            raise ValueError('X_train has an unexpected feature count.')
+        if y_train.shape[1] != self.fnn_builder.config.output_size:
+            raise ValueError('y_train has an unexpected output count.')
+        if not torch.is_floating_point(X_train) or not torch.is_floating_point(
+            y_train
+        ):
+            raise TypeError('Training tensors must use a floating-point dtype.')
+        if not torch.isfinite(X_train).all() or not torch.isfinite(y_train).all():
+            raise ValueError('Training tensors must contain only finite values.')
+        dataset = TensorDataset(X_train, y_train)
+
+        loader_generator = torch.Generator()
+        if random_state is not None:
+            loader_generator.manual_seed(random_state)
+
+        loader = DataLoader(
+            dataset,
+            batch_size=self.training_config.batch_size,
+            shuffle=True,
+            generator=loader_generator
+        )
+
+        criterion = self._build_loss()
+        optimizer = self._build_optimizer(model)
+
+        model.train()
+
+        for _ in np.arange(self.training_config.epochs):
+            for batch_X, batch_y in loader:
+                batch_X = batch_X.to(self.training_config.resolved_device)
+                batch_y = batch_y.to(self.training_config.resolved_device)
+                optimizer.zero_grad()
+                predictions = model(batch_X)
+                loss = criterion(predictions, batch_y)
+                loss.backward()
+                optimizer.step()
+
+    def _predict(
+        self,
+        model: nn.Module,
+        X_test: torch.Tensor,
+        y_test: torch.Tensor,
+    ) -> tuple[np.ndarray, float]:
+        if not isinstance(model, nn.Module):
+            raise TypeError('model must be a torch.nn.Module.')
+        if not isinstance(X_test, torch.Tensor):
+            raise TypeError('X_test must be a torch.Tensor.')
+        if not isinstance(y_test, torch.Tensor):
+            raise TypeError('y_test must be a torch.Tensor.')
+        if X_test.ndim != 2 or y_test.ndim != 2:
+            raise ValueError('Test tensors must be two-dimensional.')
+        if X_test.shape[0] == 0:
+            raise ValueError('Test tensors must not be empty.')
+        if X_test.shape[0] != y_test.shape[0]:
+            raise ValueError('X_test and y_test must have the same sample count.')
+        if X_test.shape[1] != self.fnn_builder.config.input_size:
+            raise ValueError('X_test has an unexpected feature count.')
+        if y_test.shape[1] != self.fnn_builder.config.output_size:
+            raise ValueError('y_test has an unexpected output count.')
+        if not torch.isfinite(X_test).all() or not torch.isfinite(y_test).all():
+            raise ValueError('Test tensors must contain only finite values.')
+        model.eval()
+
+        with torch.inference_mode():
+            predictions = model(
+                X_test.to(self.training_config.resolved_device)
+            )
+            test_loss = self._build_loss()(
+                predictions,
+                y_test.to(self.training_config.resolved_device)
+            )
+
+        return predictions.cpu().numpy(), float(test_loss.item())
+    
+    def _calculate_scores(
+        self,
+        actuals: np.ndarray,
+        predictions: np.ndarray,
+    ) -> dict[str, float]:
+        if not isinstance(actuals, np.ndarray):
+            raise TypeError('actuals must be a NumPy array.')
+        if not isinstance(predictions, np.ndarray):
+            raise TypeError('predictions must be a NumPy array.')
+        if actuals.ndim != 2 or predictions.ndim != 2:
+            raise ValueError('actuals and predictions must be two-dimensional.')
+        if actuals.shape != predictions.shape:
+            raise ValueError('actuals and predictions must have matching shapes.')
+        if actuals.shape[0] < 2:
+            raise ValueError('At least two test samples are required for metrics.')
+        if not np.issubdtype(actuals.dtype, np.number) or not np.issubdtype(
+            predictions.dtype, np.number
+        ):
+            raise TypeError('actuals and predictions must be numeric.')
+        if not np.isfinite(actuals).all() or not np.isfinite(predictions).all():
+            raise ValueError(
+                'actuals and predictions must contain only finite values.'
+            )
+        mse = mean_squared_error(actuals, predictions)
+
+        scores = {
+            MetricName.MSE: float(mse),
+            MetricName.RMSE: float(np.sqrt(mse)),
+            MetricName.MAE: float(
+                mean_absolute_error(actuals, predictions)
+            ),
+            MetricName.R2: float(
+                r2_score(
+                    actuals,
+                    predictions,
+                    multioutput='uniform_average',
+                )
+            )
+        }
+
+        return {
+            str(metric): value
+            for metric, value in scores.items()
+            if metric in self.training_config.metrics
+        }
 
     def _get_test_result_and_data(
         self,
@@ -279,7 +792,10 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             pd.DataFrame,
             pd.DataFrame,
         ] | None = None,
-        hidden_layers: list[int] | None = None,
+        architecture: FnnArchitecture | None = None,
+        *,
+        random_state: int | None,
+        test_size: float,
     ) -> tuple[dict[str, float], np.ndarray, pd.DataFrame]:
         '''
         Train and evaluate a model for one generated study variation.
@@ -300,58 +816,105 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             Evaluation metrics, model predictions, and the corresponding actual
             output values.
         '''
-        if hidden_layers is None:
-            self._init_model()
-            model = self._model
-            # reset weights
-            model.set_weights(self._init_weights)
+        self._validate_random_state(random_state)
+        self._validate_test_size(test_size)
+        if architecture is not None and not isinstance(
+            architecture, FnnArchitecture
+        ):
+            raise TypeError('architecture must be an FnnArchitecture or None.')
+
+        if split is None:
+            generated_split = train_test_split(
+                self.inputs_df,
+                self.outputs_df,
+                test_size=test_size,
+                random_state=random_state
+            )
+            X_train, X_test, y_train, y_test = self._validate_split(
+                generated_split
+            )
         else:
-            model = self._build_model(hidden_layers)
-        
-        X_train, X_test, y_train, y_test = split or train_test_split(
-            self.inputs_df,
-            self.outputs_df,
-            test_size=self.test_size,
-            random_state=self.random_state
+            X_train, X_test, y_train, y_test = self._validate_split(split)
+
+        if list(X_train.columns) != list(self.inputs_df.columns):
+            raise ValueError('X_train columns must match inputs_df.')
+        if list(X_test.columns) != list(self.inputs_df.columns):
+            raise ValueError('X_test columns must match inputs_df.')
+        if list(y_train.columns) != list(self.outputs_df.columns):
+            raise ValueError('y_train columns must match outputs_df.')
+        if list(y_test.columns) != list(self.outputs_df.columns):
+            raise ValueError('y_test columns must match outputs_df.')
+
+        selected_architecture  = (
+            self.baseline_architecture
+            if architecture is None
+            else architecture
         )
+
+        self._set_random_state(random_state)
+        model = self._build_model(selected_architecture)
+
+        X_train_tensor = self._to_tensor(X_train)
+        X_test_tensor = self._to_tensor(X_test)
+        y_train_tensor = self._to_tensor(y_train)
+        y_test_tensor = self._to_tensor(y_test)
 
         # train
-        model.fit(
-            X_train,
-            y_train,
-            epochs=self.model_settings['epochs'],
-            batch_size=self.model_settings['batch_size'],
-            verbose=self.model_settings['verbose']
+        self._train_model(
+            model,
+            X_train_tensor,
+            y_train_tensor,
+            random_state=random_state
         )
 
-        predictions = model.predict(X_test)
+        predictions, test_loss = self._predict(model, X_test_tensor, y_test_tensor)
+        actuals_values = y_test.to_numpy(dtype=np.float32)
 
-        # evaluate
-        scores = model.evaluate(X_test, y_test, batch_size=self.model_settings['batch_size'], return_dict=True)
-        prediction_values = np.asarray(predictions).reshape(-1)
-        variance = np.var(prediction_values)
-        mean = np.mean(prediction_values)
-        conf_interval = stats.norm.interval(
-            0.95,
-            loc=mean,
-            scale=stats.sem(prediction_values),
-        )
-
-        metrics = {
-            'variance': variance,
-            'mean': mean,
-            'conf_interval_lower': conf_interval[0],
-            'conf_interval_upper': conf_interval[1],
+        scores = {
+            LOSS_FIELD_NAME: test_loss,
+            **self._calculate_scores(
+                actuals_values,
+                predictions
+            )
         }
 
-        return scores | metrics, predictions, y_test
+        predictions_values = predictions.reshape(-1)
+        variance = float(np.var(predictions_values))
+        mean = float(np.mean(predictions_values))
+        standard_error = float(stats.sem(predictions_values))
+        conf_interval = (
+            (mean, mean)
+            if standard_error == 0.0
+            else stats.norm.interval(
+                0.95,
+                loc=mean,
+                scale=standard_error,
+            )
+        )
+
+        scores.update(
+            {
+                VARIANCE_FIELD_NAME: variance,
+                MEAN_FIELD_NAME: mean,
+                CONF_INTERVAL_LOWER_FIELD_NAME: float(
+                    conf_interval[0]
+                ),
+                CONF_INTERVAL_UPPER_FIELD_NAME: float(
+                    conf_interval[1]
+                )
+            }
+        )
+
+        return scores, predictions, y_test
 
     def _get_results(
         self,
         n_iter: int,
-        generator: Generator[tuple[int, ...]] | Generator[pd.DataFrame],
+        generator: Generator[FnnArchitecture] | Generator[pd.DataFrame],
         study: str,
         *,
+        random_state: int | None,
+        test_size: float,
         save_predictions: bool = True,
     ) -> pd.DataFrame:
         '''
@@ -374,35 +937,103 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         pandas.DataFrame
             One result row per generated label and iteration.
         '''
-        results = pd.DataFrame()
+        self._validate_n_iter(n_iter)
+        self._validate_random_state(random_state)
+        self._validate_test_size(test_size)
+        if not isinstance(generator, Generator):
+            raise TypeError('generator must implement Generator.')
+        try:
+            normalized_study = StudyName(study)
+        except (TypeError, ValueError):
+            raise ValueError(f'Unsupported study: {study!r}') from None
+        if normalized_study not in {StudyName.MODEL, StudyName.SAMPLING}:
+            raise ValueError(f'Unsupported study: {study!r}')
+        if not isinstance(save_predictions, bool):
+            raise TypeError('save_predictions must be a boolean.')
+        if self._run_id is None:
+            raise ValueError('_run_id is None.')
+
+        study = normalized_study
+        results = pd.DataFrame(columns=self.RESULT_COLUMNS)
 
         for i in np.arange(n_iter):
             iteration_random_state = (
                 None
-                if self.random_state is None
-                else self.random_state + i
+                if random_state is None
+                else random_state + int(i)
             )
 
             variations = generator.generate(random_state=iteration_random_state)
+            if not isinstance(variations, Mapping):
+                raise TypeError('generator.generate() must return a mapping.')
+            if not variations:
+                raise ValueError(
+                    f'Generator produced no variations for study {study!r}.'
+                )
+            model_study_split = None
+            if study == StudyName.MODEL:
+                model_study_split = train_test_split(
+                    self.inputs_df,
+                    self.outputs_df,
+                    test_size=test_size,
+                    random_state=iteration_random_state,
+                )
 
-            for label, variation in variations.items():
-                hidden_layers = None
+            for j, (label, variation) in enumerate(variations.items()):
+                if not isinstance(label, str) or not label.strip():
+                    raise ValueError(
+                        'Generated variation labels must be non-empty strings.'
+                    )
+                model_random_state = (
+                    None
+                    if iteration_random_state is None
+                    else iteration_random_state + j
+                )
+                architecture = None
                 split = None
 
-                if study == 'model':
-                    hidden_layers = list(variation)
+                if study == StudyName.MODEL:
+                    if not isinstance(variation, FnnArchitecture):
+                        raise TypeError(
+                            'Model studies must generate FnnArchitecture values.'
+                    )
+                    
+                    architecture = variation
+                    split = model_study_split
                 
-                elif study == 'sampling':
+                elif study == StudyName.SAMPLING:
+                    if not isinstance(variation, pd.DataFrame):
+                        raise TypeError(
+                            'Sampling studies must generate pandas DataFrames.'
+                        )
+                    self._validate_dataframe(
+                        variation,
+                        name=f'sampling variation {label!r}',
+                    )
+                    required_columns = set(self.inputs_df.columns) | set(
+                        self.outputs_df.columns
+                    )
+                    missing_columns = required_columns - set(variation.columns)
+                    if missing_columns:
+                        raise ValueError(
+                            f'Sampling variation {label!r} is missing columns: '
+                            f'{sorted(missing_columns)}.'
+                        )
                     sampled_inputs_df = variation[self.inputs_df.columns]
                     sampled_outputs_df = variation[self.outputs_df.columns]
                     split = train_test_split(
                         sampled_inputs_df,
                         sampled_outputs_df,
-                        test_size=self.test_size,
+                        test_size=test_size,
                         random_state=iteration_random_state
                     )
                 
-                result, predictions, actuals = self._get_test_result_and_data(hidden_layers=hidden_layers, split=split)
+                result, predictions, actuals = self._get_test_result_and_data(
+                    architecture=architecture,
+                    split=split,
+                    random_state=model_random_state,
+                    test_size=test_size,
+                )
 
                 if save_predictions:
                     self._save_predictions_and_actuals(
@@ -414,10 +1045,18 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                     )
                 
                 df_row = {
-                    'run_id': self._run_id,
-                    'iteration': int(i),
-                    BiasAnalyzer.STUDY_FIELD_NAME: study,
-                    BiasAnalyzer.VARIABLE_FIELD_NAME: label
+                    RUN_ID_FIELD_NAME: self._run_id,
+                    ITERATION_FIELD_NAME: int(i),
+                    STUDY_FIELD_NAME: study,
+                    VARIABLE_FIELD_NAME: label,
+                    MODEL_SEED_FIELD_NAME: model_random_state,
+                    ARCHITECTURE_FIELD_NAME: json.dumps(
+                        list(
+                            architecture.hidden_layers
+                            if architecture is not None
+                            else self.baseline_architecture.hidden_layers
+                        )
+                    ),
                 } | result
 
                 results = pd.concat([results, pd.DataFrame([df_row])], ignore_index=True)
@@ -428,7 +1067,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         self,
         study: str,
         settings: dict[str, object],
-    ) -> ArchitectureGenerator | SamplingGenerator:
+    ) -> FnnArchitectureGenerator | SamplingGenerator:
         '''
         Construct the concrete generator configured for a study.
 
@@ -451,15 +1090,22 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         ValueError
             If ``study`` is unsupported.
         '''
-        if study == 'model':
-            return ArchitectureGenerator(settings=settings)
-        if study == 'sampling':
+        if not isinstance(settings, Mapping):
+            raise TypeError('settings must be a mapping.')
+        try:
+            study = StudyName(study)
+        except (TypeError, ValueError):
+            raise ValueError(f'Unsupported study: {study!r}') from None
+
+        if study == StudyName.MODEL:
+            return FnnArchitectureGenerator(settings=settings)
+        if study == StudyName.SAMPLING:
             sampling_strategies = []
             strategies = settings.get('strategies', [])
             if 'bootstrap' in strategies:
                 sampling_strategies.append(
                     SamplingStrategy(
-                        label='bootstrap',
+                        label=SamplingStrategyName.BOOTSTRAP,
                         function=get_random_samples,
                         kwargs={
                             'sample_fraction': 1.0,
@@ -471,7 +1117,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             if 'stratified' in strategies:
                 sampling_strategies.append(
                     SamplingStrategy(
-                        label='stratified',
+                        label=SamplingStrategyName.STRATIFIED,
                         function=get_quantile_stratified_random_samples,
                         kwargs={
                             'stratify_col_index': self.inputs_df.shape[1],
@@ -481,10 +1127,10 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                     )
                 )
             
-            if 'lhs' in strategies:
+            if SamplingStrategyName.LHS in strategies:
                 sampling_strategies.append(
                     SamplingStrategy(
-                        label='lhs',
+                        label=SamplingStrategyName.LHS,
                         function=generate_latin_hypercube_samples,
                         kwargs={
                             'sample_fraction': 1.0,
@@ -503,7 +1149,7 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
     
     def run_bias_studies(
         self,
-        settings: dict | None = None,
+        settings: dict[str, Any] | None = None,
         *,
         save_results: bool = True,
         save_predictions: bool = True
@@ -513,6 +1159,8 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         -------------
         >>> settings = {
         ...     'n_iter': 100,
+        ...     'random_state': None,
+        ...     'test_size': 0.2,
         ...     'studies': {
         ...         'model': {
         ...             'wide': {
@@ -552,6 +1200,8 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         '''
         default_settings = {
             'n_iter': 100,
+            'random_state': None,
+            'test_size': 0.2,
             'studies': {
                 'model': {
                     'wide': {
@@ -588,15 +1238,41 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                 },
             }
         }
-        settings = settings or default_settings
+        if settings is None:
+            settings = default_settings
+        elif not isinstance(settings, Mapping):
+            raise TypeError('settings must be a mapping or None.')
+        if not isinstance(save_results, bool):
+            raise TypeError('save_results must be a boolean.')
+        if not isinstance(save_predictions, bool):
+            raise TypeError('save_predictions must be a boolean.')
+
+        allowed_setting_names = {
+            'n_iter', 'random_state', 'test_size', 'studies'
+        }
+        unknown_setting_names = set(settings) - allowed_setting_names
+        if unknown_setting_names:
+            raise ValueError(
+                f'Unsupported run settings: {sorted(unknown_setting_names)}'
+            )
+        missing_setting_names = {'n_iter', 'studies'} - set(settings)
+        if missing_setting_names:
+            raise ValueError(
+                f'Missing run settings: {sorted(missing_setting_names)}'
+            )
 
         n_iter = settings['n_iter']
-        if not isinstance(n_iter, int) or isinstance(n_iter, bool):
-            raise TypeError('n_iter must be an integer.')
-        if n_iter <= 0:
-            raise ValueError('n_iter must be greater than 0.')
-        
-        if not settings['studies']:
+        random_state = settings.get('random_state')
+        test_size = settings.get('test_size', 0.2)
+
+        self._validate_n_iter(n_iter)
+        self._validate_random_state(random_state)
+        self._validate_test_size(test_size)
+
+        studies = settings['studies']
+        if not isinstance(studies, Mapping):
+            raise TypeError('studies must be a mapping.')
+        if not studies:
             raise ValueError('At least one study must be configured')
         
         supported_studies = {'model', 'sampling', 'data'}
@@ -606,10 +1282,27 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                 f'Unsupported studies: {sorted(unknown_studies)}'
             )
         
-        supported_strategies = {'bootstrap', 'stratified', 'lhs'}
-        sampling_settings = settings['studies'].get('sampling')
+        supported_strategies = set(SamplingStrategyName)
+        for study_name, study_settings in studies.items():
+            if not isinstance(study_settings, Mapping):
+                raise TypeError(
+                    f'Settings for study {study_name!r} must be a mapping.'
+                )
+
+        sampling_settings = studies.get(StudyName.SAMPLING)
         if sampling_settings is not None:
-            requested_strategies = set(sampling_settings.get('strategies', []))
+            strategies = sampling_settings.get('strategies', [])
+            if isinstance(strategies, (str, bytes)) or not isinstance(
+                strategies, Sequence
+            ):
+                raise TypeError('sampling strategies must be a sequence.')
+            if any(not isinstance(strategy, str) for strategy in strategies):
+                raise TypeError('Every sampling strategy must be a string.')
+            if not strategies:
+                raise ValueError(
+                    'At least one sampling strategy must be configured.'
+                )
+            requested_strategies = set(strategies)
             unknown_strategies = requested_strategies - supported_strategies
 
             if unknown_strategies:
@@ -617,23 +1310,46 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                 f'Unsupported sampling strategies: {sorted(unknown_strategies)}'
             )
         
-        self._init_model()
         self._run_id = f'run_{uuid.uuid4().hex}'
-        os.makedirs(BiasAnalyzer.FIT_ITERATIONS_DIR_NAME, exist_ok=True)
+        if self._results_df is None:
+            self._results_df = self._load_or_initialize_table(
+                RESULTS_FILENAME,
+                self.RESULT_COLUMNS
+            )
+
+        if self._runs_metadata_df is None:
+            self._runs_metadata_df = self._load_or_initialize_table(
+                RUN_METADATA_FILENAME,
+                self.RUN_METADATA_COLUMNS
+            )
         
-        for study, study_settings in settings['studies'].items():
+        for study, study_settings in studies.items():
             generator = self._build_generator(study, study_settings)
-            results = self._get_results(n_iter, generator, study, save_predictions=save_predictions)
+            results = self._get_results(
+                n_iter,
+                generator,
+                study,
+                random_state=random_state,
+                test_size=test_size,
+                save_predictions=save_predictions,
+            )
             self._results_df = pd.concat([self._results_df, results], ignore_index=True)
-        
+
+        self._record_run_metadata(
+            n_iter=n_iter,
+            random_state=random_state,
+            test_size=test_size,
+        )
+
         if save_results:
-            self._results_df.to_csv(BiasAnalyzer.RESULTS_FILENAME, index=False)
+            self._results_df.to_csv(RESULTS_FILENAME, index=False)
+            self._runs_metadata_df.to_csv(RUN_METADATA_FILENAME, index=False)
         
         return self
 
     def decompose_variance(
         self,
-        view:list[str]=['model','sampling','data'],
+        view: list[str] | None = None,
         *,
         confidence: float = 0.95
     ) -> dict:
@@ -655,30 +1371,65 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
             Summary results from each study. Contains averages, maximums, minimums, and
             confidence intervals for each metric.
         '''
-        # Error conditions
+        if (
+            not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool)
+        ):
+            raise TypeError('confidence must be numeric.')
         if confidence <= 0 or confidence >= 1:
             raise ValueError('confidence must be between 0 and 1.')
 
+        if view is None:
+            view = list(StudyName)
+        elif isinstance(view, (str, bytes)) or not isinstance(view, Sequence):
+            raise TypeError('view must be a sequence of study names or None.')
+        if not view:
+            raise ValueError('view must contain at least one study name.')
+        if any(not isinstance(study, str) for study in view):
+            raise TypeError('Every study view must be a string.')
+        unknown_views = set(view) - set(StudyName)
+        if unknown_views:
+            raise ValueError(f'Unsupported study views: {sorted(unknown_views)}')
+
         df = self._results_df
         if df is None:
-            df = pd.read_csv(BiasAnalyzer.RESULTS_FILENAME)
+            if not os.path.exists(RESULTS_FILENAME):
+                raise FileNotFoundError(
+                    f'No results file exists at {RESULTS_FILENAME!r}.'
+                )
+            df = self._load_or_initialize_table(
+                RESULTS_FILENAME,
+                self.RESULT_COLUMNS,
+            )
+        if df.empty:
+            raise ValueError('No results are available for decomposition.')
+        required_columns = {STUDY_FIELD_NAME, VARIABLE_FIELD_NAME}
+        missing_columns = required_columns - set(df.columns)
+        if missing_columns:
+            raise ValueError(
+                f'Results are missing required columns: '
+                f'{sorted(missing_columns)}.'
+            )
         
         views = {}
 
-        for study_group_name, study_group_df in df.groupby(BiasAnalyzer.STUDY_FIELD_NAME):
+        for study_group_name, study_group_df in df.groupby(STUDY_FIELD_NAME):
             if study_group_name not in view:
                 continue
 
             views[study_group_name] = {}
-            for var_group_name, var_group_df in study_group_df.groupby(BiasAnalyzer.VARIABLE_FIELD_NAME):
+            for var_group_name, var_group_df in study_group_df.groupby(VARIABLE_FIELD_NAME):
                 metric_cols = [
-                    col for col in var_group_df.columns
-                    if col not in {
-                        BiasAnalyzer.STUDY_FIELD_NAME,
-                        BiasAnalyzer.VARIABLE_FIELD_NAME,
-                        'run_id',
-                        'timestamp'
-                    }
+                    column
+                    for column in (
+                        LOSS_FIELD_NAME,
+                        *MetricName,
+                        VARIANCE_FIELD_NAME,
+                        MEAN_FIELD_NAME,
+                        CONF_INTERVAL_LOWER_FIELD_NAME,
+                        CONF_INTERVAL_UPPER_FIELD_NAME,
+                    )
+                    if column in var_group_df.columns
                 ]
 
                 averages = {}
@@ -686,7 +1437,12 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
                 minimums = {}
                 confidence_intervals = {}
                 for col_name in metric_cols:
-                    col_data = var_group_df[col_name].dropna()
+                    col_data = pd.to_numeric(
+                        var_group_df[col_name],
+                        errors='coerce',
+                    ).dropna()
+                    if col_data.empty:
+                        continue
                     averages[col_name] = col_data.mean()
                     maximums[col_name] = col_data.max()
                     minimums[col_name] = col_data.min()
@@ -731,40 +1487,77 @@ class BiasAnalyzer(metaclass=BiasAnalyzerConfigMeta):
         -------------
         None
         '''
-        # variance-contribution
-        view = view or ['model', 'sampling', 'data']
-        plot_type = plot_type or ['variance_contribution']
+        if view is None:
+            view = list(StudyName)
+        elif isinstance(view, (str, bytes)) or not isinstance(view, Sequence):
+            raise TypeError('view must be a sequence of study names or None.')
+        if not view:
+            raise ValueError('view must contain at least one study name.')
+        if any(not isinstance(study, str) for study in view):
+            raise TypeError('Every study view must be a string.')
+        unknown_views = set(view) - set(StudyName)
+        if unknown_views:
+            raise ValueError(f'Unsupported study views: {sorted(unknown_views)}')
+
+        if plot_type is None:
+            plot_type = [PlotType.VARIANCE_CONTRIBUTION]
+        elif isinstance(plot_type, (str, bytes)) or not isinstance(
+            plot_type, Sequence
+        ):
+            raise TypeError('plot_type must be a sequence of plot names or None.')
+        if not plot_type:
+            raise ValueError('plot_type must contain at least one plot name.')
+        if any(not isinstance(plot_name, str) for plot_name in plot_type):
+            raise TypeError('Every plot type must be a string.')
+        unknown_plot_types = set(plot_type) - set(PlotType)
+        if unknown_plot_types:
+            raise ValueError(
+                f'Unsupported plot types: {sorted(unknown_plot_types)}'
+            )
+        if plot_settings is not None and not isinstance(plot_settings, dict):
+            raise TypeError('plot_settings must be a dictionary or None.')
 
         results_df = self._results_df
         if results_df is None:
-            results_df = pd.read_csv(BiasAnalyzer.RESULTS_FILENAME)
+            if not os.path.exists(RESULTS_FILENAME):
+                raise FileNotFoundError(
+                    f'No results file exists at {RESULTS_FILENAME!r}.'
+                )
+            results_df = self._load_or_initialize_table(
+                RESULTS_FILENAME,
+                self.RESULT_COLUMNS,
+            )
+        if STUDY_FIELD_NAME not in results_df.columns:
+            raise ValueError(
+                f'Results are missing required column {STUDY_FIELD_NAME!r}.'
+            )
         
-        filtered_df = results_df[results_df[BiasAnalyzer.STUDY_FIELD_NAME].isin(view)]
+        filtered_df = results_df[results_df[STUDY_FIELD_NAME].isin(view)]
 
         if filtered_df.empty:
             raise ValueError(
                 'No results are available for the selected studies.'
             )
 
-        if 'variance_contribution' in plot_type:
+        if PlotType.VARIANCE_CONTRIBUTION in plot_type:
             plot_variance_contribution(
                 filtered_df,
                 settings=plot_settings,
             )
 
-        if 'prediction_means_by_r2_scores' in plot_type:
+        if PlotType.PREDICTION_MEANS_BY_R2_SCORES in plot_type:
             plot_prediction_means_by_r2_scores(
                 filtered_df,
                 settings=plot_settings,
             )
 
-        if 'variance_distribution' in plot_type:
+        if PlotType.VARIANCE_DISTRIBUTION in plot_type:
             plot_variance_distribution(
                 filtered_df,
                 settings=plot_settings,
             )
 
-        if 'mean_distribution' in plot_type:
+        if PlotType.MEAN_DISTRIBUTION in plot_type:
             plot_mean_distribution(
                 filtered_df,
                 settings=plot_settings,

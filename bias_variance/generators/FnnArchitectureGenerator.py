@@ -1,9 +1,10 @@
 from .Generator import Generator
+from ..models.fnn.FnnArchitecture import FnnArchitecture
 from collections.abc import Mapping
 import numpy as np
 
 
-class ArchitectureGenerator(Generator[tuple[int, ...]]):
+class FnnArchitectureGenerator(Generator[FnnArchitecture]):
     def __init__(
         self,
         settings: Mapping[str, Mapping[str, object]] | None = None,
@@ -60,22 +61,31 @@ class ArchitectureGenerator(Generator[tuple[int, ...]]):
 
     def _generate_random_sizes(
         self,
-        n_layers,
-        low_neurons,
-        high_neurons,
-        rng
-    ) -> tuple[int, ...]:
-        return tuple(rng.integers(low_neurons, high_neurons, size=n_layers))
+        n_layers: int,
+        low_neurons: int,
+        high_neurons: int,
+        rng: np.random.Generator
+    ) -> FnnArchitecture:
+        return FnnArchitecture(
+            hidden_layers=tuple(
+                int(size)
+                for size in rng.integers(
+                    low_neurons,
+                    high_neurons,
+                    size=n_layers
+                )
+            )
+        )
 
     def _generate_taper_sizes(
         self,
-        n_layers,
-        init_neurons,
-        low_size_rate,
-        high_size_rate,
-        max_neurons,
-        rng
-    ) -> tuple[int, ...]:
+        n_layers: int,
+        init_neurons: tuple[int, int],
+        low_size_rate: float,
+        high_size_rate: float,
+        max_neurons: int,
+        rng: np.random.Generator
+    ) -> FnnArchitecture:
         low_neurons, high_neurons = init_neurons
         first_layer_size = rng.integers(low_neurons, high_neurons)
         size_rate = rng.uniform(low_size_rate, high_size_rate)
@@ -83,16 +93,18 @@ class ArchitectureGenerator(Generator[tuple[int, ...]]):
         for i in np.arange(n_layers):
             size = round(first_layer_size * (size_rate ** i))
             sizes.append(min(max(size, 1), max_neurons))
-        return tuple(sizes)
+        return FnnArchitecture(
+            hidden_layers=tuple(sizes)
+        )
     
     def _generate_combined_taper_sizes(
         self,
-        n_layers,
-        init_neurons,
-        taper_rate,
-        max_neurons,
-        rng
-    ) -> tuple[int, ...]:
+        n_layers: int,
+        init_neurons: tuple[int, int],
+        taper_rate: tuple[float, float],
+        max_neurons: int,
+        rng: np.random.Generator
+    ) -> FnnArchitecture:
         low_neurons, high_neurons = init_neurons
         first_layer_size = rng.integers(low_neurons, high_neurons)
         rate = rng.uniform(*taper_rate)
@@ -105,14 +117,16 @@ class ArchitectureGenerator(Generator[tuple[int, ...]]):
                 peak = first_layer_size * ((1 + rate) ** (midpoint  - 1))
                 size = round(peak * ((1 - rate) ** (i - midpoint + 1)))
             sizes.append(min(max(size, 1), max_neurons))
-        return tuple(sizes)
+        return FnnArchitecture(
+            hidden_layers=tuple(sizes)
+        )
     
     def _generate_architecture(
         self,
         label: str,
         settings: Mapping[str, object],
         rng: np.random.Generator
-    ) -> tuple[int, ...]:
+    ) -> FnnArchitecture:
         low_layers, high_layers = settings['layers']
         n_layers = rng.integers(low_layers, high_layers, dtype=int)
 
@@ -164,13 +178,12 @@ class ArchitectureGenerator(Generator[tuple[int, ...]]):
         self,
         *,
         random_state: int | None = None,
-    ) -> dict[str, tuple[int, ...]]:
+    ) -> dict[str, FnnArchitecture]:
         rng = np.random.default_rng(random_state)
-        architectures = {}
+        architectures: dict[str, FnnArchitecture] = {}
         
         for label, settings in self.settings.items():
-            sizes = self._generate_architecture(label, settings, rng)
-            architectures[label] = tuple(int(size) for size in sizes)
+            architectures[label] = self._generate_architecture(label, settings, rng)
         
         return architectures
     
