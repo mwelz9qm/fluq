@@ -14,7 +14,7 @@ class NoiseVariation:
     random_state: int | None = None
 
 
-class NoiseGenerator(Generator[pd.DataFrame]):
+class NoiseGenerator(Generator[NoiseVariation]):
     def __init__(
         self,
         dataset: pd.DataFrame,
@@ -49,6 +49,11 @@ class NoiseGenerator(Generator[pd.DataFrame]):
         if not standard_deviations:
             raise ValueError(
                 "At least one standard deviation must be configured."
+            )
+        
+        if any(not np.isfinite(value) for value in standard_deviations):
+            raise ValueError(
+                "Standard deviations must be finite."
             )
 
         if any(value <= 0 for value in standard_deviations):
@@ -89,6 +94,7 @@ class NoiseGenerator(Generator[pd.DataFrame]):
 
             label = f"std_{standard_deviation:g}"
             generated[label] = NoiseVariation(
+                label=label,
                 dataset=noisy_dataset,
                 standard_deviation=standard_deviation,
                 random_state=random_state,
