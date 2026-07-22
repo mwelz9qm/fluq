@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 import torch
 from torch import nn, optim
+from sklearn.model_selection import train_test_split
 
 from bias_variance.BiasAnalyzer import BiasAnalyzer
 from bias_variance.generators.FnnArchitectureGenerator import (
@@ -16,6 +17,7 @@ from bias_variance.generators.SamplingGenerator import SamplingGenerator
 from bias_variance.models.TrainingConfig import TrainingConfig
 from bias_variance.models.fnn.FnnArchitecture import FnnArchitecture
 from bias_variance.models.fnn.FnnBuilder import FnnBuilder, FnnConfig
+from bias_variance.generators.NoiseGenerator import NoiseGenerator, NoiseVariation
 
 
 @pytest.fixture
@@ -308,6 +310,20 @@ def test_build_generator_returns_sampling_generator(analyzer):
     assert isinstance(generator, SamplingGenerator)
     assert set(generator.generate(random_state=42)) == {"bootstrap", "lhs"}
 
+def test_build_generator_returns_noise_generator(analyzer):
+    generator = analyzer._build_generator(
+        "data",
+        {"standard_deviations": [0.1, 0.2]},
+    )
+
+    assert isinstance(generator, NoiseGenerator)
+
+    generated = generator.generate(random_state=42)
+    assert set(generated) == {"std_0.1", "std_0.2"}
+    assert all(
+        isinstance(variation, NoiseVariation)
+        for variation in generated.values()
+    )
 
 def test_build_generator_rejects_invalid_study_and_strategies(analyzer):
     with pytest.raises(ValueError, match="Unsupported study"):
@@ -369,6 +385,131 @@ def test_get_results_injects_seeds_and_records_architecture(
         "[6, 4, 2]",
     ]
 
+def test_get_results_uses_noise_generator_without_training(
+    analyzer,
+    regression_data,
+    monkeypatch,
+):
+    inputs, outputs = regression_data
+    combined_dataset = pd.concat([inputs, outputs], axis=1)
+
+    generator = NoiseGenerator(
+        combined_dataset,
+        standard_deviations=[0.1],
+    )
+
+    analyzer._run_id = "run_test"
+    calls = []
+
+    def fake_train(
+        *,
+        split,
+        architecture,
+        random_state,
+        test_size,
+    ):
+        calls.append(
+            {
+                "split": split,
+                "architecture": architecture,
+                "random_state": random_state,
+                "test_size": test_size,
+            }
+        )
+
+        actuals = split[3]
+        predictions = np.zeros(
+            actuals.shape,
+            dtype=np.float32,
+        )
+
+        return {"loss": 1.0}, predictions, actuals
+
+    monkeypatch.setattr(
+        analyzer,
+        "_get_test_result_and_data",
+        fake_train,
+    )
+
+    results = analyzer._get_results(
+        n_iter=1,
+        generator=generator,
+        study="data",
+        random_state=42,
+        test_size=0.2,
+        save_predictions=False,
+    )
+
+    assert len(calls) == 1
+
+    call = calls[0]
+
+    # Data studies should use the baseline architecture.
+    assert call["architecture"] is None
+
+    # Verify seed and test-size propagation.
+    assert call["random_state"] == 42
+    assert call["test_size"] == 0.2
+
+    # Verify the resulting metadata row.
+    assert len(results) == 1
+    assert results.iloc[0]["run_id"] == "run_test"
+    assert results.iloc[0]["study"] == "data"
+    assert results.iloc[0]["variable"] == "std_0.1"
+    assert results.iloc[0]["model_seed"] == 42
+    assert results.iloc[0]["loss"] == pytest.approx(1.0)
+    assert results.iloc[0]["architecture"] == "[6, 4]"
+
+    expected_variation = generator.generate(
+        random_state=42
+    )["std_0.1"]
+
+    expected_dataset = expected_variation.dataset
+
+    expected_split = train_test_split(
+        expected_dataset[inputs.columns],
+        expected_dataset[outputs.columns],
+        test_size=0.2,
+        random_state=42,
+    )
+
+    actual_split = call["split"]
+
+    assert len(actual_split) == 4
+
+    for actual_frame, expected_frame in zip(
+        actual_split,
+        expected_split,
+    ):
+        pd.testing.assert_frame_equal(
+            actual_frame,
+            expected_frame,
+        )
+
+def test_get_results_rejects_non_noise_data_variation(analyzer):
+    analyzer._run_id = "run_test"
+
+    generator = RecordingGenerator(
+        {
+            "std_0.1": pd.concat(
+                [analyzer.inputs_df, analyzer.outputs_df],
+                axis=1,
+            )
+        }
+    )
+
+    with pytest.raises(
+        TypeError,
+        match="Data studies must generate NoiseVariation",
+    ):
+        analyzer._get_results(
+            n_iter=1,
+            generator=generator,
+            study="data",
+            random_state=42,
+            test_size=0.2,
+            save_predictions=False,
+        )
 
 def test_get_results_requires_run_id(analyzer):
     with pytest.raises(ValueError, match="_run_id is None"):
