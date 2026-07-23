@@ -1,7 +1,9 @@
 import pytest
 
-from bias_variance.generators.ArchitectureGenerator import ArchitectureGenerator
-
+from bias_variance.generators.FnnArchitectureGenerator import (
+    FnnArchitectureGenerator,
+)
+from bias_variance.models.fnn.FnnArchitecture import FnnArchitecture
 
 ARCHITECTURE_NAMES = {
     "wide",
@@ -13,19 +15,25 @@ ARCHITECTURE_NAMES = {
 
 
 def test_default_generator_returns_every_supported_architecture():
-    architectures = ArchitectureGenerator().generate(random_state=42)
+    architectures = FnnArchitectureGenerator().generate(random_state=42)
 
     assert set(architectures) == ARCHITECTURE_NAMES
-    assert all(isinstance(sizes, tuple) for sizes in architectures.values())
+    assert all(
+        isinstance(architecture, FnnArchitecture)
+        for architecture in architectures.values()
+    )
+    assert all(
+        isinstance(architecture.hidden_layers, tuple)
+        for architecture in architectures.values()
+    )
     assert all(
         isinstance(size, int)
-        for sizes in architectures.values()
-        for size in sizes
+        for architecture in architectures.values()
+        for size in architecture.hidden_layers
     )
 
-
 def test_generation_is_reproducible_for_same_seed():
-    generator = ArchitectureGenerator()
+    generator = FnnArchitectureGenerator()
 
     assert generator.generate(random_state=42) == generator.generate(
         random_state=42
@@ -67,21 +75,22 @@ def test_generation_is_reproducible_for_same_seed():
     ],
 )
 def test_custom_architecture_respects_layer_and_neuron_bounds(label, settings):
-    architecture = ArchitectureGenerator({label: settings}).generate(
+    architecture = FnnArchitectureGenerator({label: settings}).generate(
         random_state=42
     )[label]
+    hidden_layers = architecture.hidden_layers
     max_allowed = (
         settings["max_neurons"]
         if "max_neurons" in settings
         else settings["neurons"][1] - 1
     )
 
-    assert settings["layers"][0] <= len(architecture) < settings["layers"][1]
-    assert all(1 <= size <= max_allowed for size in architecture)
+    assert settings["layers"][0] <= len(hidden_layers) < settings["layers"][1]
+    assert all(1 <= size <= max_allowed for size in hidden_layers)
 
 
 def test_taper_is_non_decreasing():
-    architecture = ArchitectureGenerator(
+    architecture = FnnArchitectureGenerator(
         {
             "taper": {
                 "layers": (8, 9),
@@ -91,12 +100,16 @@ def test_taper_is_non_decreasing():
             }
         }
     ).generate(random_state=42)["taper"]
+    hidden_layers = architecture.hidden_layers
 
-    assert all(left <= right for left, right in zip(architecture, architecture[1:]))
+    assert all(
+        left <= right
+        for left, right in zip(hidden_layers, hidden_layers[1:])
+    )
 
 
 def test_reverse_taper_is_non_increasing_and_never_zero():
-    architecture = ArchitectureGenerator(
+    architecture = FnnArchitectureGenerator(
         {
             "reverse_taper": {
                 "layers": (20, 21),
@@ -106,15 +119,19 @@ def test_reverse_taper_is_non_increasing_and_never_zero():
             }
         }
     ).generate(random_state=42)["reverse_taper"]
+    hidden_layers = architecture.hidden_layers
 
-    assert all(left >= right for left, right in zip(architecture, architecture[1:]))
-    assert min(architecture) == 1
+    assert all(
+        left >= right
+        for left, right in zip(hidden_layers, hidden_layers[1:])
+    )
+    assert min(hidden_layers) == 1
 
 
 def test_empty_settings_generate_no_architectures():
-    assert ArchitectureGenerator({}).generate(random_state=42) == {}
+    assert FnnArchitectureGenerator({}).generate(random_state=42) == {}
 
 
 def test_unsupported_architecture_is_rejected():
     with pytest.raises(ValueError, match="Unsupported architecture"):
-        ArchitectureGenerator({"unknown": {}})
+        FnnArchitectureGenerator({"unknown": {}})

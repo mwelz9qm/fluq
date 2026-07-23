@@ -63,6 +63,10 @@ from bias_variance.generators.SamplingGenerator import (
     SamplingGenerator,
     SamplingStrategy
 )
+from bias_variance.generators.NoiseGenerator import (
+    NoiseGenerator,
+    NoiseVariation,
+)
 from bias_variance._plotting import (
     plot_mean_distribution,
     plot_prediction_means_by_r2_scores,
@@ -910,7 +914,7 @@ class BiasAnalyzer:
     def _get_results(
         self,
         n_iter: int,
-        generator: Generator[FnnArchitecture] | Generator[pd.DataFrame],
+        generator: Generator[FnnArchitecture] | Generator[pd.DataFrame] | Generator[NoiseVariation],
         study: str,
         *,
         random_state: int | None,
@@ -924,11 +928,11 @@ class BiasAnalyzer:
         ----------
         n_iter : int
             Number of times to invoke the generator.
-        generator : Generator[tuple[int, ...]] | Generator[pandas.DataFrame]
-            Architecture or sampled-dataset generator used by the study.
+        generator : Generator[tuple[int, ...]] | Generator[pandas.DataFrame] | Generator[NoiseVariation]
+            Architecture, sampled-dataset, or noise generator used by the study.
         study : str
             Study type that determines how generated variations are prepared.
-            Currently supports ``'model'`` and ``'sampling'``.
+            Currently supports ``'model'``, ``'sampling'``, and ``'data'``.
         save_predictions : bool, default=True
             Whether to persist predictions and actual values for each variation.
 
@@ -946,7 +950,7 @@ class BiasAnalyzer:
             normalized_study = StudyName(study)
         except (TypeError, ValueError):
             raise ValueError(f'Unsupported study: {study!r}') from None
-        if normalized_study not in {StudyName.MODEL, StudyName.SAMPLING}:
+        if normalized_study not in {StudyName.MODEL, StudyName.SAMPLING, StudyName.DATA}:
             raise ValueError(f'Unsupported study: {study!r}')
         if not isinstance(save_predictions, bool):
             raise TypeError('save_predictions must be a boolean.')
@@ -996,8 +1000,7 @@ class BiasAnalyzer:
                     if not isinstance(variation, FnnArchitecture):
                         raise TypeError(
                             'Model studies must generate FnnArchitecture values.'
-                    )
-                    
+                        )
                     architecture = variation
                     split = model_study_split
                 
@@ -1026,6 +1029,39 @@ class BiasAnalyzer:
                         sampled_outputs_df,
                         test_size=test_size,
                         random_state=iteration_random_state
+                    )
+                elif study == StudyName.DATA:
+                    if not isinstance(variation, NoiseVariation):
+                        raise TypeError(
+                            "Data studies must generate NoiseVariation values."
+                        )
+
+                    noisy_dataset = variation.dataset
+
+                    self._validate_dataframe(
+                        noisy_dataset,
+                        name=f"data variation {label!r}",
+                    )
+
+                    required_columns = set(self.inputs_df.columns) | set(
+                        self.outputs_df.columns
+                    )
+                    missing_columns = required_columns - set(noisy_dataset.columns)
+
+                    if missing_columns:
+                        raise ValueError(
+                            f"Data variation {label!r} is missing columns: "
+                            f"{sorted(missing_columns)}."
+                        )
+
+                    noisy_inputs_df = noisy_dataset[self.inputs_df.columns]
+                    noisy_outputs_df = noisy_dataset[self.outputs_df.columns]
+
+                    split = train_test_split(
+                        noisy_inputs_df,
+                        noisy_outputs_df,
+                        test_size=test_size,
+                        random_state=iteration_random_state,
                     )
                 
                 result, predictions, actuals = self._get_test_result_and_data(
@@ -1067,21 +1103,21 @@ class BiasAnalyzer:
         self,
         study: str,
         settings: dict[str, object],
-    ) -> FnnArchitectureGenerator | SamplingGenerator:
+    ) -> FnnArchitectureGenerator | SamplingGenerator | NoiseGenerator:
         '''
         Construct the concrete generator configured for a study.
 
         Parameters
         ----------
         study : str
-            Study type. Supported values are ``'model'`` and ``'sampling'``.
+            Study type. Supported values are ``'model'``, ``'sampling'``, and ``'data'``.
         settings : dict[str, object]
             Generator settings for the selected study. Model settings describe
             architecture families; sampling settings contain strategy names.
 
         Returns
         -------
-        ArchitectureGenerator | SamplingGenerator
+        ArchitectureGenerator | SamplingGenerator | NoiseGenerator
             Generator initialized with the study settings and, for sampling,
             the analyzer's combined input and output dataset.
 
@@ -1102,23 +1138,27 @@ class BiasAnalyzer:
         if study == StudyName.SAMPLING:
             sampling_strategies = []
             strategies = settings.get('strategies', [])
+
             if isinstance(strategies, (str, bytes)) or not isinstance(
-                strategies, Sequence
+                strategies,
+                Sequence,
             ):
-                raise TypeError('sampling strategies must be a sequence.')
+                raise TypeError("sampling strategies must be a sequence.")
+
             if any(not isinstance(strategy, str) for strategy in strategies):
-                raise TypeError('Every sampling strategy must be a string.')
-            if not strategies:
-                raise ValueError(
-                    'At least one sampling strategy must be configured.'
-                )
-            if len(set(strategies)) != len(strategies):
-                raise ValueError('sampling strategies must not contain duplicates.')
-            unknown_strategies = set(strategies) - set(SamplingStrategyName)
+                raise TypeError("Every sampling strategy must be a string.")
+
+            supported_strategies = set(SamplingStrategyName)
+            unknown_strategies = set(strategies) - supported_strategies
+
             if unknown_strategies:
                 raise ValueError(
-                    'Unsupported sampling strategies: '
-                    f'{sorted(unknown_strategies)}'
+                    f"Unsupported sampling strategies: {sorted(unknown_strategies)}"
+                )
+
+            if len(strategies) != len(set(strategies)):
+                raise ValueError(
+                    "sampling strategies must not contain duplicates."
                 )
 
             if SamplingStrategyName.BOOTSTRAP in strategies:
@@ -1132,7 +1172,7 @@ class BiasAnalyzer:
                         }
                     )
                 )
-                
+
             if SamplingStrategyName.STRATIFIED in strategies:
                 sampling_strategies.append(
                     SamplingStrategy(
@@ -1156,10 +1196,25 @@ class BiasAnalyzer:
                         }
                     )
                 )
-            
+
             dataset = pd.concat([self.inputs_df, self.outputs_df], axis=1)
             return SamplingGenerator(dataset=dataset, strategies=sampling_strategies)
-        
+
+        if study == StudyName.DATA:
+            standard_deviations = settings.get(
+                "standard_deviations",
+                (0.1, 0.2, 0.3, 0.4, 0.5),
+            )
+
+            dataset = pd.concat(
+                [self.inputs_df, self.outputs_df],
+                axis=1,
+            )
+
+            return NoiseGenerator(
+                dataset=dataset,
+                standard_deviations=standard_deviations,
+            )
         raise ValueError(f'Unsupported study: {study!r}')
     
     def run_bias_studies(
@@ -1290,8 +1345,8 @@ class BiasAnalyzer:
         if not studies:
             raise ValueError('At least one study must be configured')
         
-        supported_studies = {StudyName.MODEL, StudyName.SAMPLING}
-        unknown_studies = set(studies) - supported_studies
+        supported_studies = {'model', 'sampling', 'data'}
+        unknown_studies = set(settings['studies']) - supported_studies
         if unknown_studies:
             raise ValueError(
                 f'Unsupported studies: {sorted(unknown_studies)}'
