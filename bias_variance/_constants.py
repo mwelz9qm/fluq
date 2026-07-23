@@ -38,6 +38,9 @@ class PlotType(StrEnum):
 
 
 RESULTS_FILENAME = "bias_variance_results.csv"
+VARIATIONS_FILENAME = "bias_variance_variations.csv"
+EVALUATIONS_FILENAME = "bias_variance_evaluations.csv"
+
 FIT_ITERATIONS_DIR_NAME = "iterations"
 
 RUN_ID_FIELD_NAME = "run_id"
@@ -51,12 +54,38 @@ CONF_INTERVAL_LOWER_FIELD_NAME = "conf_interval_lower"
 CONF_INTERVAL_UPPER_FIELD_NAME = "conf_interval_upper"
 TIMESTAMP_FIELD_NAME = "timestamp"
 
+RUN_TYPE_FIELD_NAME = "run_type"
+LOSS_FUNC_FIELD_NAME = "loss_func"
+
+POINTWISE_MEAN_FIELD_NAME = "pointwise_mean"
+POINTWISE_VARIANCE_FIELD_NAME = "pointwise_variance"
+AVERAGING_MEAN_FIELD_NAME = "averaging_mean"
+AVERAGING_VARIANCE_FIELD_NAME = "averaging_variance"
+
+VARIATION_ID_FIELD_NAME = "variation_id"
+VARIATION_RANDOM_STATE_FIELD_NAME = "variation_random_state"
+VARIATION_LABEL_FIELD_NAME = "variation_label"
+STUDY_LABEL_FIELD_NAME = "study_label"
+
+PREDICTION_CI_FIELD_NAME = "prediction_ci"
+PREDICTION_CI_INTERVAL_LOWER_FIELD_NAME = "prediction_ci_interval_lower"
+PREDICTION_CI_INTERVAL_UPPER_FIELD_NAME = "prediction_ci_interval_upper"
+PREDICTION_MEAN_FIELD_NAME = "prediction_mean"
+PREDICTION_VARIANCE_FIELD_NAME = "prediction_variance"
+
+EVALUATION_ID_FIELD_NAME = "evaluation_id"
+EVALUATION_RANDOM_STATE_FIELD_NAME = "evaluation_random_state"
+PREDICTION_FIELD_NAME = "prediction"
+Y_TEST_POINT_FIELD_NAME = "y_test_point"
+X_TEST_POINT_FIELD_NAME = "x_test_point"
+
 PREDICTIONS_DATASET_NAME = "predictions"
 ACTUALS_DATASET_NAME = "actuals"
 PREDICTIONS_LAYER_NAME = "predictions"
 MODEL_NAME = "functional_model"
 
-RUN_METADATA_FILENAME = "bias_variance_runs.csv"
+RUNS_FILENAME = "bias_variance_runs.csv"
+RUN_METADATA_FILENAME = RUNS_FILENAME
 
 CREATED_AT_FIELD_NAME = "created_at"
 RANDOM_STATE_FIELD_NAME = "random_state"
