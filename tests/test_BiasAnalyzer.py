@@ -54,6 +54,21 @@ def analyzer(regression_data) -> BiasAnalyzer:
         ),
     )
 
+@pytest.fixture
+def base_training_dataset(
+    analyzer,
+) -> pd.DataFrame:
+    X_train, _, y_train, _ = train_test_split(
+        analyzer.inputs_df,
+        analyzer.outputs_df,
+        test_size=0.2,
+        random_state=42,
+    )
+
+    return pd.concat(
+        [X_train, y_train],
+        axis=1,
+    )
 
 class RecordingGenerator(Generator[object]):
     def __init__(self, variations: dict[str, object]) -> None:
@@ -293,7 +308,7 @@ def test_build_generator_returns_fnn_architecture_generator(analyzer):
         }
     }
 
-    generator = analyzer._build_generator("model", settings)
+    generator = analyzer._build_generator("model", settings, training_dataset=analyzer.inputs_df)
     generated = generator.generate(random_state=42)
 
     assert isinstance(generator, FnnArchitectureGenerator)
@@ -301,19 +316,27 @@ def test_build_generator_returns_fnn_architecture_generator(analyzer):
     assert isinstance(generated["wide"], FnnArchitecture)
 
 
-def test_build_generator_returns_sampling_generator(analyzer):
+def test_build_generator_returns_sampling_generator(
+    analyzer,
+    base_training_dataset,
+):
     generator = analyzer._build_generator(
         "sampling",
         {"strategies": ["bootstrap", "lhs"]},
+        training_dataset=base_training_dataset,
     )
 
     assert isinstance(generator, SamplingGenerator)
     assert set(generator.generate(random_state=42)) == {"bootstrap", "lhs"}
 
-def test_build_generator_returns_noise_generator(analyzer):
+def test_build_generator_returns_noise_generator(
+    analyzer,
+    base_training_dataset,
+):
     generator = analyzer._build_generator(
         "data",
         {"standard_deviations": [0.1, 0.2]},
+        training_dataset=base_training_dataset,
     )
 
     assert isinstance(generator, NoiseGenerator)
@@ -325,7 +348,10 @@ def test_build_generator_returns_noise_generator(analyzer):
         for variation in generated.values()
     )
 
-def test_build_generator_rejects_invalid_study_and_strategies(analyzer):
+def test_build_generator_rejects_invalid_study_and_strategies(
+    analyzer,
+    base_training_dataset,
+):
     with pytest.raises(ValueError, match="Unsupported study"):
         analyzer._build_generator("unknown", {})
 
@@ -362,10 +388,18 @@ def test_get_results_injects_seeds_and_records_architecture(
 
     monkeypatch.setattr(analyzer, "_get_test_result_and_data", fake_train)
 
-    results = analyzer._get_results(
+    base_split = train_test_split(
+        analyzer.inputs_df,
+        analyzer.outputs_df,
+        test_size=0.25,
+        random_state=40,
+    )
+
+    results, prediction_groups = analyzer._get_results(
         2,
         generator,
         "model",
+        base_split=base_split,
         random_state=40,
         test_size=0.25,
         save_predictions=False,
@@ -374,6 +408,7 @@ def test_get_results_injects_seeds_and_records_architecture(
     assert generator.random_states == [40, 41]
     assert [call[2] for call in calls] == [40, 41, 41, 42]
     assert all(call[3] == 0.25 for call in calls)
+    assert all(call[0] is base_split for call in calls)
     assert calls[0][0] is calls[1][0]
     assert calls[2][0] is calls[3][0]
     assert results["run_id"].tolist() == ["run_test"] * 4
@@ -384,6 +419,12 @@ def test_get_results_injects_seeds_and_records_architecture(
         "[16, 12]",
         "[6, 4, 2]",
     ]
+    assert set(prediction_groups) == {
+        "wide",
+        "narrow",
+    }
+    assert len(prediction_groups["wide"]) == 2
+    assert len(prediction_groups["narrow"]) == 2
 
 def test_get_results_uses_noise_generator_without_training(
     analyzer,
@@ -391,10 +432,24 @@ def test_get_results_uses_noise_generator_without_training(
     monkeypatch,
 ):
     inputs, outputs = regression_data
-    combined_dataset = pd.concat([inputs, outputs], axis=1)
+    base_split = train_test_split(
+        inputs,
+        outputs,
+        test_size=0.2,
+        random_state=42,
+    )
+
+    X_train_base, X_test_fixed, y_train_base, y_test_fixed = (
+        analyzer._validate_split(base_split)
+    )
+
+    base_training_dataset = pd.concat(
+        [X_train_base, y_train_base],
+        axis=1,
+    )
 
     generator = NoiseGenerator(
-        combined_dataset,
+        base_training_dataset,
         standard_deviations=[0.1],
     )
 
@@ -431,10 +486,11 @@ def test_get_results_uses_noise_generator_without_training(
         fake_train,
     )
 
-    results = analyzer._get_results(
+    results, prediction_groups = analyzer._get_results(
         n_iter=1,
         generator=generator,
         study="data",
+        base_split=base_split,
         random_state=42,
         test_size=0.2,
         save_predictions=False,
@@ -464,13 +520,13 @@ def test_get_results_uses_noise_generator_without_training(
         random_state=42
     )["std_0.1"]
 
-    expected_dataset = expected_variation.dataset
+    expected_data_train = expected_variation.dataset
 
-    expected_split = train_test_split(
-        expected_dataset[inputs.columns],
-        expected_dataset[outputs.columns],
-        test_size=0.2,
-        random_state=42,
+    expected_split = (
+        expected_data_train[inputs.columns],
+        X_test_fixed,
+        expected_data_train[outputs.columns],
+        y_test_fixed,
     )
 
     actual_split = call["split"]
@@ -486,6 +542,9 @@ def test_get_results_uses_noise_generator_without_training(
             expected_frame,
         )
 
+    assert set(prediction_groups) == {"std_0.1"}
+    assert len(prediction_groups["std_0.1"]) == 1
+
 def test_get_results_rejects_non_noise_data_variation(analyzer):
     analyzer._run_id = "run_test"
 
@@ -498,25 +557,41 @@ def test_get_results_rejects_non_noise_data_variation(analyzer):
         }
     )
 
+    base_split = train_test_split(
+        analyzer.inputs_df,
+        analyzer.outputs_df,
+        test_size=0.2,
+        random_state=42,
+    )
+
     with pytest.raises(
         TypeError,
-        match="Data studies must generate NoiseVariation",
+        match='Data studies must generate NoiseVariation values.',
     ):
         analyzer._get_results(
             n_iter=1,
             generator=generator,
-            study="data",
+            study='data',
+            base_split=base_split,
             random_state=42,
             test_size=0.2,
             save_predictions=False,
         )
 
 def test_get_results_requires_run_id(analyzer):
+    base_split = train_test_split(
+        analyzer.inputs_df,
+        analyzer.outputs_df,
+        test_size=0.2,
+        random_state=1,
+    )
+
     with pytest.raises(ValueError, match="_run_id is None"):
         analyzer._get_results(
             1,
             RecordingGenerator({"wide": FnnArchitecture((4,))}),
             "model",
+            base_split=base_split,
             random_state=1,
             test_size=0.2,
             save_predictions=False,
@@ -676,6 +751,13 @@ def test_run_bias_studies_records_one_metadata_row_and_persists_tables(
         save_results=True,
         save_predictions=False,
     )
+    run_evaluations = analyzer._evaluations[analyzer._run_id]
+    assert set(run_evaluations) == {"model"}
+    assert set(run_evaluations["model"]) == {"wide"}
+    assert set(run_evaluations["model"]["wide"]) == {
+        "averaging",
+        "pointwise",
+    }
 
     assert len(analyzer._results_df) == 1
     assert len(analyzer._runs_metadata_df) == 1
@@ -706,6 +788,13 @@ def test_run_bias_studies_save_false_keeps_data_in_memory(analyzer, tmp_path, mo
         save_results=False,
         save_predictions=False,
     )
+    run_evaluations = analyzer._evaluations[analyzer._run_id]
+    assert set(run_evaluations) == {"model"}
+    assert set(run_evaluations["model"]) == {"wide"}
+    assert set(run_evaluations["model"]["wide"]) == {
+        "averaging",
+        "pointwise",
+    }
 
     assert len(analyzer._results_df) == 1
     assert len(analyzer._runs_metadata_df) == 1

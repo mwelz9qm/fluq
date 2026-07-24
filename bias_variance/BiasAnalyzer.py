@@ -41,6 +41,7 @@ from bias_variance._constants import (
     SamplingStrategyName,
     STUDY_FIELD_NAME,
     StudyName,
+    EvaluationMethod,
     TIMESTAMP_FIELD_NAME,
     VARIABLE_FIELD_NAME,
     VARIANCE_FIELD_NAME,
@@ -82,6 +83,11 @@ from bias_variance.models.TrainingConfig import TrainingConfig
 from bias_variance.models.fnn.FnnArchitecture import FnnArchitecture
 from bias_variance.models.fnn.FnnBuilder import FnnBuilder
 
+type EvaluationMetrics = dict[str, object]
+type MethodEvaluations = dict[str, EvaluationMetrics]
+type VariationEvaluations = dict[str, MethodEvaluations]
+type StudyEvaluations = dict[str, VariationEvaluations]
+type EvaluationStore = dict[str, StudyEvaluations]
 
 class BiasAnalyzer:
     '''
@@ -216,6 +222,47 @@ class BiasAnalyzer:
             if not np.isfinite(values).all():
                 raise ValueError(f'{name} must contain only finite values.')
 
+    @staticmethod
+    def _validate_evaluation_methods(
+        methods: Sequence[str],
+    ) -> tuple[EvaluationMethod, ...]:
+        if isinstance(methods, (str, bytes)) or not isinstance(
+            methods,
+            Sequence,
+        ):
+            raise TypeError(
+                "evaluation_methods must be a sequence of method names."
+            )
+
+        if not methods:
+            raise ValueError(
+                "At least one evaluation method must be configured."
+            )
+
+        normalized: list[EvaluationMethod] = []
+
+        for method in methods:
+            if not isinstance(method, str):
+                raise TypeError(
+                    "Every evaluation method must be a string."
+                )
+
+            try:
+                normalized_method = EvaluationMethod(method)
+            except ValueError:
+                raise ValueError(
+                    f"Unsupported evaluation method: {method!r}."
+                ) from None
+
+            if normalized_method in normalized:
+                raise ValueError(
+                    "evaluation_methods must not contain duplicates."
+                )
+
+            normalized.append(normalized_method)
+
+        return tuple(normalized)
+
     @classmethod
     def _validate_split(
         cls,
@@ -258,6 +305,7 @@ class BiasAnalyzer:
     ) -> None:
         self._validate_dataframe(inputs_df, name='inputs_df')
         self._validate_dataframe(outputs_df, name='outputs_df')
+        self._evaluations: dict = {}
         if len(inputs_df) != len(outputs_df):
             raise ValueError(
                 'inputs_df and outputs_df must have the same number of rows.'
@@ -326,12 +374,11 @@ class BiasAnalyzer:
             not isinstance(_run_id, str) or not _run_id.strip()
         ):
             raise TypeError('_run_id must be a non-empty string or None.')
-        
         if fnn_builder.config.input_size != inputs_df.shape[1]:
             raise ValueError(
                 'FnnBuilder input_size must match the number of input columns.'
             )
-        
+
         if fnn_builder.config.output_size != outputs_df.shape[1]:
             raise ValueError(
                 'FnnBuilder output_size must match the number of output columns.'
@@ -345,6 +392,7 @@ class BiasAnalyzer:
         self._results_df = _results_df
         self._runs_metadata_df = _runs_metadata_df
         self._run_id = _run_id
+        self._evaluations: EvaluationStore = {}
 
     def _build_model(
         self,
@@ -788,6 +836,96 @@ class BiasAnalyzer:
             if metric in self.training_config.metrics
         }
 
+    def _evaluate_methods(
+        self,
+        predictions: np.ndarray,
+        *,
+        pointwise_actuals: np.ndarray,
+        averaging_actuals: np.ndarray,
+        methods: Sequence[EvaluationMethod],
+    ) -> dict[str, dict[str, object]]:
+        evaluations: dict[str, dict[str, object]] = {}
+
+        for method in methods:
+            if method == EvaluationMethod.AVERAGING:
+                evaluations[str(method)] = self._evaluate_averaging(
+                    predictions,
+                    averaging_actuals,
+                )
+            elif method == EvaluationMethod.POINTWISE:
+                evaluations[str(method)] = self._evaluate_pointwise(
+                    predictions,
+                    pointwise_actuals,
+                )
+            else:
+                # Defensive check in case this method is called internally
+                # without prior validation.
+                raise ValueError(
+                    f"Unsupported evaluation method: {method!r}."
+                )
+
+        return evaluations
+
+    def _evaluate_pointwise(
+        self,
+        predictions: np.ndarray,
+        actuals: np.ndarray,
+    ) -> dict[str, np.ndarray]:
+        if predictions.ndim != 3:
+            raise ValueError(
+                "predictions must have shape "
+                "(models, test_points, outputs)."
+            )
+
+        if predictions.shape[1:] != actuals.shape:
+            raise ValueError(
+                "Pointwise predictions and actual test values do not align."
+            )
+
+        prediction_mean = predictions.mean(axis=0)
+        prediction_variance = predictions.var(axis=0)
+        bias = prediction_mean - actuals
+
+        return {
+            "pointwise_mean": prediction_mean,
+            "pointwise_variance": prediction_variance,
+            "pointwise_bias": bias,
+            "pointwise_squared_bias": bias**2,
+        }
+
+    def _evaluate_averaging(
+        self,
+        predictions: np.ndarray,
+        actuals: np.ndarray,
+    ) -> dict[str, np.ndarray]:
+        if predictions.ndim != 3:
+            raise ValueError(
+                "predictions must have shape "
+                "(models, test_points, outputs)."
+            )
+
+        if predictions.shape[2] != actuals.shape[1]:
+            raise ValueError(
+                "Predictions and averaging test values have different output dimensions."
+            )
+
+        # Shape: (models, outputs)
+        model_means = predictions.mean(axis=1)
+
+        # Shape: (outputs,)
+        prediction_mean = model_means.mean(axis=0)
+        prediction_variance = model_means.var(axis=0)
+        actual_mean = actuals.mean(axis=0)
+        bias = prediction_mean - actual_mean
+
+        return {
+            "averaging_mean": prediction_mean,
+            "averaging_variance": prediction_variance,
+            "averaging_actual_mean": actual_mean,
+            "averaging_bias": bias,
+            "averaging_squared_bias": bias**2,
+        }
+
     def _get_test_result_and_data(
         self,
         split: tuple[
@@ -883,23 +1021,23 @@ class BiasAnalyzer:
         }
 
         predictions_values = predictions.reshape(-1)
-        variance = float(np.var(predictions_values))
-        mean = float(np.mean(predictions_values))
+        within_model_variance = float(np.var(predictions_values))
+        within_model_mean = float(np.mean(predictions_values))
         standard_error = float(stats.sem(predictions_values))
         conf_interval = (
-            (mean, mean)
+            (within_model_mean, within_model_mean)
             if standard_error == 0.0
             else stats.norm.interval(
                 0.95,
-                loc=mean,
+                loc=within_model_mean,
                 scale=standard_error,
             )
         )
 
         scores.update(
             {
-                VARIANCE_FIELD_NAME: variance,
-                MEAN_FIELD_NAME: mean,
+                VARIANCE_FIELD_NAME: within_model_variance,
+                MEAN_FIELD_NAME: within_model_mean,
                 CONF_INTERVAL_LOWER_FIELD_NAME: float(
                     conf_interval[0]
                 ),
@@ -917,10 +1055,19 @@ class BiasAnalyzer:
         generator: Generator[FnnArchitecture] | Generator[pd.DataFrame] | Generator[NoiseVariation],
         study: str,
         *,
+        base_split: tuple[
+            pd.DataFrame,
+            pd.DataFrame,
+            pd.DataFrame,
+            pd.DataFrame,
+        ],
         random_state: int | None,
         test_size: float,
         save_predictions: bool = True,
-    ) -> pd.DataFrame:
+    ) -> tuple[
+        pd.DataFrame,
+        dict[str, list[np.ndarray]],
+        ]:
         '''
         Generate, train, and evaluate all variations for a configured study.
 
@@ -957,8 +1104,13 @@ class BiasAnalyzer:
         if self._run_id is None:
             raise ValueError('_run_id is None.')
 
+        X_train_base, X_test_fixed, y_train_base, y_test_fixed = (
+            self._validate_split(base_split)
+        )
+
         study = normalized_study
         results = pd.DataFrame(columns=self.RESULT_COLUMNS)
+        prediction_groups: dict[str, list[np.ndarray]] = {}
 
         for i in np.arange(n_iter):
             iteration_random_state = (
@@ -973,14 +1125,6 @@ class BiasAnalyzer:
             if not variations:
                 raise ValueError(
                     f'Generator produced no variations for study {study!r}.'
-                )
-            model_study_split = None
-            if study == StudyName.MODEL:
-                model_study_split = train_test_split(
-                    self.inputs_df,
-                    self.outputs_df,
-                    test_size=test_size,
-                    random_state=iteration_random_state,
                 )
 
             for j, (label, variation) in enumerate(variations.items()):
@@ -1001,9 +1145,9 @@ class BiasAnalyzer:
                         raise TypeError(
                             'Model studies must generate FnnArchitecture values.'
                         )
+                    split = base_split
                     architecture = variation
-                    split = model_study_split
-                
+
                 elif study == StudyName.SAMPLING:
                     if not isinstance(variation, pd.DataFrame):
                         raise TypeError(
@@ -1022,13 +1166,15 @@ class BiasAnalyzer:
                             f'Sampling variation {label!r} is missing columns: '
                             f'{sorted(missing_columns)}.'
                         )
-                    sampled_inputs_df = variation[self.inputs_df.columns]
-                    sampled_outputs_df = variation[self.outputs_df.columns]
-                    split = train_test_split(
-                        sampled_inputs_df,
-                        sampled_outputs_df,
-                        test_size=test_size,
-                        random_state=iteration_random_state
+
+                    sampled_train = variation
+                    sampling_X_train = sampled_train[self.inputs_df.columns]
+                    sampling_y_train = sampled_train[self.outputs_df.columns]
+                    split = (
+                        sampling_X_train,
+                        X_test_fixed,
+                        sampling_y_train,
+                        y_test_fixed,
                     )
                 elif study == StudyName.DATA:
                     if not isinstance(variation, NoiseVariation):
@@ -1036,17 +1182,17 @@ class BiasAnalyzer:
                             "Data studies must generate NoiseVariation values."
                         )
 
-                    noisy_dataset = variation.dataset
+                    noisy_train = variation.dataset
 
                     self._validate_dataframe(
-                        noisy_dataset,
+                        noisy_train,
                         name=f"data variation {label!r}",
                     )
 
                     required_columns = set(self.inputs_df.columns) | set(
                         self.outputs_df.columns
                     )
-                    missing_columns = required_columns - set(noisy_dataset.columns)
+                    missing_columns = required_columns - set(noisy_train.columns)
 
                     if missing_columns:
                         raise ValueError(
@@ -1054,22 +1200,23 @@ class BiasAnalyzer:
                             f"{sorted(missing_columns)}."
                         )
 
-                    noisy_inputs_df = noisy_dataset[self.inputs_df.columns]
-                    noisy_outputs_df = noisy_dataset[self.outputs_df.columns]
+                    data_X_train = noisy_train[self.inputs_df.columns]
+                    data_y_train = noisy_train[self.outputs_df.columns]
 
-                    split = train_test_split(
-                        noisy_inputs_df,
-                        noisy_outputs_df,
-                        test_size=test_size,
-                        random_state=iteration_random_state,
+                    split = (
+                        data_X_train,
+                        X_test_fixed,
+                        data_y_train,
+                        y_test_fixed,
                     )
-                
+
                 result, predictions, actuals = self._get_test_result_and_data(
                     architecture=architecture,
                     split=split,
                     random_state=model_random_state,
                     test_size=test_size,
                 )
+                prediction_groups.setdefault(label, []).append(predictions)
 
                 if save_predictions:
                     self._save_predictions_and_actuals(
@@ -1096,13 +1243,15 @@ class BiasAnalyzer:
                 } | result
 
                 results = pd.concat([results, pd.DataFrame([df_row])], ignore_index=True)
-        
-        return results
-    
+
+        return results, prediction_groups
+
     def _build_generator(
         self,
         study: str,
         settings: dict[str, object],
+        *,
+        training_dataset: pd.DataFrame | None = None,
     ) -> FnnArchitectureGenerator | SamplingGenerator | NoiseGenerator:
         '''
         Construct the concrete generator configured for a study.
@@ -1161,6 +1310,11 @@ class BiasAnalyzer:
                     "sampling strategies must not contain duplicates."
                 )
 
+            if training_dataset is None:
+                raise ValueError(
+                    'Training dataset is required for the sampling study.'
+                )
+
             if SamplingStrategyName.BOOTSTRAP in strategies:
                 sampling_strategies.append(
                     SamplingStrategy(
@@ -1197,8 +1351,7 @@ class BiasAnalyzer:
                     )
                 )
 
-            dataset = pd.concat([self.inputs_df, self.outputs_df], axis=1)
-            return SamplingGenerator(dataset=dataset, strategies=sampling_strategies)
+            return SamplingGenerator(dataset=training_dataset, strategies=sampling_strategies)
 
         if study == StudyName.DATA:
             standard_deviations = settings.get(
@@ -1206,13 +1359,13 @@ class BiasAnalyzer:
                 (0.1, 0.2, 0.3, 0.4, 0.5),
             )
 
-            dataset = pd.concat(
-                [self.inputs_df, self.outputs_df],
-                axis=1,
-            )
+            if training_dataset is None:
+                raise ValueError(
+                    f'Training dataset is required for the data study.'
+                )
 
             return NoiseGenerator(
-                dataset=dataset,
+                dataset=training_dataset,
                 standard_deviations=standard_deviations,
             )
         raise ValueError(f'Unsupported study: {study!r}')
@@ -1231,6 +1384,7 @@ class BiasAnalyzer:
         ...     'n_iter': 100,
         ...     'random_state': None,
         ...     'test_size': 0.2,
+        ...     'evaluation_method': ('averaging', 'pointwise'),
         ...     'studies': {
         ...         'model': {
         ...             'wide': {
@@ -1265,6 +1419,9 @@ class BiasAnalyzer:
         ...                 'bootstrap', 'stratified', 'lhs'
         ...             ]
         ...         },
+        ...         'data': {
+        ...             'standard_deviations': (0.1, 0.2, 0.3, 0.4, 0.5)
+        ...         },
         ...     }
         ... }
         '''
@@ -1272,6 +1429,10 @@ class BiasAnalyzer:
             'n_iter': 100,
             'random_state': None,
             'test_size': 0.2,
+            'evaluation_method': [
+                'averaging',
+                'pointwise',
+            ],
             'studies': {
                 'model': {
                     'wide': {
@@ -1306,6 +1467,9 @@ class BiasAnalyzer:
                         'bootstrap', 'stratified', 'lhs'
                     ]
                 },
+                'data': {
+                    'standard_deviations': (0.1, 0.2, 0.3, 0.4, 0.5)
+                },
             }
         }
         if settings is None:
@@ -1318,7 +1482,11 @@ class BiasAnalyzer:
             raise TypeError('save_predictions must be a boolean.')
 
         allowed_setting_names = {
-            'n_iter', 'random_state', 'test_size', 'studies'
+            'n_iter',
+            'random_state',
+            'test_size',
+            'studies',
+            'evaluation_method'
         }
         unknown_setting_names = set(settings) - allowed_setting_names
         if unknown_setting_names:
@@ -1339,6 +1507,21 @@ class BiasAnalyzer:
         self._validate_random_state(random_state)
         self._validate_test_size(test_size)
 
+        base_split = train_test_split(
+            self.inputs_df,
+            self.outputs_df,
+            test_size=test_size,
+            random_state=random_state
+        )
+        X_train_base, X_test_fixed, y_train_base, y_test_fixed = (
+            self._validate_split(base_split)
+        )
+
+        base_training_dataset = pd.concat(
+            [X_train_base, y_train_base],
+            axis=1,
+        )
+
         studies = settings['studies']
         if not isinstance(studies, Mapping):
             raise TypeError('studies must be a mapping.')
@@ -1351,8 +1534,14 @@ class BiasAnalyzer:
             raise ValueError(
                 f'Unsupported studies: {sorted(unknown_studies)}'
             )
-        
-        supported_strategies = set(SamplingStrategyName)
+
+        evaluation_methods = self._validate_evaluation_methods(
+            settings.get(
+                'evaluation_method',
+                (EvaluationMethod.AVERAGING, EvaluationMethod.POINTWISE),
+            )
+        )
+
         for study_name, study_settings in studies.items():
             if not isinstance(study_settings, Mapping):
                 raise TypeError(
@@ -1392,18 +1581,47 @@ class BiasAnalyzer:
                 RUN_METADATA_FILENAME,
                 self.RUN_METADATA_COLUMNS
             )
-        
+
         for study, study_settings in studies.items():
-            generator = self._build_generator(study, study_settings)
-            results = self._get_results(
+            generator = self._build_generator(
+                study,
+                study_settings,
+                training_dataset=base_training_dataset,
+            )
+            results, prediction_groups = self._get_results(
                 n_iter,
                 generator,
                 study,
+                base_split=base_split,
                 random_state=random_state,
                 test_size=test_size,
                 save_predictions=save_predictions,
             )
             self._results_df = pd.concat([self._results_df, results], ignore_index=True)
+
+            for variable, prediction_list in prediction_groups.items():
+                prediction_matrix = np.stack(
+                    prediction_list,
+                    axis=0,
+                )
+
+                # Evaluate the predictions using the specified evaluation methods.
+                #  *Hiearchy* run_id -> study -> variable -> evaluation_method -> values
+                evaluations = self._evaluate_methods(
+                    prediction_matrix,
+                    pointwise_actuals=y_test_fixed.to_numpy(dtype=np.float32),
+                    averaging_actuals=self.outputs_df.to_numpy(dtype=np.float32),
+                    methods=evaluation_methods,
+                )
+                run_evaluations = self._evaluations.setdefault(
+                    self._run_id,
+                    {},
+                )
+                study_evaluations = run_evaluations.setdefault(
+                    str(study),
+                    {},
+                )
+                study_evaluations[variable] = evaluations
 
         self._record_run_metadata(
             n_iter=n_iter,

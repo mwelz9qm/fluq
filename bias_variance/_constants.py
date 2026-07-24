@@ -36,6 +36,11 @@ class PlotType(StrEnum):
     VARIANCE_DISTRIBUTION = "variance_distribution"
     MEAN_DISTRIBUTION = "mean_distribution"
 
+class EvaluationMethod(StrEnum):
+    """Supported evaluation methods."""
+
+    AVERAGING = "averaging"
+    POINTWISE = "pointwise"
 
 RESULTS_FILENAME = "bias_variance_results.csv"
 VARIATIONS_FILENAME = "bias_variance_variations.csv"
