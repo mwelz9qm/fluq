@@ -1,8 +1,10 @@
-from .Generator import Generator
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Iterable, Any
+from typing import Any
+
 import pandas as pd
+
+from .base import Generator, Variation
 
 SamplingFunction = Callable[..., pd.DataFrame]
 
@@ -12,6 +14,11 @@ class SamplingStrategy:
     label: str
     function: SamplingFunction
     kwargs: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class SamplingVariation(Variation):
+    dataset: pd.DataFrame
 
 
 class SamplingGenerator(Generator[pd.DataFrame]):
@@ -51,14 +58,19 @@ class SamplingGenerator(Generator[pd.DataFrame]):
         self,
         *,
         random_state:  int | None = None,
-    ) -> dict[str, pd.DataFrame]:
-        generated = {}
+    ) -> list[SamplingVariation]:
+        variations = []
 
         for label, strategy in self._strategies.items():
-            generated[label] = strategy.function(
-                self._dataset.copy(),
+            variation = SamplingVariation(
+                label=label,
                 random_state=random_state,
-                **strategy.kwargs,
+                dataset=strategy.function(
+                    self._dataset.copy(),
+                    random_state=random_state,
+                    **strategy.kwargs,
+                ),
             )
+            variations.append(variation)
         
-        return generated
+        return variations
