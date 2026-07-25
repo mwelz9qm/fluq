@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from bias_variance.generators.SamplingGenerator import (
+from bias_variance.generators.sampling import (
     SamplingGenerator,
     SamplingStrategy,
 )

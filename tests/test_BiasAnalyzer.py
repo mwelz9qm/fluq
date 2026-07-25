@@ -9,15 +9,15 @@ from torch import nn, optim
 from sklearn.model_selection import train_test_split
 
 from bias_variance.BiasAnalyzer import BiasAnalyzer
-from bias_variance.generators.FnnArchitectureGenerator import (
+from bias_variance.generators.fnn_architecture import (
     FnnArchitectureGenerator,
 )
-from bias_variance.generators.Generator import Generator
-from bias_variance.generators.SamplingGenerator import SamplingGenerator
+from bias_variance.generators.base import Generator
+from bias_variance.generators.sampling import SamplingGenerator
 from bias_variance.models.TrainingConfig import TrainingConfig
 from bias_variance.models.fnn.FnnArchitecture import FnnArchitecture
 from bias_variance.models.fnn.FnnBuilder import FnnBuilder, FnnConfig
-from bias_variance.generators.NoiseGenerator import NoiseGenerator, NoiseVariation
+from bias_variance.generators.noise import NoiseGenerator, NoiseVariation
 
 
 @pytest.fixture

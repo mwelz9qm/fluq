@@ -2,7 +2,7 @@ from collections.abc import Mapping
 
 import pytest
 
-from bias_variance.generators.Generator import Generator
+from bias_variance.generators.base import Generator
 
 
 def test_generator_requires_generate_implementation():

@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from bias_variance.generators.NoiseGenerator import (
+from bias_variance.generators.noise import (
     NoiseGenerator,
     NoiseVariation,
 )

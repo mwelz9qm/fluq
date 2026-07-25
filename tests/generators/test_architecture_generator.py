@@ -1,6 +1,6 @@
 import pytest
 
-from bias_variance.generators.FnnArchitectureGenerator import (
+from bias_variance.generators.fnn_architecture import (
     FnnArchitectureGenerator,
 )
 from bias_variance.models.fnn.FnnArchitecture import FnnArchitecture
