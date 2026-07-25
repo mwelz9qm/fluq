@@ -1,4 +1,6 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 
 import numpy as np
@@ -22,10 +24,48 @@ class EvaluationMethod(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class EvaluationResult:
-    x_test: np.ndarray[float]
-    y_test: np.ndarray[float]
-    predictions: np.ndarray[float]
+class RunRecord:
+    run_id: str
+    created_at: datetime
+    random_state: int
+    test_size: float
+    n_iter: int
+    optimizer: str
+    learning_rate: float
+    loss_func: str
+    metrics: tuple[str, ...]
+    epochs: int
+    batch_size: int
+    device: str
+    baseline_architecture: tuple[int, ...]
+    input_columns: tuple[str, ...]
+    output_columns: tuple[str, ...]
+    configuration: Mapping[str, object]
+    pointwise_mean: float | None
+    pointwise_variance: float | None
+    averaging_mean: float | None
+    averaging_variance: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class VariationRecord:
+    variation_id: str
+    run_id: str
+    iteration: int
+    study: StudyName
+    label: str
+    model_seed: int
+    architecture: FnnArchitecture
+    metrics: Mapping[str, float]
+    metadata: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationRecord:
+    variation_id: str
+    inputs: tuple[float, ...]
+    actuals: tuple[float, ...]
+    predictions: tuple[float, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,10 +149,10 @@ class BiasAnalyzer:
                         )
                         predictions = self.trainer.predict(trained_model, baseline.split.x_test)
 
-                    evaluation_result = EvaluationResult(
-                        x_test=baseline.split.x_test,
-                        y_test=baseline.split.y_test,
-                        predictions=predictions,
+                    evaluation_result = EvaluationRecord(
+                        inputs=tuple(baseline.split.x_test),
+                        actuals=tuple(baseline.split.y_test),
+                        predictions=tuple(predictions),
                     )
 
                 else:
@@ -146,15 +186,15 @@ class BiasAnalyzer:
                         )
                         predictions = self.trainer.predict(trained_model, x_test)
 
-                    evaluation_result = EvaluationResult(
-                        x_test=x_test,
-                        y_test=y_test,
-                        predictions=predictions,
+                    evaluation_result = EvaluationRecord(
+                        inputs=tuple(x_test),
+                        actuals=tuple(y_test),
+                        predictions=tuple(predictions),
                     )
 
                 self.result_store.add(evaluation_result)
 
-            variation_result = {}
+            variation_result = VariationRecord()
             self.result_store.add(variation_result)
 
     def run_bias_studies(
@@ -177,6 +217,6 @@ class BiasAnalyzer:
             )
             self._decompose_bias_and_variance()
 
-        run_result = {}
+        run_result = RunRecord()
         self.result_store.add(run_result)
         self.result_store.commit()
