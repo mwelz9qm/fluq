@@ -17,8 +17,11 @@ class SamplingStrategy:
 
 
 @dataclass(frozen=True, slots=True)
-class SamplingVariation(Variation):
-    dataset: pd.DataFrame
+class SamplingVariation(Variation[pd.DataFrame]):
+    @property
+    def dataset(self) -> pd.DataFrame:
+        """The generated dataset (kept as a compatibility alias)."""
+        return self.generated
 
 
 class SamplingGenerator(Generator[pd.DataFrame]):
@@ -58,14 +61,14 @@ class SamplingGenerator(Generator[pd.DataFrame]):
         self,
         *,
         random_state:  int | None = None,
-    ) -> list[SamplingVariation]:
+    ) -> list[Variation[pd.DataFrame]]:
         variations = []
 
         for label, strategy in self._strategies.items():
             variation = SamplingVariation(
                 label=label,
                 random_state=random_state,
-                dataset=strategy.function(
+                generated=strategy.function(
                     self._dataset.copy(),
                     random_state=random_state,
                     **strategy.kwargs,

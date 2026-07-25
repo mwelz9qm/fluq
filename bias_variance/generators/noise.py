@@ -8,11 +8,14 @@ from .base import Generator, Variation
 
 
 @dataclass(frozen=True, slots=True)
-class NoiseVariation(Variation):
-    dataset: pd.DataFrame
+class NoiseVariation(Variation[pd.DataFrame]):
+    @property
+    def dataset(self) -> pd.DataFrame:
+        """The generated dataset (kept as a compatibility alias)."""
+        return self.generated
 
 
-class NoiseGenerator(Generator[NoiseVariation]):
+class NoiseGenerator(Generator[pd.DataFrame]):
     def __init__(
         self,
         dataset: pd.DataFrame,
@@ -70,7 +73,7 @@ class NoiseGenerator(Generator[NoiseVariation]):
         self,
         *,
         random_state: int | None = None,
-    ) -> list[NoiseVariation]:
+    ) -> list[Variation[pd.DataFrame]]:
         rng = np.random.default_rng(random_state)
         variations = []
 
@@ -94,7 +97,7 @@ class NoiseGenerator(Generator[NoiseVariation]):
             variation = NoiseVariation(
                 label=label,
                 random_state=random_state,
-                dataset=noisy_dataset,
+                generated=noisy_dataset,
             )
             variations.append(variation)
 

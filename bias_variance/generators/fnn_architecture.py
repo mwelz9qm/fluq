@@ -134,17 +134,20 @@ class FnnArchitectureConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class FnnArchitectureVariation(Variation):
+class FnnArchitectureVariation(Variation[FnnArchitecture]):
     '''
     Represents the generated variation returned by FnnArchitectureGenerator.
     
     Attributes:
         architecture: The generated architecture.
     '''
-    architecture: FnnArchitecture
+    @property
+    def architecture(self) -> FnnArchitecture:
+        """The generated architecture (kept as a compatibility alias)."""
+        return self.generated
 
 
-class FnnArchitectureGenerator(Generator):
+class FnnArchitectureGenerator(Generator[FnnArchitecture]):
     '''
     Generates FNN architectures that describe a model's hidden layer structure.
 
@@ -264,7 +267,7 @@ class FnnArchitectureGenerator(Generator):
         self,
         *,
         random_state: int | None = None,
-    ) -> list[FnnArchitectureVariation]:
+    ) -> list[Variation[FnnArchitecture]]:
         '''
         Generates an FNN architecture.
 
@@ -289,7 +292,7 @@ class FnnArchitectureGenerator(Generator):
             variation = FnnArchitectureVariation(
                 label=name.value,
                 random_state=random_state,
-                architecture=self._generate_random_sizes(config, rng)
+                generated=self._generate_random_sizes(config, rng)
             )
             variations.append(variation)
 
@@ -297,9 +300,8 @@ class FnnArchitectureGenerator(Generator):
             variation = FnnArchitectureVariation(
                 label=name.value,
                 random_state=random_state,
-                architecture=self._generate_taper_sizes(config, name, rng)
+                generated=self._generate_taper_sizes(config, name, rng)
             )
             variations.append(variation)
         
         return variations
-    
