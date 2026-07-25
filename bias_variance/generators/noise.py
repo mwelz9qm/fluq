@@ -1,17 +1,15 @@
-from .Generator import Generator
 from collections.abc import Iterable
 from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 
+from .base import Generator, Variation
 
 
-@dataclass(frozen=True)
-class NoiseVariation:
-    label: str
+@dataclass(frozen=True, slots=True)
+class NoiseVariation(Variation):
     dataset: pd.DataFrame
-    standard_deviation: float
-    random_state: int | None = None
 
 
 class NoiseGenerator(Generator[NoiseVariation]):
@@ -72,9 +70,9 @@ class NoiseGenerator(Generator[NoiseVariation]):
         self,
         *,
         random_state: int | None = None,
-    ) -> dict[str, NoiseVariation]:
+    ) -> list[NoiseVariation]:
         rng = np.random.default_rng(random_state)
-        generated = {}
+        variations = []
 
         for standard_deviation in self._standard_deviations:
             scale_factors = rng.normal(
@@ -93,11 +91,11 @@ class NoiseGenerator(Generator[NoiseVariation]):
             noisy_dataset.columns = self._dataset.columns
 
             label = f"std_{standard_deviation:g}"
-            generated[label] = NoiseVariation(
+            variation = NoiseVariation(
                 label=label,
-                dataset=noisy_dataset,
-                standard_deviation=standard_deviation,
                 random_state=random_state,
+                dataset=noisy_dataset,
             )
+            variations.append(variation)
 
-        return generated
+        return variations
