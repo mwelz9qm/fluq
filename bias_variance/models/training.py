@@ -1,5 +1,12 @@
 from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
 import torch
+from torch import nn
+
+from bias_variance.models.fnn.FnnArchitecture import FnnArchitecture
+from bias_variance.models.fnn.FnnBuilder import FnnBuilder, FnnConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,3 +64,34 @@ class TrainingConfig:
             or isinstance(self.batch_size, bool)
         ):
             raise TypeError('batch_size must be an integer.')
+
+
+
+class Trainer:
+    def __init__(self, config: TrainingConfig, model_builder: FnnBuilder | None = None) -> None:
+        self.config = config
+        self.model_builder = model_builder
+
+    def _build_model(self, architecture: FnnArchitecture) -> nn.Sequential:
+        model = self.model_builder.build(architecture)
+        return model.to(self.training_config.resolved_device)
+
+    def train(
+        self,
+        architecture: FnnArchitecture,
+        x_train: pd.DataFrame,
+        y_train: pd.DataFrame,
+        random_state: int | None,
+    ) -> nn.Module:
+        pass
+
+    def predict(
+        self,
+        model: nn.Module,
+        x_test: pd.DataFrame,
+    ) -> np.ndarray[float]:
+        pass
+
+    def set_model_builder(self, input_size, output_size) -> None:
+        config = FnnConfig(input_size, output_size)
+        self.model_builder = FnnBuilder(config)
