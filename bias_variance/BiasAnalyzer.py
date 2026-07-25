@@ -1,72 +1,59 @@
 from __future__ import annotations
-from typing import Any
-from collections.abc import Mapping, Sequence
 
+import json
 import os
 import uuid
-import h5py
-import json
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-import pandas as pd
-import numpy as np
-import scipy.stats as stats
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+from typing import Any
+
+import h5py
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
+from scipy import stats
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import (
-    mean_absolute_error,
-    mean_squared_error,
-    r2_score
-)
+from torch import nn, optim
+from torch.utils.data import DataLoader, TensorDataset
+
 from bias_variance._constants import (
     ACTUALS_DATASET_NAME,
+    ARCHITECTURE_FIELD_NAME,
+    BASELINE_ARCHITECTURE_FIELD_NAME,
+    BATCH_SIZE_FIELD_NAME,
     CONF_INTERVAL_LOWER_FIELD_NAME,
     CONF_INTERVAL_UPPER_FIELD_NAME,
+    CREATED_AT_FIELD_NAME,
+    DEVICE_FIELD_NAME,
+    EPOCHS_FIELD_NAME,
     FIT_ITERATIONS_DIR_NAME,
     ITERATION_FIELD_NAME,
+    LEARNING_RATE_FIELD_NAME,
     LOSS_FIELD_NAME,
     MEAN_FIELD_NAME,
-    MetricName,
+    METRICS_FIELD_NAME,
     MODEL_NAME,
-    PlotType,
     MODEL_SEED_FIELD_NAME,
-    ARCHITECTURE_FIELD_NAME,
+    N_ITER_FIELD_NAME,
+    OPTIMIZER_FIELD_NAME,
     PREDICTIONS_DATASET_NAME,
     PREDICTIONS_LAYER_NAME,
+    RANDOM_STATE_FIELD_NAME,
     RESULTS_FILENAME,
     RUN_ID_FIELD_NAME,
-    SamplingStrategyName,
+    RUN_METADATA_FILENAME,
     STUDY_FIELD_NAME,
-    StudyName,
-    EvaluationMethod,
+    TEST_SIZE_FIELD_NAME,
     TIMESTAMP_FIELD_NAME,
     VARIABLE_FIELD_NAME,
     VARIANCE_FIELD_NAME,
-    CREATED_AT_FIELD_NAME,
-    RANDOM_STATE_FIELD_NAME,
-    TEST_SIZE_FIELD_NAME,
-    N_ITER_FIELD_NAME,
-    OPTIMIZER_FIELD_NAME,
-    LEARNING_RATE_FIELD_NAME,
-    METRICS_FIELD_NAME,
-    EPOCHS_FIELD_NAME,
-    BATCH_SIZE_FIELD_NAME,
-    DEVICE_FIELD_NAME,
-    BASELINE_ARCHITECTURE_FIELD_NAME,
-    RUN_METADATA_FILENAME
-)
-from bias_variance.generators.FnnArchitectureGenerator import FnnArchitectureGenerator
-from bias_variance.generators.Generator import Generator
-from bias_variance.generators.SamplingGenerator import (
-    SamplingGenerator,
-    SamplingStrategy
-)
-from bias_variance.generators.NoiseGenerator import (
-    NoiseGenerator,
-    NoiseVariation,
+    EvaluationMethod,
+    MetricName,
+    PlotType,
+    SamplingStrategyName,
+    StudyName,
 )
 from bias_variance._plotting import (
     plot_mean_distribution,
@@ -74,14 +61,24 @@ from bias_variance._plotting import (
     plot_variance_contribution,
     plot_variance_distribution,
 )
-from common.sampling._sampling import (
-    get_quantile_stratified_random_samples,
-    get_random_samples,
-    generate_latin_hypercube_samples
+from bias_variance.generators.base import Generator, Variation
+from bias_variance.generators.fnn_architecture import FnnArchitectureGenerator
+from bias_variance.generators.noise import (
+    NoiseGenerator,
+    NoiseVariation,
 )
-from bias_variance.models.TrainingConfig import TrainingConfig
+from bias_variance.generators.sampling import (
+    SamplingGenerator,
+    SamplingStrategy,
+)
 from bias_variance.models.fnn.FnnArchitecture import FnnArchitecture
 from bias_variance.models.fnn.FnnBuilder import FnnBuilder
+from bias_variance.models.TrainingConfig import TrainingConfig
+from common.sampling._sampling import (
+    generate_latin_hypercube_samples,
+    get_quantile_stratified_random_samples,
+    get_random_samples,
+)
 
 type EvaluationMetrics = dict[str, object]
 type MethodEvaluations = dict[str, EvaluationMetrics]
@@ -1052,7 +1049,7 @@ class BiasAnalyzer:
     def _get_results(
         self,
         n_iter: int,
-        generator: Generator[FnnArchitecture] | Generator[pd.DataFrame] | Generator[NoiseVariation],
+        generator: Generator[FnnArchitecture] | Generator[pd.DataFrame],
         study: str,
         *,
         base_split: tuple[
@@ -1120,15 +1117,15 @@ class BiasAnalyzer:
             )
 
             variations = generator.generate(random_state=iteration_random_state)
-            if not isinstance(variations, Mapping):
+            if not isinstance(variations, list[Variation]):
                 raise TypeError('generator.generate() must return a mapping.')
             if not variations:
                 raise ValueError(
                     f'Generator produced no variations for study {study!r}.'
                 )
 
-            for j, (label, variation) in enumerate(variations.items()):
-                if not isinstance(label, str) or not label.strip():
+            for j, variation in enumerate(variations):
+                if not isinstance(variation.label, str) or not variation.label.strip():
                     raise ValueError(
                         'Generated variation labels must be non-empty strings.'
                     )
@@ -1141,21 +1138,21 @@ class BiasAnalyzer:
                 split = None
 
                 if study == StudyName.MODEL:
-                    if not isinstance(variation, FnnArchitecture):
+                    if not isinstance(variation.generated, FnnArchitecture):
                         raise TypeError(
                             'Model studies must generate FnnArchitecture values.'
                         )
                     split = base_split
-                    architecture = variation
+                    architecture = variation.generated
 
                 elif study == StudyName.SAMPLING:
-                    if not isinstance(variation, pd.DataFrame):
+                    if not isinstance(variation.generated, pd.DataFrame):
                         raise TypeError(
                             'Sampling studies must generate pandas DataFrames.'
                         )
                     self._validate_dataframe(
                         variation,
-                        name=f'sampling variation {label!r}',
+                        name=f'sampling variation {variation.label!r}',
                     )
                     required_columns = set(self.inputs_df.columns) | set(
                         self.outputs_df.columns
@@ -1163,11 +1160,11 @@ class BiasAnalyzer:
                     missing_columns = required_columns - set(variation.columns)
                     if missing_columns:
                         raise ValueError(
-                            f'Sampling variation {label!r} is missing columns: '
+                            f'Sampling variation {variation.label!r} is missing columns: '
                             f'{sorted(missing_columns)}.'
                         )
 
-                    sampled_train = variation
+                    sampled_train = variation.generated
                     sampling_X_train = sampled_train[self.inputs_df.columns]
                     sampling_y_train = sampled_train[self.outputs_df.columns]
                     split = (
@@ -1177,7 +1174,7 @@ class BiasAnalyzer:
                         y_test_fixed,
                     )
                 elif study == StudyName.DATA:
-                    if not isinstance(variation, NoiseVariation):
+                    if not isinstance(variation.generated, NoiseVariation):
                         raise TypeError(
                             "Data studies must generate NoiseVariation values."
                         )
@@ -1186,7 +1183,7 @@ class BiasAnalyzer:
 
                     self._validate_dataframe(
                         noisy_train,
-                        name=f"data variation {label!r}",
+                        name=f"data variation {variation.label!r}",
                     )
 
                     required_columns = set(self.inputs_df.columns) | set(
