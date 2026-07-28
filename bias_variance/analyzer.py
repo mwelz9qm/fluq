@@ -8,6 +8,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from bias_variance.generators.base import Generator
+from bias_variance.models.evaluation import EvaluationMethod
 from bias_variance.models.fnn.FnnArchitecture import FnnArchitecture
 from bias_variance.models.training import Trainer, TrainingConfig
 
@@ -16,11 +17,6 @@ class StudyName(StrEnum):
     MODEL = 'model'
     SAMPLING = 'sampling'
     DATA = 'data'
-
-
-class EvaluationMethod(StrEnum):
-    AVERAGING = 'averaging'
-    POINTWISE = 'pointwise'
 
 
 @dataclass(frozen=True, slots=True)
