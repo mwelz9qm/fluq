@@ -108,11 +108,6 @@ class BiasAnalyzer:
     ):
         self.result_store = result_store
 
-    def _decompose_bias_and_variance(
-        self,
-    ) -> None:
-        pass
-
     def _build_generator(
         self,
         study_name: StudyName,
