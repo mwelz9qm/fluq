@@ -8,7 +8,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from bias_variance.generators.base import Generator
-from bias_variance.models.evaluation import EvaluationMethod
+from bias_variance.models.evaluation import EvaluationMethod, Evaluator, MetricName
 from bias_variance.models.fnn.FnnArchitecture import FnnArchitecture
 from bias_variance.models.training import Trainer, TrainingConfig
 
@@ -23,44 +23,54 @@ class StudyName(StrEnum):
 class RunRecord:
     run_id: str
     created_at: datetime
-    random_state: int
-    test_size: float
     n_iter: int
+    test_size: float
+    test_metrics: tuple[str, ...]
     optimizer: str
     learning_rate: float
-    loss_func: str
-    metrics: tuple[str, ...]
+    train_loss: str
     epochs: int
     batch_size: int
     device: str
-    baseline_architecture: tuple[int, ...]
+    base_architecture: tuple[int, ...]
+    base_x_train: tuple[float]
+    base_y_train: tuple[float]
+    base_x_test: tuple[float]
+    base_y_test: tuple[float]
     input_columns: tuple[str, ...]
     output_columns: tuple[str, ...]
-    configuration: Mapping[str, object]
-    pointwise_mean: float | None
-    pointwise_variance: float | None
-    averaging_mean: float | None
-    averaging_variance: float | None
 
 
 @dataclass(frozen=True, slots=True)
-class VariationRecord:
-    variation_id: str
+class StudyRecord:
+    study_id: str
     run_id: str
-    iteration: int
-    study: StudyName
-    label: str
-    model_seed: int
-    architecture: FnnArchitecture
-    metrics: Mapping[str, float]
-    metadata: Mapping[str, object]
+    study_name: str
+    evaluation_method: str
 
 
 @dataclass(frozen=True, slots=True)
-class EvaluationRecord:
-    variation_id: str
-    inputs: tuple[float, ...]
-    actuals: tuple[float, ...]
+class GroupRecord:
+    group_id: str
+    study_id: str
+    group_name: str
+    averaging_strategy_bias: float | None
+    averaging_strategy_variance: float | None
+    pointwise_strategy_bias: float | None
+    pointwise_strategy_variance: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRecord:
+    model_id: str
+    group_id: str
+    architecture: tuple[int, ...]
+    scores: Mapping[str, float]
+    test_loss: str
+    x_train: tuple[float, ...]
+    y_train: tuple[float, ...]
+    x_test: tuple[float, ...]
+    y_test: tuple[float, ...]
     predictions: tuple[float, ...]
 
 
@@ -84,20 +94,19 @@ class StudyBaseline:
 class StudyConfig:
     n_iter: int = 100
     test_size: float = 0.2
+    test_metrics: frozenset[MetricName]
     random_state: int | None = None
     baseline: StudyBaseline
-    evaluation_method: frozenset[EvaluationMethod] = {EvaluationMethod.AVERAGING, EvaluationMethod.POINTWISE}
+    evaluation_methods: frozenset[EvaluationMethod] = {EvaluationMethod.AVERAGING, EvaluationMethod.POINTWISE}
     studies: frozenset[StudyName] = {StudyName.MODEL, StudyName.SAMPLING, StudyName.DATA}
 
 
 class BiasAnalyzer:
     def __init__(
         self,
-        training_config: TrainingConfig,
         result_store,
     ):
         self.result_store = result_store
-        self.trainer = Trainer(training_config)
 
     def _decompose_bias_and_variance(
         self,
@@ -115,41 +124,82 @@ class BiasAnalyzer:
 
     def _run_bias_study(
         self,
+        study_id: str,
         study_name: StudyName,
         evaluation_method: EvaluationMethod,
         n_iter: int,
         test_size: float,
         random_state: int | None,
         baseline: StudyBaseline,
+        trainer: Trainer,
     ) -> None:
         for i in np.arange(n_iter):
             generator = self._build_generator(study_name, evaluation_method, test_size, baseline)
             variations = generator.generate(random_state=random_state)
+            group_ids = set()
             for j, variation in enumerate(variations):
+                if i == 0:
+                    group_id = ''
+                    group_ids.add(group_id)
+                    group_record = GroupRecord(
+                        group_id=group_id,
+                        study_id=study_id,
+                        group_name=variation.label,
+                        averaging_strategy_bias=None,
+                        averaging_strategy_variance=None,
+                        pointwise_strategy_bias=None,
+                        pointwise_strategy_variance=None
+                    )
+                    self.result_store.add(group_record)
+
                 if evaluation_method == EvaluationMethod.POINTWISE:
                     if study_name == StudyName.MODEL:
-                        trained_model = self.trainer.train(
+                        trained_model = trainer.train(
                             architecture=variation.generated,
                             x_train=baseline.split.x_train,
                             y_train=baseline.split.y_train,
                             random_state=random_state + j
                         )
-                        predictions = self.trainer.predict(trained_model, baseline.split.x_test)
+                        predictions = trainer.predict(trained_model, baseline.split.x_test)
+                        scores = {}
+                        model_id = ''
+                        model_record = ModelRecord(
+                            model_id=model_id,
+                            group_id=group_ids[j],
+                            architecture=variation.generated.hidden_layers,
+                            scores=scores,
+                            test_loss='',
+                            x_train=baseline.split.x_train,
+                            y_train=baseline.split.y_train,
+                            x_test=baseline.split.x_test,
+                            y_test=baseline.split.y_test,
+                            predictions=predictions
+                        )
+                        self.result_store.add(model_record)
                         
                     else:
-                        trained_model = self.trainer.train(
+                        trained_model = trainer.train(
                             architecture=baseline.architecture,
                             x_train=variation.generated[baseline.inputs.columns],
                             y_train=variation.generated[baseline.outputs.columns],
                             random_state=random_state + j
                         )
-                        predictions = self.trainer.predict(trained_model, baseline.split.x_test)
-
-                    evaluation_result = EvaluationRecord(
-                        inputs=tuple(baseline.split.x_test),
-                        actuals=tuple(baseline.split.y_test),
-                        predictions=tuple(predictions),
-                    )
+                        predictions = trainer.predict(trained_model, baseline.split.x_test)
+                        scores = {}
+                        model_id = ''
+                        model_record = ModelRecord(
+                            model_id=model_id,
+                            group_id=group_ids[j],
+                            architecture=baseline.architecture.hidden_layers,
+                            scores=scores,
+                            test_loss='',
+                            x_train=variation.generated[baseline.inputs.columns],
+                            y_train=variation.generated[baseline.outputs.columns],
+                            x_test=baseline.split.x_test,
+                            y_test=baseline.split.y_test,
+                            predictions=predictions
+                        )
+                        self.result_store.add(model_record)
 
                 else:
                     if study_name == StudyName.MODEL:
@@ -159,13 +209,28 @@ class BiasAnalyzer:
                             test_size=test_size,
                             random_state=random_state
                         )
-                        trained_model = self.trainer.train(
+                        trained_model = trainer.train(
                             architecture=variation.generated,
                             x_train=x_train,
                             y_train=y_train,
                             random_state=random_state + j
                         )
-                        predictions = self.trainer.predict(trained_model, x_test)
+                        predictions = trainer.predict(trained_model, x_test)
+                        scores = {}
+                        model_id = ''
+                        model_record = ModelRecord(
+                            model_id=model_id,
+                            group_id=group_ids[j],
+                            architecture=variation.generated.hidden_layers,
+                            scores=scores,
+                            test_loss='',
+                            x_train=x_train,
+                            y_train=y_train,
+                            x_test=x_test,
+                            y_test=y_test,
+                            predictions=predictions
+                        )
+                        self.result_store.add(model_record)
 
                     else:
                         x_train, x_test, y_train, y_test = train_test_split(
@@ -174,45 +239,86 @@ class BiasAnalyzer:
                             test_size=test_size,
                             random_state=random_state
                         )
-                        trained_model = self.trainer.train(
+                        trained_model = trainer.train(
                             architecture=baseline.architecture,
                             x_train=variation.generated[baseline.inputs.columns],
                             y_train=variation.generated[baseline.outputs.columns],
                             random_state=random_state + j
                         )
-                        predictions = self.trainer.predict(trained_model, x_test)
-
-                    evaluation_result = EvaluationRecord(
-                        inputs=tuple(x_test),
-                        actuals=tuple(y_test),
-                        predictions=tuple(predictions),
-                    )
-
-                self.result_store.add(evaluation_result)
-
-            variation_result = VariationRecord()
-            self.result_store.add(variation_result)
+                        predictions = trainer.predict(trained_model, x_test)
+                        scores = {}
+                        model_id = ''
+                        model_record = ModelRecord(
+                            model_id=model_id,
+                            group_id=group_ids[j],
+                            architecture=baseline.architecture.hidden_layers,
+                            scores=scores,
+                            test_loss='',
+                            x_train=x_train,
+                            y_train=y_train,
+                            x_test=x_test,
+                            y_test=y_test,
+                            predictions=predictions
+                        )
+                        self.result_store.add(model_record)
 
     def run_bias_studies(
         self,
         study_config: StudyConfig,
+        training_config: TrainingConfig,
     ) -> None:
-        self.trainer.set_model_builder(
+        run_id = ''
+        
+        trainer =  Trainer(training_config)
+        trainer.set_model_builder(
             study_config.baseline.inputs.shape[1],
             study_config.baseline.outputs.shape[1]
         )
         
         for study_name in study_config.studies:
-            self._run_bias_study(
-                study_name,
-                study_config.evaluation_method,
-                study_config.n_iter,
-                study_config.test_size,
-                study_config.random_state,
-                study_config.baseline
-            )
-            self._decompose_bias_and_variance()
+            for evaluation_method in study_config.evaluation_methods:
+                study_id = ''
+                self._run_bias_study(
+                    study_id,
+                    study_name,
+                    evaluation_method,
+                    study_config.n_iter,
+                    study_config.test_size,
+                    study_config.random_state,
+                    study_config.baseline,
+                    trainer
+                )
 
-        run_result = RunRecord()
-        self.result_store.add(run_result)
+                study_record = StudyRecord(
+                    study_id=study_id,
+                    run_id=run_id,
+                    study_name=study_name.value,
+                    evaluation_method=evaluation_method.value
+                )
+                self.result_store.add(study_record)
+
+        evaluator = Evaluator(self.result_store)
+        evaluator.evaluate(study_config.evaluation_methods, run_id)
+
+        run_record = RunRecord(
+            run_id=run_id,
+            created_at=datetime.now(tz=''),
+            n_iter=study_config.n_iter,
+            test_size=study_config.test_size,
+            test_metrics=study_config.test_metrics,
+            optimizer=training_config.optimizer,
+            learning_rate=training_config.learning_rate,
+            train_loss=training_config.loss,
+            epochs=training_config.epochs,
+            batch_size=training_config.batch_size,
+            device=training_config.device,
+            base_architecture=study_config.baseline.architecture,
+            base_x_train=study_config.baseline.split.x_train.to_numpy(),
+            base_y_train=study_config.baseline.split.y_train.to_numpy(),
+            base_x_test=study_config.baseline.split.x_test.to_numpy(),
+            base_y_test=study_config.baseline.split.y_test.to_numpy(),
+            input_columns=study_config.baseline.inputs.columns,
+            output_columns=study_config.baseline.outputs.columns
+        )
+        self.result_store.add(run_record)
         self.result_store.commit()
