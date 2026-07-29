@@ -97,7 +97,7 @@ class Evaluator:
             strategy_variance = np.mean(variances)
             strategy_bias = np.mean(squared_errors)
 
-            self.result_store.insert_averaging_bias_and_variance(
+            self.result_store.update_group(
                 group_id,
                 strategy_bias,
                 strategy_variance
@@ -151,7 +151,7 @@ class Evaluator:
             strategy_variance = np.mean(variances)
             strategy_bias = np.mean(squared_errors)
 
-            self.result_store.insert_pointwise_bias_and_variance(
+            self.result_store.update_group(
                 group_id,
                 strategy_bias,
                 strategy_variance
@@ -171,7 +171,7 @@ class Evaluator:
         
         The method will insert the results based on the selected evaluation
         methods.
-        
+
         Parameters
         -----------
         methods: frozenset[EvaluationMethod]
