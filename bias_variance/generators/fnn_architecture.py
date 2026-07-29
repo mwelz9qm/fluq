@@ -4,7 +4,7 @@ from enum import StrEnum
 
 import numpy as np
 
-from ..models.fnn.FnnArchitecture import FnnArchitecture
+from ..models.fnn import FnnArchitecture
 from .base import Generator, Variation
 
 

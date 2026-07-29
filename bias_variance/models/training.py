@@ -6,8 +6,7 @@ from torch import nn, optim
 from torch.utils.data import DataLoader, TensorDataset
 
 from bias_variance.models.evaluation import _build_loss
-from bias_variance.models.fnn.FnnArchitecture import FnnArchitecture
-from bias_variance.models.fnn.FnnBuilder import FnnBuilder, FnnConfig
+from bias_variance.models.fnn import FnnArchitecture, FnnBuilder, FnnConfig
 
 
 @dataclass(frozen=True, slots=True)

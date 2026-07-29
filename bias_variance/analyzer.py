@@ -9,7 +9,7 @@ from sklearn.model_selection import train_test_split
 
 from bias_variance.generators.base import Generator
 from bias_variance.models.evaluation import EvaluationMethod, Evaluator, MetricName
-from bias_variance.models.fnn.FnnArchitecture import FnnArchitecture
+from bias_variance.models.fnn import FnnArchitecture
 from bias_variance.models.training import Trainer, TrainingConfig
 
 

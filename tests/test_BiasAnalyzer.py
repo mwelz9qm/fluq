@@ -15,8 +15,7 @@ from bias_variance.generators.fnn_architecture import (
 from bias_variance.generators.base import Generator
 from bias_variance.generators.sampling import SamplingGenerator
 from bias_variance.models.TrainingConfig import TrainingConfig
-from bias_variance.models.fnn.FnnArchitecture import FnnArchitecture
-from bias_variance.models.fnn.FnnBuilder import FnnBuilder, FnnConfig
+from bias_variance.models.fnn import FnnArchitecture, FnnBuilder, FnnConfig
 from bias_variance.generators.noise import NoiseGenerator, NoiseVariation
 
 

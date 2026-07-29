@@ -71,9 +71,8 @@ from bias_variance.generators.sampling import (
     SamplingGenerator,
     SamplingStrategy,
 )
-from bias_variance.models.fnn.FnnArchitecture import FnnArchitecture
-from bias_variance.models.fnn.FnnBuilder import FnnBuilder
-from bias_variance.models.TrainingConfig import TrainingConfig
+from bias_variance.models.fnn import FnnArchitecture, FnnBuilder
+from bias_variance.models.training import TrainingConfig
 from common.sampling._sampling import (
     generate_latin_hypercube_samples,
     get_quantile_stratified_random_samples,
