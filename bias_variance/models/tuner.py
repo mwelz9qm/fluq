@@ -77,18 +77,21 @@ class Tuner:
     def _objective(self, trial) -> float:
         """Evaluate one tuning trial.
 
-        Parameters
-        ----------
-        trial
-            Optuna trial object used to suggest hyperparameter values.
+        This method should eventually:
+        1. Build a candidate TrainingConfig from the trial.
+        2. Train a model using that candidate config.
+        3. Evaluate the model.
+        4. Return the selected score for Optuna.
 
-        Returns
-        -------
-        float
-            Score for the trial. Optuna will minimize or maximize this value
-            depending on the tuner configuration.
+        The full implementation depends on the Trainer prediction/evaluation
+        workflow.
         """
-        raise NotImplementedError
+        candidate_config = self._build_training_config_from_trial(trial)
+
+        raise NotImplementedError(
+            "_objective() still needs trainer, data split, architecture, "
+            "prediction, and scoring workflow."
+        )
 
     def _build_training_config_from_trial(self, trial) -> TrainingConfig:
         """Create a TrainingConfig from one Optuna trial.
