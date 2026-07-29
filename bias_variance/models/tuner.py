@@ -23,11 +23,27 @@ class TunerConfig:
         Optimization direction. Usually "minimize" for loss, RMSE, MSE, or MAE.
     metric : str
         Metric used to choose the best trial.
+    optimizer_choices : tuple[str, ...]
+        Optimizers that Optuna can choose from.
+    learning_rate_range : tuple[float, float]
+        Minimum and maximum learning rate values.
+    loss_choices : tuple[str, ...]
+        Loss functions that Optuna can choose from.
+    epoch_choices : tuple[int, ...]
+        Epoch values that Optuna can choose from.
+    batch_size_choices : tuple[int, ...]
+        Batch size values that Optuna can choose from.
     """
 
     n_trials: int = 10
     direction: str = "minimize"
     metric: str = "rmse"
+
+    optimizer_choices: tuple[str, ...] = ("adam",)
+    learning_rate_range: tuple[float, float] = (1e-4, 1e-2)
+    loss_choices: tuple[str, ...] = ("mse",)
+    epoch_choices: tuple[int, ...] = (50, 100, 150)
+    batch_size_choices: tuple[int, ...] = (8, 16, 32)
 
 
 class Tuner:
