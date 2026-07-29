@@ -103,4 +103,33 @@ class Tuner:
         TrainingConfig
             Training configuration built from the trial suggestions.
         """
-        raise NotImplementedError
+        optimizer = trial.suggest_categorical(
+            "optimizer",
+            self.config.optimizer_choices,
+        )
+        learning_rate = trial.suggest_float(
+            "learning_rate",
+            self.config.learning_rate_range[0],
+            self.config.learning_rate_range[1],
+            log=True,
+        )
+        loss = trial.suggest_categorical(
+            "loss",
+            self.config.loss_choices,
+        )
+        epochs = trial.suggest_categorical(
+            "epochs",
+            self.config.epoch_choices,
+        )
+        batch_size = trial.suggest_categorical(
+            "batch_size",
+            self.config.batch_size_choices,
+        )
+
+        return TrainingConfig(
+            optimizer=optimizer,
+            learning_rate=learning_rate,
+            loss=loss,
+            epochs=epochs,
+            batch_size=batch_size,
+        )
