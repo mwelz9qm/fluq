@@ -3,6 +3,7 @@ import pytest
 from bias_variance.generators.fnn_architecture import (
     ArchitectureName,
     FnnArchitectureConfig,
+    FnnArchitectureGenerator,
     FnnArchitectureVariation,
     FnnRandomArchitectureConfig,
     FnnTaperArchitectureConfig,
@@ -158,6 +159,71 @@ def test_default_random_config_satisfies_cross_architecture_rules():
         2,
         64,
     )
+
+
+def test_reverse_taper_uses_a_positive_decay_multiplier():
+    config = FnnTaperArchitectureConfig(
+        layer_range=(8, 9),
+        start_size_range=(20, 21),
+        taper_rate_range=(0.2, 0.4),
+        max_size=21,
+    )
+    generator = FnnArchitectureGenerator(
+        FnnArchitectureConfig(
+            taper_architectures={
+                ArchitectureName.REVERSE_TAPER: config,
+            }
+        )
+    )
+
+    architecture = generator.generate(random_state=42)[0].generated
+
+    assert architecture.hidden_layers[0] == 20
+    assert all(
+        left >= right >= 1
+        for left, right in zip(
+            architecture.hidden_layers,
+            architecture.hidden_layers[1:],
+        )
+    )
+
+
+def test_combined_taper_grows_and_then_shrinks():
+    config = FnnTaperArchitectureConfig(
+        layer_range=(7, 8),
+        start_size_range=(4, 5),
+        taper_rate_range=(0.2, 0.3),
+        max_size=100,
+    )
+    generator = FnnArchitectureGenerator(
+        FnnArchitectureConfig(
+            taper_architectures={
+                ArchitectureName.COMBINED_TAPER: config,
+            }
+        )
+    )
+
+    hidden_layers = generator.generate(
+        random_state=42
+    )[0].generated.hidden_layers
+    midpoint = 4
+
+    assert all(
+        left <= right
+        for left, right in zip(
+            hidden_layers[:midpoint],
+            hidden_layers[1:midpoint],
+        )
+    )
+    assert all(
+        left >= right
+        for left, right in zip(
+            hidden_layers[midpoint - 1:],
+            hidden_layers[midpoint:],
+        )
+    )
+    assert hidden_layers[0] < hidden_layers[midpoint - 1]
+    assert hidden_layers[-1] < hidden_layers[midpoint - 1]
 
 
 @pytest.mark.parametrize(
