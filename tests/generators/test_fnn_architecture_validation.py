@@ -1,3 +1,6 @@
+from dataclasses import FrozenInstanceError
+
+import numpy as np
 import pytest
 
 from bias_variance.generators.fnn_architecture import (
@@ -73,16 +76,21 @@ def test_max_size_must_be_positive():
         FnnTaperArchitectureConfig(max_size=0)
 
 
-@pytest.mark.parametrize(
-    ('ranges', 'message'),
-    [
-        ({'layer_range': (1, 8)}, 'upper bound of layer_range'),
-        ({'start_size_range': (4, 10)}, 'upper bound of start_size_range'),
-    ],
-)
-def test_max_size_must_cover_integer_range_upper_bounds(ranges, message):
-    with pytest.raises(ValueError, match=message):
-        FnnTaperArchitectureConfig(max_size=7, **ranges)
+def test_max_size_need_not_cover_layer_range_upper_bound():
+    config = FnnTaperArchitectureConfig(
+        layer_range=(1, 8),
+        max_size=7,
+    )
+
+    assert config.max_size == 7
+
+
+def test_max_size_must_cover_start_size_range_upper_bound():
+    with pytest.raises(ValueError, match='upper bound of start_size_range'):
+        FnnTaperArchitectureConfig(
+            start_size_range=(4, 10),
+            max_size=7,
+        )
 
 
 def test_architecture_collections_must_be_mappings():
@@ -159,6 +167,54 @@ def test_default_random_config_satisfies_cross_architecture_rules():
         2,
         64,
     )
+
+
+def test_default_generator_uses_every_predefined_configuration():
+    generator = FnnArchitectureGenerator()
+
+    assert set(generator.settings.range_architectures) == {
+        ArchitectureName.WIDE,
+        ArchitectureName.NARROW,
+    }
+    assert set(generator.settings.taper_architectures) == {
+        ArchitectureName.TAPER,
+        ArchitectureName.REVERSE_TAPER,
+        ArchitectureName.COMBINED_TAPER,
+    }
+
+
+def test_architecture_config_mappings_and_values_are_immutable():
+    source = {
+        ArchitectureName.WIDE: FnnRandomArchitectureConfig(),
+    }
+    config = FnnArchitectureConfig(range_architectures=source)
+    source.clear()
+
+    assert ArchitectureName.WIDE in config.range_architectures
+    with pytest.raises(TypeError):
+        config.range_architectures[ArchitectureName.NARROW] = (
+            FnnRandomArchitectureConfig()
+        )
+    with pytest.raises(FrozenInstanceError):
+        config.range_architectures[
+            ArchitectureName.WIDE
+        ].layer_range = (2, 3)
+
+
+def test_unknown_taper_type_is_rejected():
+    config = FnnTaperArchitectureConfig(
+        layer_range=(2, 3),
+        start_size_range=(4, 5),
+        taper_rate_range=(0.2, 0.3),
+        max_size=5,
+    )
+
+    with pytest.raises(ValueError, match='Unknown taper_type'):
+        FnnArchitectureGenerator()._generate_taper_sizes(
+            config,
+            ArchitectureName.WIDE,
+            np.random.default_rng(42),
+        )
 
 
 def test_reverse_taper_uses_a_positive_decay_multiplier():
