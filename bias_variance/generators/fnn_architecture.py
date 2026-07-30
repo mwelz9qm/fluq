@@ -503,6 +503,26 @@ class FnnArchitectureGenerator(Generator[FnnArchitecture]):
         architecture. The ``rng`` object is used to select the number of layers
         (``n_layers``), starting layer size (``start_size``), and rate of size
         increase or decrease (``size_rate``).
+
+        For ``TAPER``, a multiplier ``q`` is sampled from
+        ``[1 + lower_rate, 1 + upper_rate)``. Before rounding and clamping, the
+        size of zero-indexed layer ``i`` is ``start_size * q**i``. Because
+        ``q > 1``, layer sizes grow exponentially. Each result is rounded to the
+        nearest integer and limited to ``[1, max_size]``.
+
+        For ``REVERSE_TAPER``, a positive multiplier ``q`` is sampled from
+        ``[1 - upper_rate, 1 - lower_rate)``. Equivalently, the effective decay
+        rate ``1 - q`` lies in ``(lower_rate, upper_rate]``. Before rounding and
+        clamping, the size of zero-indexed layer ``i`` is
+        ``start_size * q**i``. Because ``0 < q < 1``, layer sizes decay
+        exponentially and remain positive. Each result is rounded to the nearest
+        integer and limited to ``[1, max_size]``.
+
+        For ``COMBINED_TAPER``, a rate ``r`` is sampled from
+        ``[lower_rate, upper_rate)``. The first half grows exponentially as
+        ``start_size * (1 + r)**i``. After the midpoint, sizes decay from the
+        peak as ``peak * (1 - r)**(i - midpoint + 1)``. Results are rounded and
+        limited to ``[1, max_size]``.
         
         Parameters
         -----------
@@ -531,7 +551,7 @@ class FnnArchitectureGenerator(Generator[FnnArchitecture]):
             size_rate = rng.uniform(low_taper_rate + 1, high_taper_rate + 1)
 
         elif taper_type == ArchitectureName.REVERSE_TAPER:
-            size_rate = rng.uniform(high_taper_rate - 1, low_taper_rate - 1)
+            size_rate = rng.uniform(1 - high_taper_rate, 1 - low_taper_rate)
 
         else:
             size_rate = rng.uniform(low_taper_rate, high_taper_rate)
@@ -539,7 +559,10 @@ class FnnArchitectureGenerator(Generator[FnnArchitecture]):
 
         sizes = []
 
-        if taper_type == ArchitectureName.TAPER or ArchitectureName.REVERSE_TAPER:
+        if taper_type in (
+            ArchitectureName.TAPER,
+            ArchitectureName.REVERSE_TAPER,
+        ):
             for i in np.arange(n_layers):
                 size = round(start_size * (size_rate ** i))
                 sizes.append(min(max(size, 1), config.max_size))
