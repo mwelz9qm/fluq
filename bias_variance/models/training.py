@@ -5,7 +5,6 @@ import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader, TensorDataset
 
-from bias_variance.models.evaluation import _build_loss
 from bias_variance.models.fnn import FnnArchitecture, FnnBuilder, FnnConfig
 
 
@@ -195,3 +194,20 @@ def _build_optimizer(
         model.parameters(),
         lr=learning_rate,
     )
+
+def _build_loss(loss: str) -> nn.Module:
+    losses: dict[str, type[nn.Module]] = {
+        'mse': nn.MSELoss,
+        'mae': nn.L1Loss,
+    }
+
+    try:
+        loss_type = losses[loss]
+
+    except KeyError:
+        raise ValueError(
+            f'Unsupported loss: {loss!r}.'
+            f'Expected one of {sorted(losses)}.'
+        ) from None
+    
+    return loss_type()
