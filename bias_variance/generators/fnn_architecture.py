@@ -436,6 +436,32 @@ class FnnArchitectureGenerator(Generator[FnnArchitecture]):
     --------------
     settings: FnnArchitectureConfig | None, default = None
         The generator's settings for configuring architecture ranges, rates, and maximums.
+
+    Examples
+    --------
+    Generate every architecture using the predefined configurations:
+
+    >>> settings = FnnArchitectureConfig(
+    ...     range_architectures=DEFAULT_RANDOM_CONFIG,
+    ...     taper_architectures=DEFAULT_TAPER_CONFIG,
+    ... )
+    >>> generator = FnnArchitectureGenerator(settings)
+    >>> variations = generator.generate(random_state=42)
+
+    Generate only a customized wide architecture:
+
+    >>> settings = FnnArchitectureConfig(
+    ...     range_architectures={
+    ...         ArchitectureName.WIDE: FnnRandomArchitectureConfig(
+    ...             layer_range=(2, 5),
+    ...             size_range=(64, 129),
+    ...         ),
+    ...     },
+    ... )
+    >>> generator = FnnArchitectureGenerator(settings)
+    >>> variation = generator.generate(random_state=42)[0]
+    >>> variation.label
+    'wide'
     '''
     def __init__(
         self,
@@ -607,7 +633,7 @@ class FnnArchitectureGenerator(Generator[FnnArchitecture]):
         
         Returns
         ----------
-        dict[str, FnnArchitecture]
+        list[Variation[FnnArchitecture]]
             A dictionary of FNN architectures with string keys for identification.
         '''
         rng = np.random.default_rng(random_state)
