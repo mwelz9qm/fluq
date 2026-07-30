@@ -2,6 +2,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from numbers import Real
+from types import MappingProxyType
 
 import numpy as np
 
@@ -117,9 +118,9 @@ class FnnTaperArchitectureConfig:
     rules in ``FnnRandomArchitectureConfig``. ``taper_rate_range`` must contain
     exactly two numeric, non-boolean bounds satisfying
     ``0 < lower < upper < 1``. ``max_size`` must be a positive, non-boolean
-    integer at least as large as the upper bounds of ``layer_range`` and
-    ``start_size_range``, when those ranges are provided. Any attribute may be
-    ``None`` so that ``FnnArchitectureConfig`` can supply its default.
+    integer at least as large as the upper bound of ``start_size_range``, when
+    that range is provided. Any attribute may be ``None`` so that
+    ``FnnArchitectureConfig`` can supply its default.
     
     Attributes
     -----------
@@ -183,7 +184,7 @@ class FnnTaperArchitectureConfig:
 
     def _validate_max_size(self) -> None:
         '''
-        Validate the type, minimum, and required range coverage of ``max_size``.
+        Validate the type, minimum, and start-size coverage of ``max_size``.
         '''
         if self.max_size is None:
             return
@@ -194,17 +195,17 @@ class FnnTaperArchitectureConfig:
         if self.max_size < 1:
             raise ValueError('max_size must be at least 1.')
 
-        for name, value in (
-            ('layer_range', self.layer_range),
-            ('start_size_range', self.start_size_range),
+        if (
+            self.start_size_range is not None
+            and self.max_size < self.start_size_range[1]
         ):
-            if value is not None and self.max_size < value[1]:
-                raise ValueError(
-                    f'max_size must be at least the upper bound of {name}.'
-                )
+            raise ValueError(
+                'max_size must be at least the upper bound of '
+                'start_size_range.'
+            )
 
 
-DEFAULT_RANDOM_CONFIG = {
+DEFAULT_RANDOM_CONFIG = MappingProxyType({
     ArchitectureName.WIDE: FnnRandomArchitectureConfig(
         layer_range=(1, 16),
         size_range=(64, 256),
@@ -213,9 +214,9 @@ DEFAULT_RANDOM_CONFIG = {
         layer_range=(16, 64),
         size_range=(2, 64),
     ),
-}
+})
 
-DEFAULT_TAPER_CONFIG = {
+DEFAULT_TAPER_CONFIG = MappingProxyType({
     ArchitectureName.TAPER: FnnTaperArchitectureConfig(
         layer_range=(16, 64),
         start_size_range=(1, 9),
@@ -234,7 +235,7 @@ DEFAULT_TAPER_CONFIG = {
         taper_rate_range=(0.25, 0.5),
         max_size=256,
     ),
-}
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,15 +257,28 @@ class FnnArchitectureConfig:
     while the NARROW size range must be below the WIDE size range. Because these
     ranges are half-open, adjacent ranges are valid.
 
+    The mappings are copied and exposed as read-only mapping proxies after
+    normalization. Their values are frozen dataclasses containing only immutable
+    tuples and scalar values, so neither the mappings nor their contents can be
+    changed through this configuration.
+
     Attributes
     -------------
         range_architectures: Mapping[ArchitectureName, FnnRandomArchitectureConfig], default = dict()
-            A dictionary of selected random range architectures and their configurations.
+            A read-only mapping of selected random-range architectures and their
+            configurations after initialization.
         taper_architectures: Mapping[ArchitectureName, FnnTaperArchitectureConfig], default = dict()
-            A dictionary of selected taper range architectures and their configurations.
+            A read-only mapping of selected taper architectures and their
+            configurations after initialization.
     '''
-    range_architectures: Mapping[ArchitectureName, FnnRandomArchitectureConfig] = field(default_factory=dict)
-    taper_architectures: Mapping[ArchitectureName, FnnTaperArchitectureConfig] = field(default_factory=dict)
+    range_architectures: Mapping[
+        ArchitectureName,
+        FnnRandomArchitectureConfig,
+    ] = field(default_factory=dict)
+    taper_architectures: Mapping[
+        ArchitectureName,
+        FnnTaperArchitectureConfig,
+    ] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         '''
@@ -282,6 +296,7 @@ class FnnArchitectureConfig:
         ``ArchitectureName`` members and whose values use the corresponding
         configuration type. When WIDE and NARROW are both present, their layer
         and size ranges are validated for the required ordering and separation.
+        The normalized mappings are copied into read-only proxies.
         '''
         self._validate_architecture_mapping(
             'range_architectures',
@@ -318,8 +333,16 @@ class FnnArchitectureConfig:
             normalized_range_config
         )
 
-        object.__setattr__(self, 'range_architectures', normalized_range_config)
-        object.__setattr__(self, 'taper_architectures', normalized_taper_config)
+        object.__setattr__(
+            self,
+            'range_architectures',
+            MappingProxyType(normalized_range_config),
+        )
+        object.__setattr__(
+            self,
+            'taper_architectures',
+            MappingProxyType(normalized_taper_config),
+        )
 
     @staticmethod
     def _validate_architecture_mapping(
@@ -467,7 +490,10 @@ class FnnArchitectureGenerator(Generator[FnnArchitecture]):
         self,
         settings: FnnArchitectureConfig | None = None,
     ) -> None:
-        self.settings = settings or FnnArchitectureConfig()
+        self.settings = settings or FnnArchitectureConfig(
+            DEFAULT_RANDOM_CONFIG,
+            DEFAULT_TAPER_CONFIG
+        )
 
     def _generate_random_sizes(
         self,
@@ -573,15 +599,20 @@ class FnnArchitectureGenerator(Generator[FnnArchitecture]):
         start_size = rng.integers(low_size, high_size, dtype=int)
 
         low_taper_rate, high_taper_rate = config.taper_rate_range
-        if taper_type == ArchitectureName.TAPER:
-            size_rate = rng.uniform(low_taper_rate + 1, high_taper_rate + 1)
+        match taper_type:
+            case ArchitectureName.TAPER:
+                size_rate = rng.uniform(low_taper_rate + 1, high_taper_rate + 1)
 
-        elif taper_type == ArchitectureName.REVERSE_TAPER:
-            size_rate = rng.uniform(1 - high_taper_rate, 1 - low_taper_rate)
+            case ArchitectureName.REVERSE_TAPER:
+                size_rate = rng.uniform(1 - high_taper_rate, 1 - low_taper_rate)
 
-        else:
-            size_rate = rng.uniform(low_taper_rate, high_taper_rate)
-        
+            case ArchitectureName.COMBINED_TAPER:
+                size_rate = rng.uniform(low_taper_rate, high_taper_rate)
+
+            case _:
+                raise ValueError(
+                    f'Unknown taper_type: {taper_type!r}.'
+                )
 
         sizes = []
 
@@ -634,7 +665,7 @@ class FnnArchitectureGenerator(Generator[FnnArchitecture]):
         Returns
         ----------
         list[Variation[FnnArchitecture]]
-            A dictionary of FNN architectures with string keys for identification.
+            A list of FNN architectures variations.
         '''
         rng = np.random.default_rng(random_state)
         variations = []
