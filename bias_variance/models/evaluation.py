@@ -2,6 +2,12 @@ from enum import StrEnum
 
 import numpy as np
 import torch
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+    root_mean_squared_error,
+)
 from torch import nn
 
 
@@ -13,11 +19,11 @@ class MetricName(StrEnum):
     MAE = "mae"
     R2 = "r2"
 
-DEFAULT_METRICS: tuple[str, ...] = (
-    'rmse',
-    'r2',
-    'mse',
-    'mae'
+DEFAULT_METRICS: frozenset[MetricName] = (
+    MetricName.RMSE,
+    MetricName.MSE,
+    MetricName.MAE,
+    MetricName.R2,
 )
 
 
@@ -196,46 +202,46 @@ class Evaluator:
                         f'Invalid evaluation method: {method!r}.'
                     )
 
-def get_model_predictions_and_test_loss(
+def get_model_predictions(
     model: nn.Module,
-    x_test: torch.Tensor,
-    y_test: torch.Tensor,
+    x_test: torch.Tensor | np.ndarray,
     resolved_device: torch.device,
-    loss: str = 'mse',
-) -> tuple[np.ndarray, float]:
+) -> np.ndarray:
+    if isinstance(x_test) is not torch.Tensor:
+        x_test = torch.from_numpy(x_test)
+    
     model.eval()
 
     with torch.inference_mode():
         predictions = model(
             x_test.to(resolved_device)
         )
-        test_loss = _build_loss(loss)(
-            predictions,
-            y_test.to(resolved_device)
-        )
 
-    return predictions.cpu().numpy(), float(test_loss.item())
+    return predictions.cpu().numpy()
 
 def get_model_scores(
     predictions:  np.ndarray,
     y_test: np.ndarray,
-    metrics: list[MetricName]
+    metrics: frozenset[MetricName]
 ) -> dict[str, float]:
-    pass
+    scores = {}
+    for metric in metrics:
+        match(metric):
+            case MetricName.RMSE:
+                scores[metric.value] = root_mean_squared_error(y_test, predictions)
 
-def _build_loss(loss: str) -> nn.Module:
-    losses: dict[str, type[nn.Module]] = {
-        'mse': nn.MSELoss,
-        'mae': nn.L1Loss,
-    }
+            case MetricName.MSE:
+                scores[metric.value] = mean_squared_error(y_test, predictions)
 
-    try:
-        loss_type = losses[loss]
+            case MetricName.MAE:
+                scores[metric.value] = mean_absolute_error(y_test, predictions)
 
-    except KeyError:
-        raise ValueError(
-            f'Unsupported loss: {loss!r}.'
-            f'Expected one of {sorted(losses)}.'
-        ) from None
-    
-    return loss_type()
+            case MetricName.R2:
+                scores[metric.value] = r2_score(y_test, predictions)
+
+            case _:
+                raise ValueError(
+                    f'metrics contains unknown metric: {metric!r}.'
+                )
+            
+    return scores
