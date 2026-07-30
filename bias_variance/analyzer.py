@@ -5,10 +5,17 @@ from enum import StrEnum
 
 import numpy as np
 import pandas as pd
+import torch
 from sklearn.model_selection import train_test_split
 
 from bias_variance.generators.base import Generator
-from bias_variance.models.evaluation import EvaluationMethod, Evaluator, MetricName
+from bias_variance.models.evaluation import (
+    EvaluationMethod,
+    Evaluator,
+    MetricName,
+    get_model_predictions,
+    get_model_scores,
+)
 from bias_variance.models.fnn import FnnArchitecture
 from bias_variance.models.training import Trainer, TrainingConfig
 
@@ -28,7 +35,7 @@ class RunRecord:
     test_metrics: tuple[str, ...]
     optimizer: str
     learning_rate: float
-    train_loss: str
+    loss: str
     epochs: int
     batch_size: int
     device: str
@@ -65,8 +72,7 @@ class ModelRecord:
     model_id: str
     group_id: str
     architecture: tuple[int, ...]
-    scores: Mapping[str, float]
-    test_loss: str
+    test_scores: Mapping[str, float]
     x_train: tuple[float, ...]
     y_train: tuple[float, ...]
     x_test: tuple[float, ...]
@@ -124,6 +130,8 @@ class BiasAnalyzer:
         evaluation_method: EvaluationMethod,
         n_iter: int,
         test_size: float,
+        test_metrics: frozenset[MetricName],
+        resolved_device: torch.device,
         random_state: int | None,
         baseline: StudyBaseline,
         trainer: Trainer,
@@ -163,7 +171,7 @@ class BiasAnalyzer:
                             group_id=group_ids[j],
                             architecture=variation.generated.hidden_layers,
                             scores=scores,
-                            test_loss='',
+                            loss='',
                             x_train=baseline.split.x_train,
                             y_train=baseline.split.y_train,
                             x_test=baseline.split.x_test,
@@ -186,8 +194,7 @@ class BiasAnalyzer:
                             model_id=model_id,
                             group_id=group_ids[j],
                             architecture=baseline.architecture.hidden_layers,
-                            scores=scores,
-                            test_loss='',
+                            test_scores=scores,
                             x_train=variation.generated[baseline.inputs.columns],
                             y_train=variation.generated[baseline.outputs.columns],
                             x_test=baseline.split.x_test,
@@ -210,15 +217,22 @@ class BiasAnalyzer:
                             y_train=y_train,
                             random_state=random_state + j
                         )
-                        predictions = trainer.predict(trained_model, x_test)
-                        scores = {}
+                        predictions = get_model_predictions(
+                            model=trained_model,
+                            x_test=np.array(x_test, dtype=np.float32),
+                            resolved_device=resolved_device,
+                        )
+                        scores = get_model_scores(
+                            predictions=predictions,
+                            y_test=np.array(y_test, dtype=np.float32),
+                            metrics=test_metrics,
+                        )
                         model_id = ''
                         model_record = ModelRecord(
                             model_id=model_id,
                             group_id=group_ids[j],
                             architecture=variation.generated.hidden_layers,
-                            scores=scores,
-                            test_loss='',
+                            test_scores=scores,
                             x_train=x_train,
                             y_train=y_train,
                             x_test=x_test,
@@ -247,8 +261,7 @@ class BiasAnalyzer:
                             model_id=model_id,
                             group_id=group_ids[j],
                             architecture=baseline.architecture.hidden_layers,
-                            scores=scores,
-                            test_loss='',
+                            test_scores=scores,
                             x_train=x_train,
                             y_train=y_train,
                             x_test=x_test,
@@ -279,6 +292,8 @@ class BiasAnalyzer:
                     evaluation_method,
                     study_config.n_iter,
                     study_config.test_size,
+                    study_config.test_metrics,
+                    training_config.resolved_device,
                     study_config.random_state,
                     study_config.baseline,
                     trainer
