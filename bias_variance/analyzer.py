@@ -119,7 +119,7 @@ class BiasAnalyzer:
         result_store,
     ):
         self.result_store = result_store
-        self.recent_run_id = ''
+        self.recent_run_id = result_store.get_recent_run()
 
     def _build_generator(
         self,
