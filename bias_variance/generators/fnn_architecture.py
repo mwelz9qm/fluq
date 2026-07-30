@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from numbers import Real
 
 import numpy as np
 
@@ -10,14 +11,21 @@ from .base import Generator, Variation
 
 class ArchitectureName(StrEnum):
     '''
-    Supported architectures in config.
+    Architectures supported in the configuration.
 
-    Attributes:
-        WIDE: Short and wide - many neurons but few layers.
-        NARROW: Tall and narrow - many layers but few neurons.
-        TAPER: Narrow to wide - starts with few neurons and grows to many.
-        REVERSE_TAPER: Wide to narrow - starts with many neurons and shrinks to few.
-        COMBINED_TAPER: Narrow to wide then returns to narrow - starts with few neurons, grows to many neurons, then returns back to few.
+    Attributes
+    ------------
+        WIDE
+            Short and wide: many neurons but few layers.
+        NARROW
+            Tall and narrow: many layers but few neurons.
+        TAPER
+            Narrow to wide: starts with few neurons and grows to many.
+        REVERSE_TAPER
+            Wide to narrow: starts with many neurons and shrinks to few.
+        COMBINED_TAPER
+            Narrow to wide and then back to narrow: starts with few neurons,
+            grows to many, and then returns to few.
     '''
 
     WIDE = 'wide'
@@ -30,31 +38,170 @@ class ArchitectureName(StrEnum):
 @dataclass(frozen=True, slots=True)
 class FnnRandomArchitectureConfig:
     '''
-    Represents the FNN architecture generator's ranges for randomly selecting sizes per layer.
+    Represents the ranges used by the FNN architecture generator to randomly
+    select layer sizes.
 
-    Attributes:
-        layer_range: The range of layers.
-        size_range: The range of neurons per layer.
+    All ranges are half-open: the lower bound is inclusive, and the upper bound
+    is exclusive.
+
+    Each range must be a two-item tuple of integers with
+    ``1 <= lower < upper``. Boolean bounds are not accepted. A range may be
+    ``None`` so that ``FnnArchitectureConfig`` can supply its default.
+
+    Attributes
+    ------------
+        layer_range: tuple[int, int] | None, default = None
+            The range of layers.
+        size_range: tuple[int, int] | None, default = None
+            The range of neurons per layer.
     '''
     layer_range: tuple[int, int] | None = None
     size_range: tuple[int, int] | None = None
+
+    def __post_init__(self) -> None:
+        '''
+        Validate the types, lengths, bounds, and ordering of both ranges.
+        '''
+        self._validate_integer_range('layer_range', self.layer_range)
+        self._validate_integer_range('size_range', self.size_range)
+
+    @staticmethod
+    def _validate_integer_range(
+        name: str,
+        value: tuple[int, int] | None,
+    ) -> None:
+        '''
+        Validate an optional two-item integer range.
+
+        The lower bound must be at least 1 and strictly less than the upper
+        bound. Boolean bounds are rejected even though ``bool`` is a subclass
+        of ``int``.
+        '''
+        if value is None:
+            return
+
+        if not isinstance(value, tuple):
+            raise TypeError(f'{name} must be a tuple or None.')
+
+        if len(value) != 2:
+            raise ValueError(f'{name} must contain exactly two bounds.')
+
+        if any(
+            not isinstance(bound, int) or isinstance(bound, bool)
+            for bound in value
+        ):
+            raise TypeError(f'{name} bounds must be integers.')
+
+        lower, upper = value
+        if lower < 1:
+            raise ValueError(f'{name} lower bound must be at least 1.')
+
+        if lower >= upper:
+            raise ValueError(
+                f'{name} lower bound must be less than its upper bound.'
+            )
 
 
 @dataclass(frozen=True, slots=True)
 class FnnTaperArchitectureConfig:
     '''
-    Represents the FNN architecture generator's ranges for randomly selecting sizes per layer.
+    Represents the ranges used by the FNN architecture generator to randomly
+    select layer sizes.
+
+    All ranges are half-open: the lower bound is inclusive, and the upper bound
+    is exclusive. The reverse-taper rate range is the exception: its lower bound
+    is exclusive, and its upper bound is inclusive. ``max_size`` is not a range
+    bound; it is an inclusive limit.
+
+    ``layer_range`` and ``start_size_range`` follow the integer-range validation
+    rules in ``FnnRandomArchitectureConfig``. ``taper_rate_range`` must contain
+    exactly two numeric, non-boolean bounds satisfying
+    ``0 < lower < upper < 1``. ``max_size`` must be a positive, non-boolean
+    integer at least as large as the upper bounds of ``layer_range`` and
+    ``start_size_range``, when those ranges are provided. Any attribute may be
+    ``None`` so that ``FnnArchitectureConfig`` can supply its default.
     
-    Attributes:
-        layer_range: The range of layers.
-        start_size_range: The range of starting layer sizes.
-        taper_rate_range: The range of size increase or decrease rates spanning from the starting and ending layers.
-        max_size: The maximum neurons for all layers.
+    Attributes
+    -----------
+        layer_range: tuple[int, int] | None, default = None
+            The range of layers.
+        start_size_range: tuple[int, int] | None, default = None
+            The range of starting layer sizes.
+        taper_rate_range: tuple[float, float] | None, default = None
+            The range of rates at which layer sizes increase or decrease between
+            the starting and ending layers.
+        max_size: int | None, default = None
+            The maximum number of neurons in any layer.
     '''
     layer_range: tuple[int, int] | None = None
     start_size_range: tuple[int, int] | None = None
     taper_rate_range: tuple[float, float] | None = None
     max_size: int | None = None
+
+    def __post_init__(self) -> None:
+        '''
+        Validate all taper configuration types, bounds, and relationships.
+        '''
+        FnnRandomArchitectureConfig._validate_integer_range(
+            'layer_range',
+            self.layer_range,
+        )
+        FnnRandomArchitectureConfig._validate_integer_range(
+            'start_size_range',
+            self.start_size_range,
+        )
+        self._validate_taper_rate_range()
+        self._validate_max_size()
+
+    def _validate_taper_rate_range(self) -> None:
+        '''
+        Validate that the optional taper-rate bounds lie strictly between 0 and 1.
+        '''
+        value = self.taper_rate_range
+        if value is None:
+            return
+
+        if not isinstance(value, tuple):
+            raise TypeError('taper_rate_range must be a tuple or None.')
+
+        if len(value) != 2:
+            raise ValueError(
+                'taper_rate_range must contain exactly two bounds.'
+            )
+
+        if any(
+            not isinstance(bound, Real) or isinstance(bound, bool)
+            for bound in value
+        ):
+            raise TypeError('taper_rate_range bounds must be numeric.')
+
+        lower, upper = value
+        if not 0 < lower < upper < 1:
+            raise ValueError(
+                'taper_rate_range bounds must satisfy 0 < lower < upper < 1.'
+            )
+
+    def _validate_max_size(self) -> None:
+        '''
+        Validate the type, minimum, and required range coverage of ``max_size``.
+        '''
+        if self.max_size is None:
+            return
+
+        if not isinstance(self.max_size, int) or isinstance(self.max_size, bool):
+            raise TypeError('max_size must be an integer or None.')
+
+        if self.max_size < 1:
+            raise ValueError('max_size must be at least 1.')
+
+        for name, value in (
+            ('layer_range', self.layer_range),
+            ('start_size_range', self.start_size_range),
+        ):
+            if value is not None and self.max_size < value[1]:
+                raise ValueError(
+                    f'max_size must be at least the upper bound of {name}.'
+                )
 
 
 DEFAULT_RANDOM_CONFIG = {
@@ -93,30 +240,71 @@ DEFAULT_TAPER_CONFIG = {
 @dataclass(frozen=True, slots=True)
 class FnnArchitectureConfig:
     '''
-    Represents the FNN architecture generator's full configurations.
+    Represents the complete configuration for the FNN architecture generator.
 
-    Attributes:
-        range_architectures: A dictionary of selected random range architectures and their configurations.
-        taper_architectures: A dictionary of selected taper range architectures and their configurations.
+    All ranges in the contained configurations are half-open: the lower bound is
+    inclusive, and the upper bound is exclusive. The reverse-taper rate range
+    instead excludes its lower bound and includes its upper bound.
+
+    Both architecture collections must be mappings with ``ArchitectureName``
+    keys and configuration values of the appropriate type. Random architectures
+    support only ``WIDE`` and ``NARROW``; taper architectures support only
+    ``TAPER``, ``REVERSE_TAPER``, and ``COMBINED_TAPER``.
+
+    When both ``WIDE`` and ``NARROW`` are configured, their corresponding ranges
+    must be disjoint. The WIDE layer range must be below the NARROW layer range,
+    while the NARROW size range must be below the WIDE size range. Because these
+    ranges are half-open, adjacent ranges are valid.
+
+    Attributes
+    -------------
+        range_architectures: Mapping[ArchitectureName, FnnRandomArchitectureConfig], default = dict()
+            A dictionary of selected random range architectures and their configurations.
+        taper_architectures: Mapping[ArchitectureName, FnnTaperArchitectureConfig], default = dict()
+            A dictionary of selected taper range architectures and their configurations.
     '''
     range_architectures: Mapping[ArchitectureName, FnnRandomArchitectureConfig] = field(default_factory=dict)
     taper_architectures: Mapping[ArchitectureName, FnnTaperArchitectureConfig] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         '''
-        Handles configuration normalizations. Will provide defaults if user selects
-        None for any attribute in FnnRandomArchitectureConfig or FnnTaperArchitectureConfig.
-        Default configurations are selected if provided an empty dictionary for FnnArchitectureConfig
-        attributes.
+        Normalize the configuration.
+
+        All normalized ranges remain half-open: the lower bound is inclusive,
+        and the upper bound is exclusive. The reverse-taper rate range instead
+        excludes its lower bound and includes its upper bound.
+
+        Defaults are provided when the user selects ``None`` for any attribute
+        in ``FnnRandomArchitectureConfig`` or ``FnnTaperArchitectureConfig``.
+        An empty architecture mapping remains empty.
+
+        Both fields must be mappings whose keys are supported
+        ``ArchitectureName`` members and whose values use the corresponding
+        configuration type. When WIDE and NARROW are both present, their layer
+        and size ranges are validated for the required ordering and separation.
         '''
+        self._validate_architecture_mapping(
+            'range_architectures',
+            self.range_architectures,
+            frozenset((ArchitectureName.WIDE, ArchitectureName.NARROW)),
+            FnnRandomArchitectureConfig,
+        )
+        self._validate_architecture_mapping(
+            'taper_architectures',
+            self.taper_architectures,
+            frozenset((
+                ArchitectureName.TAPER,
+                ArchitectureName.REVERSE_TAPER,
+                ArchitectureName.COMBINED_TAPER,
+            )),
+            FnnTaperArchitectureConfig,
+        )
+
         normalized_range_config = {}
         for name, architecture in self.range_architectures.items():
             layer_range = architecture.layer_range or DEFAULT_RANDOM_CONFIG[name].layer_range
             size_range = architecture.size_range or DEFAULT_RANDOM_CONFIG[name].size_range
             normalized_range_config[name] = FnnRandomArchitectureConfig(layer_range, size_range)
-
-        if normalized_range_config is None:
-            normalized_range_config = DEFAULT_RANDOM_CONFIG
 
         normalized_taper_config = {}
         for name, architecture in self.taper_architectures.items():
@@ -126,21 +314,110 @@ class FnnArchitectureConfig:
             max_size = architecture.max_size or DEFAULT_TAPER_CONFIG[name].max_size
             normalized_taper_config[name] = FnnTaperArchitectureConfig(layer_range, start_size_range, taper_rate_range, max_size)
 
-        if normalized_taper_config is None:
-            normalized_taper_config = DEFAULT_TAPER_CONFIG
+        self._validate_random_architecture_relationships(
+            normalized_range_config
+        )
 
         object.__setattr__(self, 'range_architectures', normalized_range_config)
         object.__setattr__(self, 'taper_architectures', normalized_taper_config)
+
+    @staticmethod
+    def _validate_architecture_mapping(
+        name: str,
+        value: Mapping,
+        supported_names: frozenset[ArchitectureName],
+        config_type: type,
+    ) -> None:
+        '''
+        Validate a configuration mapping's type, keys, names, and value types.
+        '''
+        if not isinstance(value, Mapping):
+            raise TypeError(f'{name} must be a mapping.')
+
+        for architecture_name, config in value.items():
+            if not isinstance(architecture_name, ArchitectureName):
+                raise TypeError(
+                    f'{name} keys must be ArchitectureName members.'
+                )
+
+            if architecture_name not in supported_names:
+                raise ValueError(
+                    f'{architecture_name.value!r} is not supported in {name}.'
+                )
+
+            if not isinstance(config, config_type):
+                raise TypeError(
+                    f'{name}[{architecture_name.value!r}] must be a '
+                    f'{config_type.__name__}.'
+                )
+
+    @staticmethod
+    def _validate_random_architecture_relationships(
+        configurations: Mapping[
+            ArchitectureName,
+            FnnRandomArchitectureConfig,
+        ],
+    ) -> None:
+        '''
+        Validate the ordering and separation of WIDE and NARROW ranges.
+
+        WIDE must have the lower layer range, and NARROW must have the lower
+        neuron-size range. Adjacent half-open ranges are considered disjoint.
+        '''
+        if not {
+            ArchitectureName.WIDE,
+            ArchitectureName.NARROW,
+        }.issubset(configurations):
+            return
+
+        wide = configurations[ArchitectureName.WIDE]
+        narrow = configurations[ArchitectureName.NARROW]
+
+        if wide.layer_range[1] > narrow.layer_range[0]:
+            raise ValueError(
+                'WIDE and NARROW layer_range values must be disjoint, with '
+                'WIDE below NARROW.'
+            )
+
+        if narrow.size_range[1] > wide.size_range[0]:
+            raise ValueError(
+                'WIDE and NARROW size_range values must be disjoint, with '
+                'NARROW below WIDE.'
+            )
 
 
 @dataclass(frozen=True, slots=True)
 class FnnArchitectureVariation(Variation[FnnArchitecture]):
     '''
-    Represents the generated variation returned by FnnArchitectureGenerator.
+    Represents a generated variation returned by ``FnnArchitectureGenerator``.
+
+    ``label`` must be a nonempty string, ``random_state`` must be a non-boolean
+    integer or ``None``, and ``generated`` must be an ``FnnArchitecture``.
     
-    Attributes:
-        architecture: The generated architecture.
+    Attributes
+    ------------
+        architecture: FnnArchitecture
+            The generated architecture.
     '''
+    def __post_init__(self) -> None:
+        '''
+        Validate the inherited label, random state, and generated architecture.
+        '''
+        if not isinstance(self.label, str):
+            raise TypeError('label must be a string.')
+
+        if not self.label:
+            raise ValueError('label must not be empty.')
+
+        if (
+            not isinstance(self.random_state, int)
+            or isinstance(self.random_state, bool)
+        ) and self.random_state is not None:
+            raise TypeError('random_state must be an integer or None.')
+
+        if not isinstance(self.generated, FnnArchitecture):
+            raise TypeError('generated must be an FnnArchitecture.')
+
     @property
     def architecture(self) -> FnnArchitecture:
         """The generated architecture (kept as a compatibility alias)."""
@@ -149,7 +426,11 @@ class FnnArchitectureVariation(Variation[FnnArchitecture]):
 
 class FnnArchitectureGenerator(Generator[FnnArchitecture]):
     '''
-    Generates FNN architectures that describe a model's hidden layer structure.
+    Generate FNN architectures that describe a model's hidden-layer structure.
+
+    All configured ranges are half-open: the lower bound is inclusive, and the
+    upper bound is exclusive. The reverse-taper rate range instead excludes its
+    lower bound and includes its upper bound.
 
     Attributes
     --------------
@@ -168,14 +449,18 @@ class FnnArchitectureGenerator(Generator[FnnArchitecture]):
         rng: np.random.Generator,
     ) -> FnnArchitecture:
         '''
-        Generates hidden layer sizes based on ranges for the number of layers and neurons.
+        Generate hidden-layer sizes from ranges for the numbers of layers and
+        neurons.
+
+        Both ``layer_range`` and ``size_range`` are half-open: the lower bound
+        is inclusive, and the upper bound is exclusive.
 
         Parameters
         -----------
         config: FnnRandomArchitectureConfig
-            The wide or narrow architecture's ranges.
+            The ranges for a wide or narrow architecture.
         rng: np.random.Generator
-            The random seed for reproducibility.
+            The random number generator used for reproducibility.
         
         Returns
         --------
@@ -204,21 +489,31 @@ class FnnArchitectureGenerator(Generator[FnnArchitecture]):
         rng: np.random.Generator,
     ) -> FnnArchitecture:
         '''
-        Generates hidden layer sizes based on ranges for the number of layers, number of neurons
-        for the first layer, and selection of taper rates, and maximum neurons for all layers.
+        Generate hidden-layer sizes from ranges for the number of layers, the
+        number of neurons in the first layer, and the taper rate, subject to a
+        maximum number of neurons per layer.
 
-        The method uses the taper_type to build the correct taper architecture. The rng object is
-        used to set the random seed when selecting the number of layers (n_layers), the starting
-        layer size (start_size), and size increase or decrease rate (size_rate).
+        ``layer_range``, ``start_size_range``, and ``taper_rate_range`` are
+        half-open: the lower bound is inclusive, and the upper bound is
+        exclusive. For a reverse taper, ``taper_rate_range`` instead excludes
+        its lower bound and includes its upper bound: ``(lower, upper]``.
+        ``max_size`` is an inclusive limit.
+
+        The method uses ``taper_type`` to build the appropriate taper
+        architecture. The ``rng`` object is used to select the number of layers
+        (``n_layers``), starting layer size (``start_size``), and rate of size
+        increase or decrease (``size_rate``).
         
         Parameters
         -----------
-        config: FnnRandomArchitectureConfig
-            The taper, reverse taper, or combined taper architecture's ranges and maximum.
+        config: FnnTaperArchitectureConfig
+            The ranges and maximum for a taper, reverse-taper, or combined-taper
+            architecture.
         taper_type: ArchitectureName
-            The name of the architecture type i.e., 'taper', 'reverse_taper', or 'combined_taper'.
+            The architecture type, such as ``'taper'``, ``'reverse_taper'``, or
+            ``'combined_taper'``.
         rng: np.random.Generator
-            The random seed for reproducibility.
+            The random number generator used for reproducibility.
         
         Returns
         --------
@@ -269,16 +564,23 @@ class FnnArchitectureGenerator(Generator[FnnArchitecture]):
         random_state: int | None = None,
     ) -> list[Variation[FnnArchitecture]]:
         '''
-        Generates an FNN architecture.
+        Generate FNN architectures.
 
-        This method iterates through two main groups of architecture types: Random and Taper. Each group generates
-        an architecture with either random layers and sizes per layer, or random layers, starting layer size and
-        size increase or decrease rate per layer with a set maximum layer size.  
+        This method iterates through two groups of architecture types: random and
+        taper. Each group generates an architecture with either a random number
+        of layers and neurons per layer, or a random number of layers, a starting
+        layer size, and a rate of size increase or decrease, subject to a maximum
+        layer size.
+
+        All ranges used during generation are half-open: the lower bound is
+        inclusive, and the upper bound is exclusive. The reverse-taper rate
+        range instead excludes its lower bound and includes its upper bound:
+        ``(lower, upper]``.
 
         Parameters
         ------------
         random_state: int | None, default = None
-            An integer to set a random seed if provided.
+            An integer used to set the random seed, if provided.
         
         Returns
         ----------
