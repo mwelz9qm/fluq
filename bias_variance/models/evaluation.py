@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import StrEnum
 
 import numpy as np
@@ -32,6 +34,17 @@ class EvaluationMethod(StrEnum):
     POINTWISE = 'pointwise'
 
 
+@dataclass(frozen=True, slots=True)
+class GroupUpdateData:
+    group_id: str
+    bias: float
+    variance: float
+
+    @property
+    def data_row(self) -> tuple[str, float, float]:
+        return (self.group_id, self.bias, self.variance)
+
+
 class Evaluator:
     '''
     Evaluates the run data across all models under a variation and study.
@@ -55,7 +68,7 @@ class Evaluator:
     ):
         self.result_store = result_store
 
-    def _calculate_averaging(self, run_id: str) -> None:
+    def _calculate_averaging(self, group_id: str) -> GroupUpdateData:
         '''
         Calculates the strategy bias and variance with the averaging method.
         - Bias: For a variation group in a study, the mean of predictions
@@ -78,38 +91,34 @@ class Evaluator:
 
         Returns
         ------------
-        None
+        GroupUpdateData
         '''
-        variation_groups = self.result_store.get_variation_groups(run_id)
-        for group_id in variation_groups:
-            models = self.result_store.get_models(group_id)
-            if models is None:
-                f'No found models from group_id: {group_id}.' # NOTE: Validation could happen in ResultStore implementation?
+        models = self.result_store.get_models(group_id)
+        
+        variances = []
+        squared_errors = []
+        for model_id in models:
+            predictions = self.result_store.get_predictions_by_model(model_id)
+            model_variance = np.var(predictions)
+            model_mean = np.mean(predictions)
+        
+            actuals = self.result_store.get_actuals(model_id)
+            sample_mean  = np.mean(actuals)
+            model_squared_error = (model_mean - sample_mean) ** 2.0
+        
+            variances.append(model_variance)
+            squared_errors.append(model_squared_error)
+        
+        strategy_variance = np.mean(variances)
+        strategy_bias = np.mean(squared_errors)
 
-            variances = []
-            squared_errors = []
-            for model_id in models:
-                predictions = self.result_store.get_predictions_by_model(model_id)
-                model_variance = np.var(predictions)
-                model_mean = np.mean(predictions)
+        return GroupUpdateData(
+            group_id,
+            strategy_bias,
+            strategy_variance
+        )
 
-                actuals = self.result_store.get_actuals(model_id)
-                sample_mean  = np.mean(actuals)
-                model_squared_error = (model_mean - sample_mean) ** 2.0
-
-                variances.append(model_variance)
-                squared_errors.append(model_squared_error)
-
-            strategy_variance = np.mean(variances)
-            strategy_bias = np.mean(squared_errors)
-
-            self.result_store.update_group(
-                group_id,
-                strategy_bias,
-                strategy_variance
-            )
-
-    def _calculate_pointwise(self, run_id: str) -> None:
+    def _calculate_pointwise(self, group_id: str) -> GroupUpdateData:
         '''
         Calculates the strategy bias and variance with the pointwise method.
         - Bias: For a variation group in a study, each group has a shared set
@@ -131,44 +140,50 @@ class Evaluator:
         
         Returns
         ------------
-        None
+        GroupUpdateData
         '''
-        variation_groups = self.result_store.get_variation_groups(run_id)
-        for group_id in variation_groups:
-            y_test = self.result_store.get_y_test(group_id)
-            if y_test is None:
+        tests = self.result_store.get_tests(group_id)
+        
+        variances = []
+        squared_errors = []
+        for test_id in tests:
+            predictions = self.result_store.get_predictions_by_test(test_id)
+            point_variance = np.var(predictions)
+            point_mean = np.mean(predictions)
+        
+            test_point = self.result_store.get_actual(test_id)
+            point_squared_error = (point_mean - test_point) ** 2
+        
+            variances.append(point_variance)
+            squared_errors.append(point_squared_error)
+        
+        strategy_variance = np.mean(variances)
+        strategy_bias = np.mean(squared_errors)
+
+        return GroupUpdateData(
+            group_id,
+            strategy_bias,
+            strategy_variance
+        )
+
+    def _evaluate_strategy_bias_and_variance(self, group_id: str) -> GroupUpdateData:
+        method = self.result_store.get_method(group_id)
+        match method:
+            case EvaluationMethod.AVERAGING.value:
+                results = self._calculate_averaging(group_id)
+            case EvaluationMethod.POINTWISE.value:
+                results = self._calculate_pointwise(group_id)
+            case _:
                 raise ValueError(
-                    f'No shared y_test from group_id: {group_id}.'
+                    f'Unknown method: {method!r}.'
                 )
 
-            variances = []
-            squared_errors = []
-            for actual_id in y_test:
-                predictions = self.result_store.get_predictions_by_actual(actual_id)
-                point_variance = np.var(predictions)
-                point_mean = np.mean(predictions)
-
-                test_point = self.result_store.get_actual(actual_id)
-                point_squared_error = (point_mean - test_point) ** 2
-
-                variances.append(point_variance)
-                squared_errors.append(point_squared_error)
-
-            strategy_variance = np.mean(variances)
-            strategy_bias = np.mean(squared_errors)
-
-            self.result_store.update_group(
-                group_id,
-                strategy_bias,
-                strategy_variance
-            )
-
+        return results
 
     def evaluate(
         self,
-        methods: frozenset[EvaluationMethod],
         run_id: str,
-    ) -> None:
+    ) -> Mapping[str, tuple[GroupUpdateData]]:
         '''
         Evaluates the biases and variances for all variation groups in a study.
         There are two types of bias and variance pairs:
@@ -187,20 +202,23 @@ class Evaluator:
         
         Returns
         ------------
-        None
+        Mapping[str, tuple[GroupUpdateData]]
         '''
-        for method in methods:
-            match(method):
-                case EvaluationMethod.AVERAGING:
-                    self._calculate_averaging(run_id)
+        studies = self.result_store.get_studies(run_id)
+        post_evaluation_results = {}
+        for study_id in studies:
+            groups = self.result_store.get_groups(study_id)
+            group_results: list[GroupUpdateData] = []
+            for group_id in groups:
+                group_update = self._evaluate_strategy_bias_and_variance(group_id)
+                group_results.append(group_update)
 
-                case EvaluationMethod.POINTWISE:
-                    self._calculate_pointwise(run_id)
+            post_evaluation_results[study_id] = tuple(group_results)
 
-                case _:
-                    raise ValueError(
-                        f'Invalid evaluation method: {method!r}.'
-                    )
+        return post_evaluation_results
+
+
+########## HELPER FUNCTIONS ##########
 
 def get_model_predictions(
     model: nn.Module,
