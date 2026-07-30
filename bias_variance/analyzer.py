@@ -8,6 +8,9 @@ import torch
 from sklearn.model_selection import train_test_split
 
 from bias_variance.generators.base import Generator
+from bias_variance.generators.fnn_architecture import FnnArchitectureGenerator
+from bias_variance.generators.noise import NoiseGenerator
+from bias_variance.generators.sampling import SamplingGenerator
 from bias_variance.models.evaluation import (
     EvaluationMethod,
     Evaluator,
@@ -44,6 +47,18 @@ class DatasetSplit:
     ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         return (self.x_train, self.x_test, self.y_train, self.y_test)
 
+    @property
+    def train_set(
+        self,
+    ) -> pd.DataFrame:
+        return pd.concat([self.x_train, self.y_train])
+
+    @property
+    def test_set(
+        self,
+    ) -> pd.DataFrame:
+        return pd.concat([self.x_test, self.y_test])
+
 
 @dataclass(frozen=True, slots=True)
 class StudyBaseline:
@@ -51,6 +66,12 @@ class StudyBaseline:
     outputs: pd.DataFrame
     split: DatasetSplit
     architecture: FnnArchitecture
+
+    @property
+    def dataset(
+        self,
+    ) -> pd.DataFrame:
+        return pd.concat([self.inputs, self.outputs])
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,10 +97,38 @@ class BiasAnalyzer:
         self,
         study_name: StudyName,
         evaluation_method: EvaluationMethod,
-        test_size: float,
-        baseline: StudyBaseline,
+        base_train_set: pd.DataFrame,
+        base_dataset: pd.DataFrame,
     ) -> Generator[FnnArchitecture] | Generator[pd.DataFrame]:
-        pass
+        study = (study_name, evaluation_method)
+        match study:
+            case (StudyName.MODEL, _):
+                return FnnArchitectureGenerator()
+
+            case (StudyName.SAMPLING, EvaluationMethod.POINTWISE):
+                return SamplingGenerator(
+                    dataset=base_train_set,
+                )
+
+            case (StudyName.SAMPLING, EvaluationMethod.AVERAGING):
+                return SamplingGenerator(
+                    dataset=base_dataset,
+                )
+
+            case (StudyName.DATA, EvaluationMethod.POINTWISE):
+                return NoiseGenerator(
+                    dataset=base_train_set,
+                )
+
+            case (StudyName.DATA, EvaluationMethod.AVERAGING):
+                return NoiseGenerator(
+                    dataset=base_dataset,
+                )
+
+            case _:
+                raise ValueError(
+                    f'Unknown study: {study!r}.'
+                )
 
     def _build_model_record(
         self,
@@ -141,7 +190,12 @@ class BiasAnalyzer:
         trainer: Trainer,
     ) -> None:
         for i in np.arange(n_iter):
-            generator = self._build_generator(study_name, evaluation_method, test_size, baseline)
+            generator = self._build_generator(
+                study_name,
+                evaluation_method,
+                baseline.split.train_set,
+                baseline.dataset,
+            )
             variations = generator.generate(random_state=random_state)
             group_ids = set()
             for j, variation in enumerate(variations):
