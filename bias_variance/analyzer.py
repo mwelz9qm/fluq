@@ -345,5 +345,23 @@ class BiasAnalyzer:
         
         evaluator = Evaluator(self.result_store)
         results = evaluator.evaluate(run_id)
+        for study_id, data in results.items():
+            for group_id, bias, variance in data.data_row:
+                self.result_store.update(run_id, study_id, group_id, bias, variance)
+
+        results = pd.DataFrame.from_records(
+            (
+                (study_name, evaluation_method, group_name, bias, variance)
+                for (study_name, evaluation_method), data in results.items()
+                for group_name, bias, variance in data.data_row
+            ),
+            columns=(
+                'study_name',
+                'evaluation_method',
+                'group_name',
+                'bias',
+                'variance',
+            ),
+        )
 
         return results
