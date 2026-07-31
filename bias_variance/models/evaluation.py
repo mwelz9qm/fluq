@@ -225,17 +225,10 @@ def get_model_predictions(
     x_test: torch.Tensor | np.ndarray,
     resolved_device: torch.device,
 ) -> np.ndarray:
-    if isinstance(x_test) is not torch.Tensor:
+    if not isinstance(x_test, torch.Tensor):
         x_test = torch.from_numpy(x_test)
-    
+
     model.eval()
-
-    with torch.inference_mode():
-        predictions = model(
-            x_test.to(resolved_device)
-        )
-
-    return predictions.cpu().numpy()
 
 def get_model_scores(
     predictions:  np.ndarray,

@@ -7,9 +7,21 @@ the user does not provide one directly.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from bias_variance.models.training import TrainingConfig
+import numpy as np
+import optuna
+import torch
 
+from bias_variance.models.evaluation import (
+    MetricName,
+    get_model_predictions,
+    get_model_scores,
+)
+from bias_variance.models.training import Trainer, TrainingConfig
+
+if TYPE_CHECKING:
+    from bias_variance.analyzer import RunBaseline
 
 @dataclass(frozen=True, slots=True)
 class TunerConfig:
@@ -216,33 +228,146 @@ class Tuner:
         """
         self.config = config or TunerConfig()
 
-    def tune(self) -> TrainingConfig:
+    def tune(
+            self,
+            baseline: "RunBaseline",
+            test_metrics: frozenset[MetricName],
+            random_state: int | None = None,
+    ) -> TrainingConfig:
         """Run tuning and return the best TrainingConfig.
+
+        Parameters
+        ----------
+        baseline : RunBaseline
+            Baseline data and architecture used during tuning.
+        test_metrics : frozenset[MetricName]
+            Metrics used to score each tuning trial.
+        random_state : int | None, default = None
+            Random seed used during training, if provided.
 
         Returns
         -------
         TrainingConfig
             Training configuration created from the best tuning result.
         """
-        raise NotImplementedError
+        study = optuna.create_study(direction=self.config.direction)
+        study.optimize(
+            lambda trial: self._objective(
+                trial,
+                baseline,
+                test_metrics,
+                random_state,
+            ),
+            n_trials=self.config.n_trials,
+        )
 
-    def _objective(self, trial) -> float:
+        return self._build_training_config_from_params(study.best_params)
+
+    def _objective(
+            self,
+            trial,
+            baseline: "RunBaseline",
+            test_metrics: frozenset[MetricName],
+            random_state: int | None,
+    ) -> float:
         """Evaluate one tuning trial.
 
-        This method should eventually:
-        1. Build a candidate TrainingConfig from the trial.
-        2. Train a model using that candidate config.
-        3. Evaluate the model.
-        4. Return the selected score for Optuna.
+        This method builds one candidate TrainingConfig from the Optuna trial,
+        trains a model with the baseline architecture and baseline training
+        split, predicts on the baseline test inputs, scores those predictions
+        against the baseline test outputs, and returns the selected metric value
+        to Optuna.
 
-        The full implementation depends on the Trainer prediction/evaluation
-        workflow.
+        Parameters
+        ----------
+        trial
+            Optuna trial object containing suggested hyperparameter values.
+        baseline : RunBaseline
+            Baseline data split and architecture used for tuning.
+        test_metrics : frozenset[MetricName]
+            Metrics used to score the candidate model.
+        random_state : int | None
+            Random seed used during training, if provided.
+
+        Returns
+        -------
+        float
+            Score for the selected tuning metric.
         """
         candidate_config = self._build_training_config_from_trial(trial)
 
-        raise NotImplementedError(
-            "_objective() still needs trainer, data split, architecture, "
-            "prediction, and scoring workflow."
+        trainer = Trainer(candidate_config)
+        trainer.set_fnn_model_builder(
+            baseline.inputs.shape[1],
+            baseline.outputs.shape[1],
+        )
+
+        x_train = self._to_tensor(baseline.split.x_train)
+        y_train = self._to_tensor(baseline.split.y_train)
+        x_test = baseline.split.x_test.to_numpy(dtype=np.float32, copy=True)
+        y_test = baseline.split.y_test.to_numpy(dtype=np.float32, copy=True)
+
+        trained_model = trainer.train(
+            architecture=baseline.architecture,
+            x_train=x_train,
+            y_train=y_train,
+            random_state=random_state,
+        )
+
+        predictions = get_model_predictions(
+            model=trained_model,
+            x_test=x_test,
+            resolved_device=candidate_config.resolved_device,
+        )
+
+        scores = get_model_scores(
+            predictions=predictions,
+            y_test=y_test,
+            metrics=test_metrics,
+        )
+
+        return scores[self.config.metric]
+
+    @staticmethod
+    def _to_tensor(data) -> torch.Tensor:
+        """Convert tabular data into a float32 torch tensor.
+
+        Parameters
+        ----------
+        data
+            DataFrame or array-like object to convert.
+
+        Returns
+        -------
+        torch.Tensor
+            Float32 tensor created from the provided data.
+        """
+        return torch.from_numpy(
+            data.to_numpy(dtype=np.float32, copy=True)
+        )
+
+    def _build_training_config_from_params(
+        self,
+        params: dict[str, object],
+    ) -> TrainingConfig:
+        """Create a TrainingConfig from Optuna's best parameters.
+
+        Parameters
+        ----------
+        params : dict[str, object]
+            Best parameter values selected by Optuna.
+
+        Returns
+        -------
+        TrainingConfig
+            Training configuration built from the best parameter values.
+        """
+        return TrainingConfig(
+            optimizer=params["optimizer"],
+            learning_rate=params["learning_rate"],
+            loss=params["loss"],
+            epochs=params["epochs"],
+            batch_size=params["batch_size"],
         )
 
     def _build_training_config_from_trial(self, trial) -> TrainingConfig:
