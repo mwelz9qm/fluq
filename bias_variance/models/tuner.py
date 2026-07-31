@@ -34,7 +34,6 @@ class TunerConfig:
     batch_size_choices : tuple[int, ...]
         Batch size values that Optuna can choose from.
     """
-
     n_trials: int = 10
     direction: str = "minimize"
     metric: str = "rmse"
@@ -44,6 +43,153 @@ class TunerConfig:
     loss_choices: tuple[str, ...] = ("mse",)
     epoch_choices: tuple[int, ...] = (50, 100, 150)
     batch_size_choices: tuple[int, ...] = (8, 16, 32)
+
+    def __post_init__(self) -> None:
+        """Validate tuner configuration values."""
+        self._validate_n_trials()
+        self._validate_direction()
+        self._validate_metric()
+        self._validate_optimizer_choices()
+        self._validate_learning_rate_range()
+        self._validate_loss_choices()
+        self._validate_epoch_choices()
+        self._validate_batch_size_choices()
+
+    def _validate_n_trials(self) -> None:
+        """Validate that n_trials is a positive integer."""
+        if (
+                not isinstance(self.n_trials, int)
+                or isinstance(self.n_trials, bool)
+        ):
+            raise TypeError("n_trials must be an integer.")
+
+        if self.n_trials <= 0:
+            raise ValueError("n_trials must be greater than 0.")
+
+    def _validate_direction(self) -> None:
+        """Validate the Optuna optimization direction."""
+        if self.direction not in ("minimize", "maximize"):
+            raise ValueError(
+                "direction must be either 'minimize' or 'maximize'."
+            )
+
+    def _validate_metric(self) -> None:
+        """Validate the metric used to select the best trial."""
+        supported_metrics = {"rmse", "mse", "mae", "r2"}
+
+        if self.metric not in supported_metrics:
+            raise ValueError(
+                f"metric must be one of {sorted(supported_metrics)}."
+            )
+
+    def _validate_optimizer_choices(self) -> None:
+        """Validate optimizer choices."""
+        supported_optimizers = {"adam", "sgd"}
+
+        self._validate_string_choices(
+            "optimizer_choices",
+            self.optimizer_choices,
+            supported_optimizers,
+        )
+
+    def _validate_learning_rate_range(self) -> None:
+        """Validate the learning rate search range."""
+        if not isinstance(self.learning_rate_range, tuple):
+            raise TypeError("learning_rate_range must be a tuple.")
+
+        if len(self.learning_rate_range) != 2:
+            raise ValueError(
+                "learning_rate_range must contain exactly two bounds."
+            )
+
+        lower, upper = self.learning_rate_range
+
+        if (
+                not isinstance(lower, float)
+                or isinstance(lower, bool)
+                or not isinstance(upper, float)
+                or isinstance(upper, bool)
+        ):
+            raise TypeError("learning_rate_range bounds must be floats.")
+
+        if lower <= 0:
+            raise ValueError(
+                "learning_rate_range lower bound must be greater than 0."
+            )
+
+        if lower >= upper:
+            raise ValueError(
+                "learning_rate_range lower bound must be less than "
+                "its upper bound."
+            )
+
+    def _validate_loss_choices(self) -> None:
+        """Validate loss function choices."""
+        supported_losses = {"mse", "mae"}
+
+        self._validate_string_choices(
+            "loss_choices",
+            self.loss_choices,
+            supported_losses,
+        )
+
+    def _validate_epoch_choices(self) -> None:
+        """Validate epoch choices."""
+        self._validate_positive_integer_choices(
+            "epoch_choices",
+            self.epoch_choices,
+        )
+
+    def _validate_batch_size_choices(self) -> None:
+        """Validate batch size choices."""
+        self._validate_positive_integer_choices(
+            "batch_size_choices",
+            self.batch_size_choices,
+        )
+
+    @staticmethod
+    def _validate_string_choices(
+            name: str,
+            value: tuple[str, ...],
+            supported_values: set[str],
+    ) -> None:
+        """Validate a tuple of supported string choices."""
+        if not isinstance(value, tuple):
+            raise TypeError(f"{name} must be a tuple.")
+
+        if not value:
+            raise ValueError(f"{name} must not be empty.")
+
+        for choice in value:
+            if not isinstance(choice, str):
+                raise TypeError(f"{name} must contain only strings.")
+
+            if choice not in supported_values:
+                raise ValueError(
+                    f"{name} contains unsupported value {choice!r}. "
+                    f"Expected one of {sorted(supported_values)}."
+                )
+
+    @staticmethod
+    def _validate_positive_integer_choices(
+            name: str,
+            value: tuple[int, ...],
+    ) -> None:
+        """Validate a tuple of positive integer choices."""
+        if not isinstance(value, tuple):
+            raise TypeError(f"{name} must be a tuple.")
+
+        if not value:
+            raise ValueError(f"{name} must not be empty.")
+
+        for choice in value:
+            if not isinstance(choice, int) or isinstance(choice, bool):
+                raise TypeError(f"{name} must contain only integers.")
+
+            if choice <= 0:
+                raise ValueError(
+                    f"{name} must contain only positive integers."
+                )
 
 
 class Tuner:
