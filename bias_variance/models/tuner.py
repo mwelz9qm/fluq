@@ -68,6 +68,9 @@ class TunerConfig:
 
     def _validate_direction(self) -> None:
         """Validate the Optuna optimization direction."""
+        if not isinstance(self.direction, str):
+            raise TypeError("direction must be a string.")
+
         if self.direction not in ("minimize", "maximize"):
             raise ValueError(
                 "direction must be either 'minimize' or 'maximize'."
@@ -75,6 +78,9 @@ class TunerConfig:
 
     def _validate_metric(self) -> None:
         """Validate the metric used to select the best trial."""
+        if not isinstance(self.metric, str):
+            raise TypeError("metric must be a string.")
+
         supported_metrics = {"rmse", "mse", "mae", "r2"}
 
         if self.metric not in supported_metrics:
