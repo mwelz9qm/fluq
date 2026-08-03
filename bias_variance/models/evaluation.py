@@ -181,15 +181,15 @@ class Evaluator:
         return results
 
     def evaluate(
-        self,
-        run_id: str,
+            self,
+            run_id: str,
     ) -> Mapping[str, tuple[GroupUpdateData]]:
         '''
         Evaluates the biases and variances for all variation groups in a study.
         There are two types of bias and variance pairs:
         - averaging
         - pointwise
-        
+
         The method will insert the results based on the selected evaluation
         methods.
 
@@ -199,7 +199,7 @@ class Evaluator:
             The set of methods used to decompose the biases and variances.
         run_id: str
             The run identifier used to query results in the cache tables.
-        
+
         Returns
         ------------
         Mapping[str, tuple[GroupUpdateData]]
@@ -225,10 +225,37 @@ def get_model_predictions(
     x_test: torch.Tensor | np.ndarray,
     resolved_device: torch.device,
 ) -> np.ndarray:
+    """Generate model predictions for a test input set.
+
+    This helper prepares the test inputs as a torch tensor when needed, places
+    the inputs on the resolved device, runs the model in evaluation mode without
+    tracking gradients, and returns the predictions as a NumPy array.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Trained model used to generate predictions.
+    x_test : torch.Tensor | np.ndarray
+        Test inputs used for prediction.
+    resolved_device : torch.device
+        Device where the test inputs should be placed for prediction.
+
+    Returns
+    -------
+    np.ndarray
+        Model predictions returned as a NumPy array.
+    """
     if not isinstance(x_test, torch.Tensor):
         x_test = torch.from_numpy(x_test)
 
     model.eval()
+
+    with torch.inference_mode():
+        predictions = model(
+            x_test.to(resolved_device)
+        )
+
+    return predictions.cpu().numpy()
 
 def get_model_scores(
     predictions:  np.ndarray,
