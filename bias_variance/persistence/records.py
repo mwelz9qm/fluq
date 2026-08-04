@@ -1,4 +1,3 @@
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -20,47 +19,62 @@ class RunRecord:
     base_architecture: tuple[int, ...]
 
     run_id: str # primary
-    base_train_set_id: int | None = None # foreign
-    base_test_set_id: int | None = None # foreign
 
 
 @dataclass(frozen=True, slots=True)
 class StudyRecord:
+    run_id: str # foreign
     study_name: str
     evaluation_method: str
 
-    study_id: int | None = None # primary
-    run_id: str | None = None # foreign
+    id: int | None = None # primary
 
 
 @dataclass(frozen=True, slots=True)
 class GroupRecord:
+    study_id: int # foreign
     group_name: str
     averaging_strategy_bias: float | None
     averaging_strategy_variance: float | None
     pointwise_strategy_bias: float | None
     pointwise_strategy_variance: float | None
 
-    group_id: int | None = None # primary
-    study_id: int | None = None # foreign
+    id: int | None = None # primary
 
 
 @dataclass(frozen=True, slots=True)
 class ModelRecord:
+    group_id: int # foreign
     architecture: tuple[int, ...]
-    test_scores: Mapping[str, float]
 
-    model_id: int | None = None # primary
-    group_id: int | None = None # foreign
-    train_set_id: int | None = None # foreign
-    test_set_id: int | None = None # foreign
+    id: int | None = None # primary
 
 
 @dataclass(frozen=True, slots=True)
-class PointRecord:
+class ScoreRecord:
+    model_id: int # foreign
+    metric: str
+    score: float
+
+    id: int | None = None # primary
+
+
+@dataclass(frozen=True, slots=True)
+class TrainPointRecord:
+    model_id: int | None # foreign
+    run_id: int | None # foreign
     inputs: tuple[float, ...]
     outputs: tuple[float, ...]
-    predictions: tuple[float, ...] | None
 
-    point_id: int | None = None # primary
-    set_id: int | None = None # foreign
+    id: int | None = None # primary
+
+
+@dataclass(frozen=True, slots=True)
+class TestPointRecord:
+    model_id: int | None # foreign
+    run_id: int | None # foreign
+    inputs: tuple[float, ...]
+    outputs: tuple[float, ...]
+    predictions: tuple[float, ...]
+
+    id: int | None = None # primary
