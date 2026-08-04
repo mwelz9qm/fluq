@@ -17,10 +17,8 @@ class RunRecord:
     batch_size: int
     device: str
     base_architecture: tuple[int, ...]
-    base_x_train: tuple[float]
-    base_y_train: tuple[float]
-    base_x_test: tuple[float]
-    base_y_test: tuple[float]
+    base_train_set_id: str
+    base_test_set_id: str
     input_columns: tuple[str, ...]
     output_columns: tuple[str, ...]
 
@@ -50,8 +48,14 @@ class ModelRecord:
     group_id: str
     architecture: tuple[int, ...]
     test_scores: Mapping[str, float]
-    x_train: tuple[float, ...]
-    y_train: tuple[float, ...]
-    x_test: tuple[float, ...]
-    y_test: tuple[float, ...]
-    predictions: tuple[float, ...]
+    train_set_id: str
+    test_set_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PointRecord:
+    point_id: str
+    set_id: str
+    inputs: tuple[float, ...]
+    outputs: tuple[float, ...]
+    predictions: tuple[float, ...] | None
