@@ -9,8 +9,11 @@ particular serialization format for array-valued record fields.
 
 import sqlite3
 from collections.abc import Sequence
+from dataclasses import asdict
 from os import PathLike
+from typing import Any
 
+from bias_variance.models.evaluation import EvaluationMethod
 from bias_variance.persistence.records import (
     GroupRecord,
     ModelRecord,
@@ -64,50 +67,11 @@ class ResultStore:
         None
         """
         self._connection = sqlite3.connect(database, timeout=timeout)
-        self._connection.execute("PRAGMA foreign_keys = ON")
+        self._connection.row_factory = sqlite3.Row
 
     def create_tables(self) -> None:
         cur = self._connection.cursor()
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS test_points (
-                test_point_id INTEGER PRIMARY KEY,
-                model_id INTEGER NOT NULL REFERENCES models(model_id),
-                inputs TEXT NOT NULL,
-                outputs TEXT NOT NULL,
-                predictions TEXT
-            ) AS STRICT
-        ''')
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS models (
-                model_id INTEGER PRIMARY KEY,
-                group_id INTEGER NOT NULL REFERENCES groups(group_id),
-                train_set_id INTEGER NOT NULL,
-                test_set_id INTEGER NOT NULL,
-                architecture TEXT NOT NULL,
-                test_scores TEXT NOT NULL
-            ) AS STRICT
-        ''')
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS groups (
-                group_id INTEGER PRIMARY KEY,
-                study_id INTEGER NOT NULL REFERENCES studies(study_id),
-                group_name TEXT NOT NULL,
-                averaging_strategy_bias REAL,
-                averaging_strategy_variance REAL,
-                pointwise_strategy_bias REAL,
-                pointwise_strategy_variance REAL
-            ) AS STRICT
-        ''')
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS studies (
-                study_id INTEGER PRIMARY KEY,
-                run_id TEXT NOT NULL REFERENCES runs(run_id),
-                study_name TEXT NOT NULL,
-                evaluation_method TEXT NOT NULL
-                    CHECK (evaluation_method IN ('averaging', 'pointwise'))
-            ) AS STRICT
-        ''')
-        cur.execute('''
+        cur.execute('PRAGMA foreign_keys = ON').execute('''
             CREATE TABLE IF NOT EXISTS runs (
                 run_id TEXT PRIMARY KEY,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -126,7 +90,84 @@ class ResultStore:
                 input_columns TEXT NOT NULL,
                 output_columns TEXT NOT NULL
             ) AS STRICT
+        ''').execute('''
+            CREATE TABLE IF NOT EXISTS studies (
+                study_id INTEGER PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                study_name TEXT NOT NULL,
+                evaluation_method TEXT NOT NULL,
+                FOREIGN KEY (run_id) REFERENCES runs (run_id)
+            ) AS STRICT
+        ''').execute('''
+            CREATE TABLE IF NOT EXISTS groups (
+                group_id INTEGER PRIMARY KEY,
+                study_id INTEGER NOT NULL,
+                group_name TEXT NOT NULL,
+                averaging_strategy_bias REAL,
+                averaging_strategy_variance REAL,
+                pointwise_strategy_bias REAL,
+                pointwise_strategy_variance REAL,
+                FOREIGN KEY (study_id) REFERENCES studies (study_id)
+            ) AS STRICT
+        ''').execute('''
+            CREATE TABLE IF NOT EXISTS models (
+                model_id INTEGER PRIMARY KEY,
+                group_id INTEGER NOT NULL,
+                train_set_id INTEGER NOT NULL,
+                test_set_id INTEGER NOT NULL,
+                architecture TEXT NOT NULL,
+                test_scores TEXT NOT NULL,
+                FOREIGN KEY (group_id) REFERENCES groups (group_id)
+            ) AS STRICT
+        ''').execute('''
+            CREATE TABLE IF NOT EXISTS scores (
+                scores_id INTEGER PRIMARY KEY,
+                model_id INTEGER NOT NULL,
+                inputs TEXT NOT NULL,
+                outputs TEXT NOT NULL,
+                predictions TEXT,
+                FOREIGN KEY (model_id) REFERENCES models (model_id)
+            ) AS STRICT
+        ''').execute('''
+            CREATE TABLE IF NOT EXISTS train_points (
+                train_point_id INTEGER PRIMARY KEY,
+                model_id INTEGER,
+                run_id INTEGER,
+                train_point_inputs TEXT NOT NULL,
+                train_point_outputs TEXT NOT NULL,
+                FOREIGN KEY (model_id) REFERENCES models (model_id),
+                FOREIGN KEY (run_id) REFERENCES runs (run_id)
+            ) AS STRICT
+        ''').execute('''
+            CREATE TABLE IF NOT EXISTS test_points (
+                test_point_id INTEGER PRIMARY KEY,
+                model_id INTEGER,
+                run_id INTEGER,
+                set_position INTEGER NOT NULL,
+                test_point_inputs TEXT NOT NULL,
+                test_point_outputs TEXT NOT NULL,
+                FOREIGN KEY (model_id) REFERENCES models (model_id),
+                FOREIGN KEY (run_id) REFERENCES runs (run_id)
+            ) AS STRICT
         ''')
+
+    @staticmethod
+    def _build_insert_statement(
+        table_name: str,
+        attributes: dict[str, Any],
+        remove_attribute: str | None = None,
+    ) -> tuple[str, tuple]:
+        if remove_attribute:
+            attributes.pop(remove_attribute, None)
+        statement = f'INSERT INTO {table_name} ('
+        values = []
+        for field, value in attributes.items():
+            statement += f'{field},'
+            values.append(value)
+
+        statement += f') VALUES ({len(values)*'?,'})'
+
+        return statement, tuple(values)
 
     def add(self, record: Record) -> int | str:
         """Stage one record for insertion into its corresponding table.
@@ -149,49 +190,69 @@ class ResultStore:
             The inserted row's primary-key ID, whether supplied by ``record``
             or generated by the store.
         """
-        sql_statement = ''
-        attribute_values = tuple(vars(record).values())
+        cur = self._connection.cursor()
         match record:
-            case cls if cls is ScoreRecord:
-                sql_statement = f'''
-                    INSERT INTO test_points (model_id, inputs, outputs, predictions)
-                    VALUES ({record.model_id}, {record.inputs}, {record.outputs}, {record.predictions})
-                '''
-
-            case cls if cls is ModelRecord:
-                sql_statement = '''
-                    INSERT INTO models VALUES
-                '''
-
-            case cls if cls is GroupRecord:
-                sql_statement = ''
-
-            case cls if cls is StudyRecord:
-                sql_statement = ''
-
             case cls if cls is RunRecord:
-                sql_statement = ''
-
+                statement, params = self._build_insert_statement('runs', asdict(record))
+                cur.execute(statement, params)
+                return record.run_id
+            
+            case cls if cls is StudyRecord:
+                statement, params = self._build_insert_statement(
+                    'studies', asdict(record), 'study_id'
+                )
+                cur.execute(statement, params)
+                record.study_id = cur.lastrowid
+                return record.study_id
+            
+            case cls if cls is GroupRecord:
+                statement, params = self._build_insert_statement(
+                    'groups', asdict(record), 'group_id'
+                )
+                cur.execute(statement, params)
+                record.group_id = cur.lastrowid
+                return record.group_id
+            
+            case cls if cls is ModelRecord:
+                statement, params = self._build_insert_statement(
+                    'models', asdict(record), 'model_id'
+                )
+                cur.execute(statement, params)
+                record.model_id = cur.lastrowid
+                return record.model_id
+            
+            case cls if cls is ScoreRecord:
+                statement, params = self._build_insert_statement(
+                    'scores', asdict(record), 'score_id'
+                )
+                cur.execute(statement, params)
+                record.score_id = cur.lastrowid
+                return record.score_id
+            
+            case cls if cls is TrainPointRecord:
+                statement, params = self._build_insert_statement(
+                    'train_points', asdict(record), 'train_point_id'
+                )
+                cur.execute(statement, params)
+                record.train_point_id = cur.lastrowid
+                return record.train_point_id
+            
+            case cls if cls is TestPointRecord:
+                statement, params = self._build_insert_statement(
+                    'test_points', asdict(record), 'test_point_id'
+                )
+                cur.execute(statement, params)
+                record.test_point_id = cur.lastrowid
+                return record.test_point_id
+            
             case _:
                 raise TypeError(
                     f'No matching record class type: {type(record)!r}.'
                 )
-        
-        cur = self._connection.cursor()
-        cur.execute(sql_statement, attribute_values)
 
-        if not isinstance(record, RunRecord):
-            id = record.id = cur.lastrowid
-        else:
-            id = record.run_id
-
-        return id
-
-    def update(
+    def update_group(
         self,
-        run_id: str,
-        study_id: str,
-        group_id: str,
+        group_id: int,
         bias: float,
         variance: float,
     ) -> None:
@@ -225,7 +286,50 @@ class ResultStore:
         -------
         None
         """
-        raise NotImplementedError
+        cur = self._connection.cursor()
+
+        # Get study_id
+        cur.execute(
+            'SELECT study_id FROM groups WHERE group_id = ? LIMIT 1',
+            (group_id,)
+        )
+        row = cur.fetchone()
+        study_id = row['study_id']
+
+        # Use fetched study_id for querying evaluation_method
+        cur.execute(
+            'SELECT evaluation_method FROM studies WHERE study_id = ? LIMIT 1',
+            (study_id,)
+        )
+        row = cur.fetchone()
+        method = row['evaluation_method']
+
+        # Use fetched evaluation_method for updating bias and variance
+        match method:
+            case EvaluationMethod.AVERAGING.value:
+                cur.execute(
+                    '''
+                    UPDATE groups SET (
+                        averaging_strategy_bias,
+                        averaging_strategy_variance
+                    ) = (?,?) WHERE group_id = ?
+                    ''',
+                    (bias, variance, group_id)
+                )
+            case EvaluationMethod.POINTWISE.value:
+                cur.execute(
+                    '''
+                    UPDATE groups SET (
+                        pointwise_strategy_bias,
+                        pointwise_strategy_variance
+                    ) = (?,?) WHERE group_id = ?
+                    ''',
+                    (bias, variance, group_id)
+                )
+            case _:
+                raise ValueError(
+                    f'Unknown evaluation_method in studies table: {method!r}.'
+                )
 
     def commit(self) -> None:
         """Commit all staged inserts and updates to SQLite.
@@ -278,9 +382,18 @@ class ResultStore:
         str or None
             The newest run ID, or ``None`` when the run table is empty.
         """
-        raise NotImplementedError
+        cur = self._connection.cursor()
 
-    def get_studies(self, run_id: str) -> tuple[str, ...]:
+        # Get one run where runs are ordered by created_at descending
+        cur.execute(
+            'SELECT run_id FROM runs ORDER BY created_at DESC LIMIT 1'
+        )
+
+        row = cur.fetchone()
+
+        return row['run_id']
+
+    def get_studies(self, run_id: str) -> tuple[int, ...]:
         """Return all study IDs belonging to a run.
 
         The implementation should select study primary keys whose foreign key
@@ -296,9 +409,20 @@ class ResultStore:
         tuple[str, ...]
             Study IDs for the run; an empty tuple when none exist.
         """
-        raise NotImplementedError
+        cur = self._connection.cursor()
 
-    def get_groups(self, study_id: str) -> tuple[str, ...]:
+        cur.execute(
+            'SELECT study_id FROM studies WHERE run_id = ?',
+            (run_id,)
+        )
+        rows = cur.fetchall()
+
+        return (
+            int(row['study_id'])
+            for row in rows
+        )
+
+    def get_groups(self, study_id: int) -> tuple[int, ...]:
         """Return all group IDs belonging to a study.
 
         The implementation should select group primary keys whose foreign key
@@ -314,9 +438,20 @@ class ResultStore:
         tuple[str, ...]
             Group IDs for the study; an empty tuple when none exist.
         """
-        raise NotImplementedError
+        cur = self._connection.cursor()
+        
+        cur.execute(
+            'SELECT group_id FROM groups WHERE study_id = ?',
+            (study_id,)
+        )
+        rows = cur.fetchall()
+        
+        return (
+            int(row['group_id'])
+            for row in rows
+        )
 
-    def get_models(self, group_id: str) -> tuple[str, ...]:
+    def get_models(self, group_id: int) -> tuple[int, ...]:
         """Return all model IDs belonging to a group.
 
         The implementation should select model primary keys whose foreign key
@@ -333,9 +468,24 @@ class ResultStore:
         tuple[str, ...]
             Model IDs for the group; an empty tuple when none exist.
         """
-        raise NotImplementedError
+        cur = self._connection.cursor()
+        
+        cur.execute(
+            'SELECT model_id FROM models WHERE group_id = ?',
+            (group_id,)
+        )
+        rows = cur.fetchall()
+        
+        return (
+            int(row['model_id'])
+            for row in rows
+        )
 
-    def get_predictions_by_model(self, model_id: str) -> Sequence[float]:
+    def get_actuals_and_predictions(
+        self,
+        model_id: int | None = None,
+        group_id_and_tes_pos: tuple[int, int] | None = None,
+    ) -> tuple[Sequence[tuple[float, ...]], Sequence[tuple[float, ...]]]:
         """Load every prediction produced by one model.
 
         The implementation should select the model's serialized prediction
@@ -353,90 +503,36 @@ class ResultStore:
             Ordered model predictions.  Multi-output predictions require a
             documented flattening convention or a more specific return type.
         """
-        raise NotImplementedError
+        cur = self._connection.cursor()
 
-    def get_actuals(self, model_id: str) -> Sequence[float]:
-        """Load every expected output associated with one model's test set.
+        if model_id and not group_id_and_tes_pos:
+            cur.execute(
+                'SELECT (outputs, predictions) FROM test_points WHERE model_id = ?',
+                (model_id,)
+            )
+            
+        elif not model_id and group_id_and_tes_pos:
+            cur.execute(
+                '''
+                SELECT (test_points.outputs, test_points.predictions)
+                FROM models
+                INNER JOIN test_points ON models.model_id = test_points.model_id
+                WHERE models.group_id = ?
+                AND test_points.test_position = ?
+                ''',
+                group_id_and_tes_pos
+            )
 
-        The implementation should select and decode ``y_test`` from the model
-        row using the same ordering and shape convention as the prediction
-        query.
+        else:
+            raise ValueError(
+                'model_id and group_id_and_test_pos arguments are mutually exclusive.'
+            )
+        
+        rows = cur.fetchall()
+        
+        return tuple(rows)
 
-        Parameters
-        ----------
-        model_id:
-            ID of the model whose test outputs are required.
-
-        Returns
-        -------
-        Sequence[float]
-            Ordered expected outputs for the model's test set.
-        """
-        raise NotImplementedError
-
-    def get_tests(self, group_id: str) -> tuple[TestId, ...]:
-        """Return stable test-point identifiers shared by a pointwise group.
-
-        No test-point record currently exists, so the suggested identifier is
-        ``(group_id, test_index)``.  The implementation should inspect the
-        group's models, validate that their test outputs are aligned, and
-        return one key per test-row position.  A normalized test/prediction
-        table could instead use a string primary key and change ``TestId``.
-
-        Parameters
-        ----------
-        group_id:
-            ID of a group evaluated with the pointwise method.
-
-        Returns
-        -------
-        tuple[TestId, ...]
-            Ordered keys identifying the test points shared by the models.
-        """
-        raise NotImplementedError
-
-    def get_predictions_by_test(self, test_id: TestId) -> Sequence[float]:
-        """Load all model predictions for one group test point.
-
-        With the suggested composite key, the implementation should select all
-        models in ``test_id[0]``, decode their predictions, and extract the
-        value at ``test_id[1]``.  A normalized schema should perform the
-        equivalent operation with an indexed SQL query.
-
-        Parameters
-        ----------
-        test_id:
-            Composite group ID and zero-based test-row index returned by
-            :meth:`get_tests`.
-
-        Returns
-        -------
-        Sequence[float]
-            One prediction per model for the selected test point.
-        """
-        raise NotImplementedError
-
-    def get_actual(self, test_id: TestId) -> float:
-        """Load the expected output for one group test point.
-
-        The implementation should decode a representative model's ``y_test``
-        value at the requested index and verify, when appropriate, that all
-        models in the pointwise group share that value.
-
-        Parameters
-        ----------
-        test_id:
-            Composite group ID and zero-based test-row index returned by
-            :meth:`get_tests`.
-
-        Returns
-        -------
-        float
-            Expected output for the selected test point.
-        """
-        raise NotImplementedError
-
-    def get_method(self, group_id: str) -> str:
+    def get_method(self, group_id: int) -> str:
         """Return the evaluation method that applies to a group.
 
         The implementation should join the group row to its parent study and
@@ -453,44 +549,12 @@ class ResultStore:
             Stored evaluation method, currently ``"averaging"`` or
             ``"pointwise"``.
         """
-        raise NotImplementedError
-
-    def get_study(self, study_id: str) -> StudyRecord:
-        """Load study metadata by primary key.
-
-        This additional query supports presentation code that needs a study's
-        name and evaluation method rather than only its opaque ID.  The
-        implementation should select the row and construct a ``StudyRecord``;
-        it should raise ``KeyError`` when the ID does not exist.
-
-        Parameters
-        ----------
-        study_id:
-            Primary-key ID of the requested study.
-
-        Returns
-        -------
-        StudyRecord
-            Fully populated study record.
-        """
-        raise NotImplementedError
-
-    def get_group(self, group_id: str) -> GroupRecord:
-        """Load group metadata and result values by primary key.
-
-        This additional query supports presentation code that must translate
-        opaque group IDs into names.  The implementation should select the row
-        and construct a ``GroupRecord``; it should raise ``KeyError`` when the
-        ID does not exist.
-
-        Parameters
-        ----------
-        group_id:
-            Primary-key ID of the requested group.
-
-        Returns
-        -------
-        GroupRecord
-            Fully populated group record.
-        """
-        raise NotImplementedError
+        cur = self._connection.cursor()
+        
+        cur.execute(
+            'SELECT evaluation_method FROM groups WHERE group_id = ? LIMIT 1',
+            (group_id,)
+        )
+        row = cur.fetchone()
+        
+        return row['evaluation_method']
