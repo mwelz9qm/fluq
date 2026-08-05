@@ -28,8 +28,12 @@ from bias_variance.persistence.records import (
     GroupRecord,
     ModelRecord,
     RunRecord,
+    ScoreRecord,
     StudyRecord,
+    TestPointRecord,
+    TrainPointRecord,
 )
+from bias_variance.persistence.store import ResultStore
 
 
 class StudyName(StrEnum):
@@ -116,7 +120,7 @@ class RunConfig:
 class BiasAnalyzer:
     def __init__(
         self,
-        result_store,
+        result_store: ResultStore,
     ):
         self.result_store = result_store
         self.recent_run_id = result_store.get_recent_run()
@@ -162,55 +166,9 @@ class BiasAnalyzer:
                     f'Unknown study: {study!r}.'
                 )
 
-    def _build_model_record(
-        self,
-        group_id: str,
-        architecture: FnnArchitecture,
-        x_train: np.ndarray,
-        x_test: np.ndarray,
-        y_train: np.ndarray,
-        y_test: np.ndarray,
-        *,
-        trainer: Trainer,
-        test_metrics,
-        resolved_device: torch.device,
-        random_state: int | None,
-    ) -> ModelRecord:
-        trained_model = trainer.train(
-            architecture=architecture,
-            x_train=x_train,
-            y_train=y_train,
-            random_state=random_state
-        )
-
-        predictions = get_model_predictions(
-            model=trained_model,
-            x_test=x_test,
-            resolved_device=resolved_device,
-        )
-
-        scores = get_model_scores(
-            predictions=predictions,
-            y_test=y_test,
-            metrics=test_metrics,
-        )
-
-        model_id = ''
-        return ModelRecord(
-            model_id=model_id,
-            group_id=group_id,
-            architecture=architecture.hidden_layers,
-            test_scores=scores,
-            x_train=x_train,
-            y_train=y_train,
-            x_test=x_test,
-            y_test=y_test,
-            predictions=predictions
-        )
-
     def _run_study(
         self,
-        study_id: str,
+        study_id: int,
         study: Study,
         n_iter: int,
         test_size: float,
@@ -230,18 +188,12 @@ class BiasAnalyzer:
             group_ids = set()
             for j, variation in enumerate(variations):
                 if i == 0:
-                    group_id = ''
-                    group_ids.add(group_id)
                     group_record = GroupRecord(
-                        group_id=group_id,
                         study_id=study_id,
-                        group_name=variation.label,
-                        averaging_strategy_bias=None,
-                        averaging_strategy_variance=None,
-                        pointwise_strategy_bias=None,
-                        pointwise_strategy_variance=None
+                        group_name=variation.label
                     )
-                    self.result_store.add(group_record)
+                    group_id = self.result_store.add(group_record)
+                    group_ids.add(group_id)
 
                 match study.description:
                     case (StudyName.MODEL, EvaluationMethod.POINTWISE):
@@ -291,54 +243,75 @@ class BiasAnalyzer:
                             f'Unknown study: {study!r}.'
                         )
 
-                model_record = self._build_model_record(
-                    group_ids[j],
-                    architecture,
-                    *split,
-                    trainer=trainer,
-                    test_metrics=test_metrics,
-                    resolved_device=resolved_device,
+                model_record = ModelRecord(
+                    group_id=group_ids[j],
+                    architecture=architecture.hidden_layers
+                )
+                model_id = self.result_store.add(model_record)
+
+                dataset_split = DatasetSplit(*split)
+
+                for inputs, outputs in zip(
+                    dataset_split.x_train.itertuples(),
+                    dataset_split.y_train.itertuples()
+                ):
+                    train_point_record = TrainPointRecord(
+                        model_id=model_id,
+                        run_id=None,
+                        inputs=inputs,
+                        outputs=outputs,
+                    )
+                    self.result_store.add(train_point_record)
+
+                trained_model = trainer.train(
+                    architecture=architecture,
+                    x_train=dataset_split.x_train,
+                    y_train=dataset_split.y_train,
                     random_state=random_state
                 )
-                self.result_store.add(model_record)
+                
+                model_predictions = get_model_predictions(
+                    model=trained_model,
+                    x_test=dataset_split.x_test,
+                    resolved_device=resolved_device,
+                )
+
+                for inputs, outputs, row_predictions in zip(
+                    dataset_split.x_test.itertuples(),
+                    dataset_split.y_test.itertuples(),
+                    model_predictions
+                ):
+                    test_point_record = TestPointRecord(
+                        model_id=model_id,
+                        run_id=None,
+                        set_position=inputs.index,
+                        inputs=inputs,
+                        outputs=outputs,
+                        predictions=row_predictions
+                    )
+                    self.result_store.add(test_point_record)
+                
+                scores = get_model_scores(
+                    predictions=row_predictions,
+                    y_test=dataset_split.y_test,
+                    metrics=test_metrics,
+                )
+
+                for metric, score in scores.items():
+                    score_record = ScoreRecord(
+                        model_id=model_id,
+                        metric=metric,
+                        score=score
+                    )
+                    self.result_store.add(score_record)
 
     def run_studies(
         self,
         run_config: RunConfig,
         training_config: TrainingConfig,
     ) -> 'BiasAnalyzer':
-        run_id = ''
-        
-        trainer =  Trainer(training_config)
-        trainer.set_model_builder(
-            run_config.baseline.inputs.shape[1],
-            run_config.baseline.outputs.shape[1]
-        )
-        
-        for study in run_config.studies:
-            study_id = ''
-            self._run_study(
-                study_id,
-                study,
-                run_config.n_iter,
-                run_config.test_size,
-                run_config.test_metrics,
-                training_config.resolved_device,
-                run_config.random_state,
-                run_config.baseline,
-                trainer
-            )
-            
-            study_record = StudyRecord(
-                study_id=study_id,
-                run_id=run_id,
-                study_name=study.study_name.value,
-                evaluation_method=study.evaluation_method.value
-            )
-            self.result_store.add(study_record)
-
         run_record = RunRecord(
-            run_id=run_id,
+            run_id='--INSERT UUID--',
             created_at=datetime.now(tz=''),
             n_iter=run_config.n_iter,
             test_size=run_config.test_size,
@@ -357,8 +330,37 @@ class BiasAnalyzer:
             input_columns=run_config.baseline.inputs.columns,
             output_columns=run_config.baseline.outputs.columns
         )
-        self.result_store.add(run_record)
+        run_id = self.result_store.add(run_record)
+        
+        trainer =  Trainer(training_config)
+        trainer.set_model_builder(
+            run_config.baseline.inputs.shape[1],
+            run_config.baseline.outputs.shape[1]
+        )
+        
+        for study in run_config.studies:
+            study_record = StudyRecord(
+                run_id=run_id,
+                study_name=study.study_name.value,
+                evaluation_method=study.evaluation_method.value
+            )
+            study_id = self.result_store.add(study_record)
+
+            self._run_study(
+                study_id,
+                study,
+                run_config.n_iter,
+                run_config.test_size,
+                run_config.test_metrics,
+                training_config.resolved_device,
+                run_config.random_state,
+                run_config.baseline,
+                trainer
+            )
+        
         self.result_store.commit()
+        self.result_store.close()
+
         self.recent_run_id = run_id
 
         return self
@@ -376,24 +378,14 @@ class BiasAnalyzer:
             )
         
         evaluator = Evaluator(self.result_store)
-        results = evaluator.evaluate(run_id)
-        for study_id, data in results.items():
-            for group_id, bias, variance in data.data_row:
-                self.result_store.update(run_id, study_id, group_id, bias, variance)
+        group_updates = evaluator.evaluate(run_id)
+        for group_update in group_updates:
+            self.result_store.update_group(
+                group_update.group_id,
+                group_update.bias,
+                group_update.variance
+            )
 
-        results = pd.DataFrame.from_records(
-            (
-                (study_name, evaluation_method, group_name, bias, variance)
-                for (study_name, evaluation_method), data in results.items()
-                for group_name, bias, variance in data.data_row
-            ),
-            columns=(
-                'study_name',
-                'evaluation_method',
-                'group_name',
-                'bias',
-                'variance',
-            ),
-        )
+        results = pd.DataFrame() # TODO: Use result_store to build dataframe with study_name, group_name, evaluation_method, strategy_bias, and strategy_variance.
 
         return results

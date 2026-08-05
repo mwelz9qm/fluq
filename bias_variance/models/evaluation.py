@@ -1,4 +1,3 @@
-from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -11,6 +10,8 @@ from sklearn.metrics import (
     root_mean_squared_error,
 )
 from torch import nn
+
+from bias_variance.persistence.store import ResultStore
 
 
 class MetricName(StrEnum):
@@ -36,12 +37,12 @@ class EvaluationMethod(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class GroupUpdateData:
-    group_id: str
-    bias: float
-    variance: float
+    group_id: int
+    bias: tuple[float, ...]
+    variance: tuple[float, ...]
 
     @property
-    def data_row(self) -> tuple[str, float, float]:
+    def data_row(self) -> tuple[str, tuple[float, ...], tuple[float, ...]]:
         return (self.group_id, self.bias, self.variance)
 
 
@@ -64,11 +65,11 @@ class Evaluator:
     '''
     def __init__(
         self,
-        result_store,
+        result_store: ResultStore,
     ):
         self.result_store = result_store
 
-    def _calculate_averaging(self, group_id: str) -> GroupUpdateData:
+    def _calculate_averaging(self, group_id: int) -> GroupUpdateData:
         '''
         Calculates the strategy bias and variance with the averaging method.
         - Bias: For a variation group in a study, the mean of predictions
@@ -98,11 +99,10 @@ class Evaluator:
         variances = []
         squared_errors = []
         for model_id in models:
-            predictions = self.result_store.get_predictions_by_model(model_id)
+            actuals, predictions = self.result_store.get_actuals_and_predictions(model_id=model_id)
             model_variance = np.var(predictions)
             model_mean = np.mean(predictions)
         
-            actuals = self.result_store.get_actuals(model_id)
             sample_mean  = np.mean(actuals)
             model_squared_error = (model_mean - sample_mean) ** 2.0
         
@@ -118,7 +118,7 @@ class Evaluator:
             strategy_variance
         )
 
-    def _calculate_pointwise(self, group_id: str) -> GroupUpdateData:
+    def _calculate_pointwise(self, group_id: int) -> GroupUpdateData:
         '''
         Calculates the strategy bias and variance with the pointwise method.
         - Bias: For a variation group in a study, each group has a shared set
@@ -142,17 +142,16 @@ class Evaluator:
         ------------
         GroupUpdateData
         '''
-        tests = self.result_store.get_tests(group_id)
-        
+        test_positions = self.result_store.get_test_positions(group_id)
+
         variances = []
         squared_errors = []
-        for test_id in tests:
-            predictions = self.result_store.get_predictions_by_test(test_id)
+        for test_position in test_positions:
+            actuals, predictions = self.result_store.get_actuals_and_predictions(group_id_and_tes_pos=(group_id, test_position))
             point_variance = np.var(predictions)
             point_mean = np.mean(predictions)
-        
-            test_point = self.result_store.get_actual(test_id)
-            point_squared_error = (point_mean - test_point) ** 2
+
+            point_squared_error = (point_mean - actuals) ** 2
         
             variances.append(point_variance)
             squared_errors.append(point_squared_error)
@@ -166,7 +165,7 @@ class Evaluator:
             strategy_variance
         )
 
-    def _evaluate_strategy_bias_and_variance(self, group_id: str) -> GroupUpdateData:
+    def _evaluate_strategy_bias_and_variance(self, group_id: int) -> GroupUpdateData:
         method = self.result_store.get_method(group_id)
         match method:
             case EvaluationMethod.AVERAGING.value:
@@ -181,9 +180,9 @@ class Evaluator:
         return results
 
     def evaluate(
-            self,
-            run_id: str,
-    ) -> Mapping[str, tuple[GroupUpdateData]]:
+        self,
+        run_id: str,
+    ) -> tuple[GroupUpdateData]:
         '''
         Evaluates the biases and variances for all variation groups in a study.
         There are two types of bias and variance pairs:
@@ -195,27 +194,22 @@ class Evaluator:
 
         Parameters
         -----------
-        methods: frozenset[EvaluationMethod]
-            The set of methods used to decompose the biases and variances.
         run_id: str
             The run identifier used to query results in the cache tables.
 
         Returns
         ------------
-        Mapping[str, tuple[GroupUpdateData]]
+        tuple[GroupUpdateData]
         '''
         studies = self.result_store.get_studies(run_id)
-        post_evaluation_results = {}
+        group_results = []
         for study_id in studies:
             groups = self.result_store.get_groups(study_id)
-            group_results: list[GroupUpdateData] = []
             for group_id in groups:
                 group_update = self._evaluate_strategy_bias_and_variance(group_id)
                 group_results.append(group_update)
 
-            post_evaluation_results[study_id] = tuple(group_results)
-
-        return post_evaluation_results
+        return tuple(group_results)
 
 
 ########## HELPER FUNCTIONS ##########
