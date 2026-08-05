@@ -69,115 +69,42 @@ class Evaluator:
     ):
         self.result_store = result_store
 
-    def _calculate_averaging(self, group_id: int) -> GroupUpdateData:
-        '''
-        Calculates the strategy bias and variance with the averaging method.
-        - Bias: For a variation group in a study, the mean of predictions
-        is subtracted by the sample mean corresponding to the points within
-        the testing set used in model evaluation and then squared for each
-        model within the variation group. The bias is the mean of these
-        squared errors across all models within the group.
-        - Variance: For a variaion group in a study, the variance is the
-        mean of variances for all models in the group, where the variance
-        is calculated per model's set of predictions.
-
-        The method uses the run_id as an entry point to query the run data
-        for evaluation. All variation group biases and variances are then
-        inserted into the cache results tables.
-
-        Parameters
-        -----------
-        run_id: str
-            The run identifier used to query results in the cache tables.
-
-        Returns
-        ------------
-        GroupUpdateData
-        '''
-        models = self.result_store.get_models(group_id)
-        
-        variances = []
-        squared_errors = []
-        for model_id in models:
-            actuals, predictions = self.result_store.get_actuals_and_predictions(model_id=model_id)
-            model_variance = np.var(predictions)
-            model_mean = np.mean(predictions)
-        
-            sample_mean  = np.mean(actuals)
-            model_squared_error = (model_mean - sample_mean) ** 2.0
-        
-            variances.append(model_variance)
-            squared_errors.append(model_squared_error)
-        
-        strategy_variance = np.mean(variances)
-        strategy_bias = np.mean(squared_errors)
-
-        return GroupUpdateData(
-            group_id,
-            strategy_bias,
-            strategy_variance
-        )
-
-    def _calculate_pointwise(self, group_id: int) -> GroupUpdateData:
-        '''
-        Calculates the strategy bias and variance with the pointwise method.
-        - Bias: For a variation group in a study, each group has a shared set
-        of test points from the baseline train-test split. For each point in
-        the test points, there is a set of models that made a prediction on the
-        point. Across all predictions for a given point, the mean of predictions
-        is subtracted by the point, then squared. The bias is the average of all
-        test point squared errors.
-        - Variance: For a variation group in a study, each group has a shared
-        set of test points. For each point in the test points, there is a set of
-        models that made a prediction on the point. Across all predictions on a
-        given point, the variance is calculated. With all point variances, the
-        variance is the average point variance.
-
-        Parameters
-        -----------
-        run_id: str
-            The run identifier used to query results in the cache tables.
-        
-        Returns
-        ------------
-        GroupUpdateData
-        '''
-        test_positions = self.result_store.get_test_positions(group_id)
-
-        variances = []
-        squared_errors = []
-        for test_position in test_positions:
-            actuals, predictions = self.result_store.get_actuals_and_predictions(group_id_and_tes_pos=(group_id, test_position))
-            point_variance = np.var(predictions)
-            point_mean = np.mean(predictions)
-
-            point_squared_error = (point_mean - actuals) ** 2
-        
-            variances.append(point_variance)
-            squared_errors.append(point_squared_error)
-        
-        strategy_variance = np.mean(variances)
-        strategy_bias = np.mean(squared_errors)
-
-        return GroupUpdateData(
-            group_id,
-            strategy_bias,
-            strategy_variance
-        )
-
     def _evaluate_strategy_bias_and_variance(self, group_id: int) -> GroupUpdateData:
         method = self.result_store.get_method(group_id)
         match method:
             case EvaluationMethod.AVERAGING.value:
-                results = self._calculate_averaging(group_id)
+                items = self.result_store.get_models(group_id)
             case EvaluationMethod.POINTWISE.value:
-                results = self._calculate_pointwise(group_id)
+                items = self.result_store.get_test_positions(group_id)
             case _:
                 raise ValueError(
                     f'Unknown method: {method!r}.'
                 )
 
-        return results
+        variances = []
+        squared_errors = []
+        for item in items:
+            if method == EvaluationMethod.AVERAGING.value:
+                actuals, predictions = self.result_store.get_actuals_and_predictions(model_id=item)
+                error = np.mean(predictions) - np.mean(actuals)
+            else:
+                actuals, predictions = self.result_store.get_actuals_and_predictions(group_id_and_tes_pos=(group_id, item))
+                error = np.mean(predictions) - actuals
+
+            variance = np.var(predictions)
+            squared_error = error ** 2.0
+
+            variances.append(variance)
+            squared_errors.append(squared_error)
+
+        strategy_variance = np.mean(variances)
+        strategy_bias = np.mean(squared_errors)
+
+        return GroupUpdateData(
+            group_id,
+            strategy_bias,
+            strategy_variance
+        )
 
     def evaluate(
         self,
