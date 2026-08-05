@@ -27,19 +27,19 @@ class StudyRecord:
     study_name: str
     evaluation_method: str
 
-    id: int | None = None # primary
+    study_id: int | None = None # primary
 
 
 @dataclass(frozen=True, slots=True)
 class GroupRecord:
     study_id: int # foreign
     group_name: str
-    averaging_strategy_bias: float | None
-    averaging_strategy_variance: float | None
-    pointwise_strategy_bias: float | None
-    pointwise_strategy_variance: float | None
+    averaging_strategy_bias: float | None = None
+    averaging_strategy_variance: float | None = None
+    pointwise_strategy_bias: float | None = None
+    pointwise_strategy_variance: float | None = None
 
-    id: int | None = None # primary
+    group_id: int | None = None # primary
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +47,7 @@ class ModelRecord:
     group_id: int # foreign
     architecture: tuple[int, ...]
 
-    id: int | None = None # primary
+    model_id: int | None = None # primary
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +56,7 @@ class ScoreRecord:
     metric: str
     score: float
 
-    id: int | None = None # primary
+    score_id: int | None = None # primary
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,15 +66,16 @@ class TrainPointRecord:
     inputs: tuple[float, ...]
     outputs: tuple[float, ...]
 
-    id: int | None = None # primary
+    train_point_id: int | None = None # primary
 
 
 @dataclass(frozen=True, slots=True)
 class TestPointRecord:
     model_id: int | None # foreign
     run_id: int | None # foreign
+    set_position: int
     inputs: tuple[float, ...]
     outputs: tuple[float, ...]
     predictions: tuple[float, ...]
 
-    id: int | None = None # primary
+    test_point_id: int | None = None # primary
