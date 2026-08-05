@@ -34,10 +34,8 @@ class StudyRecord:
 class GroupRecord:
     study_id: int # foreign
     group_name: str
-    averaging_strategy_bias: float | None = None
-    averaging_strategy_variance: float | None = None
-    pointwise_strategy_bias: float | None = None
-    pointwise_strategy_variance: float | None = None
+    bias: tuple[float, ...] | None = None
+    variance: tuple[float, ...] | None = None
 
     group_id: int | None = None # primary
 
