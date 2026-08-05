@@ -13,7 +13,6 @@ from dataclasses import asdict
 from os import PathLike
 from typing import Any
 
-from bias_variance.models.evaluation import EvaluationMethod
 from bias_variance.persistence.records import (
     GroupRecord,
     ModelRecord,
@@ -84,11 +83,9 @@ class ResultStore:
                 epochs INTEGER NOT NULL,
                 batch_size INTEGER NOT NULL,
                 device TEXT NOT NULL,
-                base_architecture TEXT NOT NULL,
-                base_train_set_id INTEGER NOT NULL,
-                base_test_set_id INTEGER NOT NULL,
                 input_columns TEXT NOT NULL,
-                output_columns TEXT NOT NULL
+                output_columns TEXT NOT NULL,
+                base_architecture TEXT NOT NULL
             ) AS STRICT
         ''').execute('''
             CREATE TABLE IF NOT EXISTS studies (
@@ -103,29 +100,22 @@ class ResultStore:
                 group_id INTEGER PRIMARY KEY,
                 study_id INTEGER NOT NULL,
                 group_name TEXT NOT NULL,
-                averaging_strategy_bias REAL,
-                averaging_strategy_variance REAL,
-                pointwise_strategy_bias REAL,
-                pointwise_strategy_variance REAL,
+                bias TEXT,
+                variance TEXT,
                 FOREIGN KEY (study_id) REFERENCES studies (study_id)
             ) AS STRICT
         ''').execute('''
             CREATE TABLE IF NOT EXISTS models (
                 model_id INTEGER PRIMARY KEY,
                 group_id INTEGER NOT NULL,
-                train_set_id INTEGER NOT NULL,
-                test_set_id INTEGER NOT NULL,
                 architecture TEXT NOT NULL,
-                test_scores TEXT NOT NULL,
                 FOREIGN KEY (group_id) REFERENCES groups (group_id)
             ) AS STRICT
         ''').execute('''
             CREATE TABLE IF NOT EXISTS scores (
                 scores_id INTEGER PRIMARY KEY,
                 model_id INTEGER NOT NULL,
-                inputs TEXT NOT NULL,
-                outputs TEXT NOT NULL,
-                predictions TEXT,
+                score REAL NOT NULL,
                 FOREIGN KEY (model_id) REFERENCES models (model_id)
             ) AS STRICT
         ''').execute('''
@@ -133,8 +123,8 @@ class ResultStore:
                 train_point_id INTEGER PRIMARY KEY,
                 model_id INTEGER,
                 run_id INTEGER,
-                train_point_inputs TEXT NOT NULL,
-                train_point_outputs TEXT NOT NULL,
+                inputs TEXT NOT NULL,
+                outputs TEXT NOT NULL,
                 FOREIGN KEY (model_id) REFERENCES models (model_id),
                 FOREIGN KEY (run_id) REFERENCES runs (run_id)
             ) AS STRICT
@@ -144,8 +134,8 @@ class ResultStore:
                 model_id INTEGER,
                 run_id INTEGER,
                 set_position INTEGER NOT NULL,
-                test_point_inputs TEXT NOT NULL,
-                test_point_outputs TEXT NOT NULL,
+                inputs TEXT NOT NULL,
+                outputs TEXT NOT NULL,
                 FOREIGN KEY (model_id) REFERENCES models (model_id),
                 FOREIGN KEY (run_id) REFERENCES runs (run_id)
             ) AS STRICT
@@ -287,49 +277,14 @@ class ResultStore:
         None
         """
         cur = self._connection.cursor()
-
-        # Get study_id
         cur.execute(
-            'SELECT study_id FROM groups WHERE group_id = ? LIMIT 1',
-            (group_id,)
+            '''
+            UPDATE groups
+            SET (bias, variance) = (?, ?)
+            WHERE group_id = ?
+            ''',
+            (bias, variance, group_id)
         )
-        row = cur.fetchone()
-        study_id = row['study_id']
-
-        # Use fetched study_id for querying evaluation_method
-        cur.execute(
-            'SELECT evaluation_method FROM studies WHERE study_id = ? LIMIT 1',
-            (study_id,)
-        )
-        row = cur.fetchone()
-        method = row['evaluation_method']
-
-        # Use fetched evaluation_method for updating bias and variance
-        match method:
-            case EvaluationMethod.AVERAGING.value:
-                cur.execute(
-                    '''
-                    UPDATE groups SET (
-                        averaging_strategy_bias,
-                        averaging_strategy_variance
-                    ) = (?,?) WHERE group_id = ?
-                    ''',
-                    (bias, variance, group_id)
-                )
-            case EvaluationMethod.POINTWISE.value:
-                cur.execute(
-                    '''
-                    UPDATE groups SET (
-                        pointwise_strategy_bias,
-                        pointwise_strategy_variance
-                    ) = (?,?) WHERE group_id = ?
-                    ''',
-                    (bias, variance, group_id)
-                )
-            case _:
-                raise ValueError(
-                    f'Unknown evaluation_method in studies table: {method!r}.'
-                )
 
     def commit(self) -> None:
         """Commit all staged inserts and updates to SQLite.
