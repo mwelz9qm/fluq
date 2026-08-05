@@ -69,9 +69,9 @@ class ResultStore:
     def create_tables(self) -> None:
         cur = self._connection.cursor()
         cur.execute('''
-            CREATE TABLE IF NOT EXISTS points (
-                point_id INTEGER PRIMARY KEY,
-                set_id INTEGER NOT NULL,
+            CREATE TABLE IF NOT EXISTS test_points (
+                test_point_id INTEGER PRIMARY KEY,
+                model_id INTEGER NOT NULL REFERENCES models(model_id),
                 inputs TEXT NOT NULL,
                 outputs TEXT NOT NULL,
                 predictions TEXT
@@ -80,7 +80,7 @@ class ResultStore:
         cur.execute('''
             CREATE TABLE IF NOT EXISTS models (
                 model_id INTEGER PRIMARY KEY,
-                group_id INTEGER NOT NULL,
+                group_id INTEGER NOT NULL REFERENCES groups(group_id),
                 train_set_id INTEGER NOT NULL,
                 test_set_id INTEGER NOT NULL,
                 architecture TEXT NOT NULL,
@@ -90,7 +90,7 @@ class ResultStore:
         cur.execute('''
             CREATE TABLE IF NOT EXISTS groups (
                 group_id INTEGER PRIMARY KEY,
-                study_id INTEGER NOT NULL,
+                study_id INTEGER NOT NULL REFERENCES studies(study_id),
                 group_name TEXT NOT NULL,
                 averaging_strategy_bias REAL,
                 averaging_strategy_variance REAL,
@@ -101,9 +101,10 @@ class ResultStore:
         cur.execute('''
             CREATE TABLE IF NOT EXISTS studies (
                 study_id INTEGER PRIMARY KEY,
-                run_id TEXT NOT NULL,
+                run_id TEXT NOT NULL REFERENCES runs(run_id),
                 study_name TEXT NOT NULL,
                 evaluation_method TEXT NOT NULL
+                    CHECK (evaluation_method IN ('averaging', 'pointwise'))
             ) AS STRICT
         ''')
         cur.execute('''
@@ -153,8 +154,8 @@ class ResultStore:
         match record:
             case cls if cls is ScoreRecord:
                 sql_statement = f'''
-                    INSERT INTO points (set_id, inputs, outputs, predictions)
-                    VALUES ({record.set_id}, {record.inputs}, {record.outputs}, {record.predictions})
+                    INSERT INTO test_points (model_id, inputs, outputs, predictions)
+                    VALUES ({record.model_id}, {record.inputs}, {record.outputs}, {record.predictions})
                 '''
 
             case cls if cls is ModelRecord:
