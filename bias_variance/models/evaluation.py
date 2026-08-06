@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 import numpy as np
+import pandas as pd
 import torch
 from sklearn.metrics import (
     mean_absolute_error,
@@ -22,11 +23,13 @@ class MetricName(StrEnum):
     MAE = "mae"
     R2 = "r2"
 
-DEFAULT_METRICS: frozenset[MetricName] = (
-    MetricName.RMSE,
-    MetricName.MSE,
-    MetricName.MAE,
-    MetricName.R2,
+DEFAULT_METRICS: frozenset[MetricName] = frozenset(
+    (
+        MetricName.RMSE,
+        MetricName.MSE,
+        MetricName.MAE,
+        MetricName.R2,
+    )
 )
 
 
@@ -42,7 +45,7 @@ class GroupUpdateData:
     variance: tuple[float, ...]
 
     @property
-    def data_row(self) -> tuple[str, tuple[float, ...], tuple[float, ...]]:
+    def data_row(self) -> tuple[int, tuple[float, ...], tuple[float, ...]]:
         return (self.group_id, self.bias, self.variance)
 
 
@@ -145,7 +148,7 @@ class Evaluator:
     def evaluate(
         self,
         run_id: str,
-    ) -> tuple[GroupUpdateData]:
+    ) -> tuple[GroupUpdateData, ...]:
         '''
         Evaluates the biases and variances for all variation groups in a study.
         There are two types of bias and variance pairs:
@@ -179,7 +182,7 @@ class Evaluator:
 
 def get_model_predictions(
     model: nn.Module,
-    x_test: torch.Tensor | np.ndarray,
+    x_test: torch.Tensor | pd.DataFrame,
     resolved_device: torch.device,
 ) -> np.ndarray:
     """Generate model predictions for a test input set.
@@ -192,7 +195,7 @@ def get_model_predictions(
     ----------
     model : nn.Module
         Trained model used to generate predictions.
-    x_test : torch.Tensor | np.ndarray
+    x_test : torch.Tensor | pd.DataFrame
         Test inputs used for prediction.
     resolved_device : torch.device
         Device where the test inputs should be placed for prediction.
@@ -203,7 +206,12 @@ def get_model_predictions(
         Model predictions returned as a NumPy array.
     """
     if not isinstance(x_test, torch.Tensor):
-        x_test = torch.from_numpy(x_test)
+        x_test = torch.as_tensor(
+            x_test.to_numpy(dtype=np.float32, copy=True),
+            dtype=torch.float32,
+        )
+    else:
+        x_test = x_test.to(dtype=torch.float32)
 
     model.eval()
 
@@ -215,10 +223,13 @@ def get_model_predictions(
     return predictions.cpu().numpy()
 
 def get_model_scores(
-    predictions:  np.ndarray,
-    y_test: np.ndarray,
+    predictions: np.ndarray,
+    y_test: torch.Tensor | pd.DataFrame,
     metrics: frozenset[MetricName]
 ) -> dict[str, float]:
+    if isinstance(y_test, torch.Tensor):
+        y_test = y_test.detach().cpu().numpy()
+
     scores = {}
     for metric in metrics:
         match(metric):
