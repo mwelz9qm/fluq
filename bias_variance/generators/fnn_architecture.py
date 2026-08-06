@@ -7,7 +7,7 @@ from types import MappingProxyType
 import numpy as np
 
 from ..models.fnn import FnnArchitecture
-from .base import Generator, Variation
+from .base import Generator, GeneratorConfig, Variation
 
 
 class ArchitectureName(StrEnum):
@@ -47,7 +47,7 @@ class FnnRandomArchitectureConfig:
 
     Each range must be a two-item tuple of integers with
     ``1 <= lower < upper``. Boolean bounds are not accepted. A range may be
-    ``None`` so that ``FnnArchitectureConfig`` can supply its default.
+    ``None`` so that ``FnnArchitectureGeneratorConfig`` can supply its default.
 
     Attributes
     ------------
@@ -120,7 +120,7 @@ class FnnTaperArchitectureConfig:
     ``0 < lower < upper < 1``. ``max_size`` must be a positive, non-boolean
     integer at least as large as the upper bound of ``start_size_range``, when
     that range is provided. Any attribute may be ``None`` so that
-    ``FnnArchitectureConfig`` can supply its default.
+    ``FnnArchitectureGeneratorConfig`` can supply its default.
     
     Attributes
     -----------
@@ -239,7 +239,7 @@ DEFAULT_TAPER_CONFIG = MappingProxyType({
 
 
 @dataclass(frozen=True, slots=True)
-class FnnArchitectureConfig:
+class FnnArchitectureGeneratorConfig(GeneratorConfig):
     '''
     Represents the complete configuration for the FNN architecture generator.
 
@@ -408,6 +408,21 @@ class FnnArchitectureConfig:
                 'NARROW below WIDE.'
             )
 
+    @property
+    def variation_labels(self) -> tuple[str]:
+        labels = [
+            architecture.value
+            for architecture
+            in self.range_architectures
+        ]
+        labels.extend([
+            architecture.value
+            for architecture
+            in self.taper_architectures
+        ])
+
+        return tuple(labels)
+
 
 @dataclass(frozen=True, slots=True)
 class FnnArchitectureVariation(Variation[FnnArchitecture]):
@@ -457,14 +472,14 @@ class FnnArchitectureGenerator(Generator[FnnArchitecture]):
 
     Attributes
     --------------
-    settings: FnnArchitectureConfig | None, default = None
+    settings: FnnArchitectureGeneratorConfig | None, default = None
         The generator's settings for configuring architecture ranges, rates, and maximums.
 
     Examples
     --------
     Generate every architecture using the predefined configurations:
 
-    >>> settings = FnnArchitectureConfig(
+    >>> settings = FnnArchitectureGeneratorConfig(
     ...     range_architectures=DEFAULT_RANDOM_CONFIG,
     ...     taper_architectures=DEFAULT_TAPER_CONFIG,
     ... )
@@ -473,7 +488,7 @@ class FnnArchitectureGenerator(Generator[FnnArchitecture]):
 
     Generate only a customized wide architecture:
 
-    >>> settings = FnnArchitectureConfig(
+    >>> settings = FnnArchitectureGeneratorConfig(
     ...     range_architectures={
     ...         ArchitectureName.WIDE: FnnRandomArchitectureConfig(
     ...             layer_range=(2, 5),
@@ -488,9 +503,9 @@ class FnnArchitectureGenerator(Generator[FnnArchitecture]):
     '''
     def __init__(
         self,
-        settings: FnnArchitectureConfig | None = None,
+        settings: FnnArchitectureGeneratorConfig | None = None,
     ) -> None:
-        self.settings = settings or FnnArchitectureConfig(
+        self.settings = settings or FnnArchitectureGeneratorConfig(
             DEFAULT_RANDOM_CONFIG,
             DEFAULT_TAPER_CONFIG
         )

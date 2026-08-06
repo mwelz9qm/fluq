@@ -4,7 +4,24 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from .base import Generator, Variation
+from .base import Generator, GeneratorConfig, Variation
+
+
+@dataclass(frozen=True, slots=True)
+class NoiseGeneratorConfig(GeneratorConfig):
+    dataset: pd.DataFrame
+    standard_deviations: Iterable[float] = (
+        0.1, 0.2, 0.3, 0.4, 0.5
+    )
+
+    @property
+    def variation_labels(self) -> tuple[str]:
+        labels = (
+            f"std_{standard_deviation:g}"
+            for standard_deviation
+            in self.standard_deviations
+        )
+        return labels
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,18 +35,11 @@ class NoiseVariation(Variation[pd.DataFrame]):
 class NoiseGenerator(Generator[pd.DataFrame]):
     def __init__(
         self,
-        dataset: pd.DataFrame,
-        standard_deviations: Iterable[float] = (
-            0.1,
-            0.2,
-            0.3,
-            0.4,
-            0.5,
-        ),
+        settings: NoiseGeneratorConfig
     ) -> None:
-        self._dataset = dataset.copy()
+        self._dataset = settings.dataset.copy()
         self._standard_deviations = self._validate_standard_deviations(
-            standard_deviations
+            settings.standard_deviations
         )
 
         non_numeric = self._dataset.select_dtypes(
