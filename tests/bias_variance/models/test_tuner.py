@@ -1,7 +1,56 @@
+from dataclasses import dataclass
+
+import pandas as pd
 import pytest
 
+from bias_variance.models.evaluation import MetricName
+from bias_variance.models.fnn import FnnArchitecture
 from bias_variance.models.training import TrainingConfig
 from bias_variance.models.tuner import Tuner, TunerConfig
+
+
+@dataclass(frozen=True, slots=True)
+class FakeDatasetSplit:
+    x_train: pd.DataFrame
+    x_test: pd.DataFrame
+    y_train: pd.DataFrame
+    y_test: pd.DataFrame
+
+
+@dataclass(frozen=True, slots=True)
+class FakeRunBaseline:
+    inputs: pd.DataFrame
+    outputs: pd.DataFrame
+    split: FakeDatasetSplit
+    architecture: FnnArchitecture
+
+
+@pytest.fixture
+def small_run_baseline():
+    inputs = pd.DataFrame(
+        {
+            "x0": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+            "x1": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        }
+    )
+    outputs = pd.DataFrame(
+        {
+            "y": [1.0, 3.0, 5.0, 7.0, 9.0, 11.0],
+        }
+    )
+    split = FakeDatasetSplit(
+        x_train=inputs.iloc[:4],
+        x_test=inputs.iloc[4:],
+        y_train=outputs.iloc[:4],
+        y_test=outputs.iloc[4:],
+    )
+
+    return FakeRunBaseline(
+        inputs=inputs,
+        outputs=outputs,
+        split=split,
+        architecture=FnnArchitecture(hidden_layers=(2,)),
+    )
 
 
 def test_tuner_uses_default_config_when_none_is_provided():
@@ -199,3 +248,80 @@ def test_build_training_config_from_params_returns_training_config():
     assert config.loss == "mse"
     assert config.epochs == 1
     assert config.batch_size == 2
+
+
+def test_tune_returns_training_config_for_small_baseline(small_run_baseline):
+    tuner = Tuner(
+        TunerConfig(
+            n_trials=1,
+            metric="rmse",
+            optimizer_choices=("adam",),
+            learning_rate_range=(1e-4, 1e-3),
+            loss_choices=("mse",),
+            epoch_choices=(1,),
+            batch_size_choices=(2,),
+        )
+    )
+
+    config = tuner.tune(
+        baseline=small_run_baseline,
+        test_metrics=frozenset({MetricName.RMSE}),
+        random_state=42,
+    )
+
+    assert isinstance(config, TrainingConfig)
+
+
+@pytest.mark.parametrize(
+    "metric",
+    (
+        MetricName.RMSE,
+        MetricName.MSE,
+        MetricName.MAE,
+        MetricName.R2,
+    ),
+)
+def test_tune_supports_each_test_metric(metric, small_run_baseline):
+    tuner = Tuner(
+        TunerConfig(
+            n_trials=1,
+            metric=metric.value,
+            optimizer_choices=("adam",),
+            learning_rate_range=(1e-4, 1e-3),
+            loss_choices=("mse",),
+            epoch_choices=(1,),
+            batch_size_choices=(2,),
+        )
+    )
+
+    config = tuner.tune(
+        baseline=small_run_baseline,
+        test_metrics=frozenset({metric}),
+        random_state=42,
+    )
+
+    assert isinstance(config, TrainingConfig)
+
+
+def test_tune_is_reproducible_with_same_random_state(small_run_baseline):
+    tuner_config = TunerConfig(
+        n_trials=2,
+        metric="rmse",
+        optimizer_choices=("adam", "sgd"),
+        learning_rate_range=(1e-4, 1e-3),
+        loss_choices=("mse",),
+        epoch_choices=(1,),
+        batch_size_choices=(2,),
+    )
+
+    first_config = Tuner(tuner_config).tune(
+        baseline=small_run_baseline,
+        test_metrics=frozenset({MetricName.RMSE}),
+        random_state=42,
+    )
+    second_config = Tuner(tuner_config).tune(
+        baseline=small_run_baseline,
+        test_metrics=frozenset({MetricName.RMSE}),
+        random_state=42,
+    )
+    assert first_config == second_config
