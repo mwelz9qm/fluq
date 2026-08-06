@@ -6,8 +6,8 @@ from dataclasses import dataclass
 class GeneratorConfig(ABC):
     '''Configures generator settings.'''
 
-    @abstractmethod
     @property
+    @abstractmethod
     def variation_labels(self) -> tuple[str]:
         '''Returns all variation labels.'''
         raise NotImplementedError
