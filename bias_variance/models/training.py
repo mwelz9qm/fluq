@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 import numpy as np
+import pandas as pd
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader, TensorDataset
@@ -78,8 +79,8 @@ class Trainer:
     def train(
         self,
         architecture: FnnArchitecture,
-        x_train: torch.Tensor,
-        y_train: torch.Tensor,
+        x_train: torch.Tensor | pd.DataFrame,
+        y_train: torch.Tensor | pd.DataFrame,
         random_state: int | None,
     ) -> nn.Sequential:
         '''
@@ -91,9 +92,9 @@ class Trainer:
         -----------
         architecture: FnnArchitecture
 
-        x_train: torch.Tensor
+        x_train: torch.Tensor | pd.DataFrame
 
-        y_train: torch.Tensor
+        y_train: torch.Tensor | pd.DataFrame
 
         random_state: int | None
 
@@ -102,6 +103,22 @@ class Trainer:
         nn.Sequential
             The trained model.
         '''
+        if not isinstance(x_train, torch.Tensor):
+            x_train = torch.as_tensor(
+                x_train.to_numpy(dtype=np.float32, copy=True),
+                dtype=torch.float32,
+            )
+        else:
+            x_train = x_train.to(dtype=torch.float32)
+
+        if not isinstance(y_train, torch.Tensor):
+            y_train = torch.as_tensor(
+                y_train.to_numpy(dtype=np.float32, copy=True),
+                dtype=torch.float32,
+            )
+        else:
+            y_train = y_train.to(dtype=torch.float32)
+
         model = _build_model(
             architecture,
             self.model_builder,
