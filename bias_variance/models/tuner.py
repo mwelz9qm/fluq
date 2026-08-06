@@ -310,8 +310,8 @@ class Tuner:
 
         x_train = self._to_tensor(baseline.split.x_train)
         y_train = self._to_tensor(baseline.split.y_train)
-        x_test = baseline.split.x_test.to_numpy(dtype=np.float32, copy=True)
-        y_test = baseline.split.y_test.to_numpy(dtype=np.float32, copy=True)
+        x_test = baseline.split.x_test
+        y_test = baseline.split.y_test
 
         trained_model = trainer.train(
             architecture=baseline.architecture,
