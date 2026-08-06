@@ -8,7 +8,7 @@ class GeneratorConfig(ABC):
 
     @property
     @abstractmethod
-    def variation_labels(self) -> tuple[str]:
+    def variation_labels(self) -> tuple[str, ...]:
         '''Returns all variation labels.'''
         raise NotImplementedError
 
