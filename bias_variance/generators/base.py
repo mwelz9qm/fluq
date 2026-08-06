@@ -3,6 +3,17 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
+class GeneratorConfig(ABC):
+    '''Configures generator settings.'''
+
+    @abstractmethod
+    @property
+    def variation_labels(self) -> tuple[str]:
+        '''Returns all variation labels.'''
+        raise NotImplementedError
+
+
+@dataclass(frozen=True, slots=True)
 class Variation[Generated]:
     '''
     Represents the base variation returned by any Generator.
