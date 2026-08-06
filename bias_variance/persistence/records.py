@@ -4,6 +4,7 @@ from datetime import datetime
 
 @dataclass(frozen=True, slots=True)
 class RunRecord:
+    run_id: str # primary, in uuid format
     created_at: datetime
     n_iter: int
     test_size: float
@@ -18,16 +19,12 @@ class RunRecord:
     output_columns: tuple[str, ...]
     base_architecture: tuple[int, ...]
 
-    run_id: str # primary
-
 
 @dataclass(frozen=True, slots=True)
 class StudyRecord:
     run_id: str # foreign
     study_name: str
     evaluation_method: str
-
-    study_id: int | None = None # primary
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,15 +34,11 @@ class GroupRecord:
     bias: tuple[float, ...] | None = None
     variance: tuple[float, ...] | None = None
 
-    group_id: int | None = None # primary
-
 
 @dataclass(frozen=True, slots=True)
 class ModelRecord:
     group_id: int # foreign
     architecture: tuple[int, ...]
-
-    model_id: int | None = None # primary
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,26 +47,20 @@ class ScoreRecord:
     metric: str
     score: float
 
-    score_id: int | None = None # primary
-
 
 @dataclass(frozen=True, slots=True)
 class TrainPointRecord:
     model_id: int | None # foreign
-    run_id: int | None # foreign
+    run_id: str | None # foreign
     inputs: tuple[float, ...]
     outputs: tuple[float, ...]
-
-    train_point_id: int | None = None # primary
 
 
 @dataclass(frozen=True, slots=True)
 class TestPointRecord:
     model_id: int | None # foreign
-    run_id: int | None # foreign
+    run_id: str | None # foreign
     set_position: int
     inputs: tuple[float, ...]
     outputs: tuple[float, ...]
     predictions: tuple[float, ...]
-
-    test_point_id: int | None = None # primary
