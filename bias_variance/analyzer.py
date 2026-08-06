@@ -1,4 +1,3 @@
-from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -8,13 +7,16 @@ import pandas as pd
 import torch
 from sklearn.model_selection import train_test_split
 
-from bias_variance.generators.base import Generator
+from bias_variance.generators.base import Generator, GeneratorConfig
 from bias_variance.generators.fnn_architecture import (
-    FnnArchitectureConfig,
     FnnArchitectureGenerator,
+    FnnArchitectureGeneratorConfig,
 )
-from bias_variance.generators.noise import NoiseGenerator
-from bias_variance.generators.sampling import SamplingGenerator, SamplingStrategy
+from bias_variance.generators.noise import NoiseGenerator, NoiseGeneratorConfig
+from bias_variance.generators.sampling import (
+    SamplingGenerator,
+    SamplingGeneratorConfig,
+)
 from bias_variance.models.evaluation import (
     EvaluationMethod,
     Evaluator,
@@ -46,24 +48,24 @@ class StudyName(StrEnum):
 class Study:
     study_name: StudyName
     evaluation_method: EvaluationMethod
-    generator_config: FnnArchitectureConfig | Iterable[SamplingStrategy] | Iterable[float]
+    generator_config: GeneratorConfig
 
     def __post_init__(self) -> None:
         match self.study_name:
             case StudyName.MODEL:
-                if not isinstance(self.generator_config, FnnArchitectureGenerator):
+                if not isinstance(self.generator_config, FnnArchitectureGeneratorConfig):
                     raise TypeError(
                         f'Mismatched generator_config type with study_name: {self.generator_config!r}, {self.study_name!r}.'
                     )
                 
             case StudyName.SAMPLING:
-                if not isinstance(self.generator_config, Iterable[SamplingStrategy]):
+                if not isinstance(self.generator_config, SamplingGeneratorConfig):
                     raise TypeError(
                         f'Mismatched generator_config type with study_name: {self.generator_config!r}, {self.study_name!r}.'
                     )
 
             case StudyName.DATA:
-                if not isinstance(self.generator_config, Iterable[float]):
+                if not isinstance(self.generator_config, NoiseGeneratorConfig):
                     raise TypeError(
                         f'Mismatched generator_config type with study_name: {self.generator_config!r}, {self.study_name!r}.'
                     )
@@ -123,13 +125,68 @@ class BiasAnalyzer:
         result_store: ResultStore,
     ):
         self.result_store = result_store
-        self.recent_run_id = result_store.get_recent_run()
 
-    def _build_generator(
-        self,
+    @staticmethod
+    def _create_split_and_architecture(
+        study_description: tuple[StudyName, EvaluationMethod],
+        baseline: RunBaseline,
+        generated_variation: pd.DataFrame | FnnArchitecture,
+        test_size: float,
+        random_state: int | None,
+    ) -> tuple[DatasetSplit, FnnArchitecture]:
+        match study_description:
+            case (StudyName.MODEL, EvaluationMethod.POINTWISE):
+                split = tuple(
+                    frame.to_numpy(dtype=np.float32, copy=True)
+                    for frame in baseline.split.full
+                )
+                architecture = generated_variation
+        
+            case (StudyName.MODEL, EvaluationMethod.AVERAGING):
+                split = tuple(
+                    train_test_split(
+                        baseline.inputs,
+                        baseline.outputs,
+                        test_size=test_size,
+                        random_state=random_state
+                    )
+                )
+                architecture = generated_variation
+        
+            case (_, EvaluationMethod.POINTWISE):
+                frames = (
+                    generated_variation[baseline.inputs.columns],
+                    baseline.split.x_test,
+                    generated_variation[baseline.outputs.columns],
+                    baseline.split.y_test,
+                )
+                split = tuple(
+                    frame.to_numpy(dtype=np.float32, copy=True)
+                    for frame in frames
+                )
+                architecture = baseline.architecture
+        
+            case (_, EvaluationMethod.AVERAGING):
+                split = tuple(
+                    train_test_split(
+                        generated_variation[baseline.inputs.columns],
+                        generated_variation[baseline.outputs.columns],
+                        test_size=test_size,
+                        random_state=random_state
+                    )
+                )
+                architecture = baseline.architecture
+        
+            case _:
+                raise ValueError(
+                    f'Unknown study_description: {study_description!r}.'
+                )
+
+        return DatasetSplit(*split), architecture
+
+    @staticmethod
+    def _create_generator(
         study: Study,
-        base_train_set: pd.DataFrame,
-        base_dataset: pd.DataFrame,
     ) -> Generator[FnnArchitecture] | Generator[pd.DataFrame]:
         match study.description:
             case (StudyName.MODEL, _):
@@ -139,26 +196,22 @@ class BiasAnalyzer:
 
             case (StudyName.SAMPLING, EvaluationMethod.POINTWISE):
                 return SamplingGenerator(
-                    dataset=base_train_set,
-                    strategies=study.generator_config,
+                    settings=study.generator_config,
                 )
 
             case (StudyName.SAMPLING, EvaluationMethod.AVERAGING):
                 return SamplingGenerator(
-                    dataset=base_dataset,
-                    strategies=study.generator_config,
+                    settings=study.generator_config,
                 )
 
             case (StudyName.DATA, EvaluationMethod.POINTWISE):
                 return NoiseGenerator(
-                    dataset=base_train_set,
-                    standard_deviations=study.generator_config,
+                    settings=study.generator_config,
                 )
 
             case (StudyName.DATA, EvaluationMethod.AVERAGING):
                 return NoiseGenerator(
-                    dataset=base_dataset,
-                    standard_deviations=study.generator_config,
+                    settings=study.generator_config,
                 )
 
             case _:
@@ -178,83 +231,53 @@ class BiasAnalyzer:
         baseline: RunBaseline,
         trainer: Trainer,
     ) -> None:
-        for i in np.arange(n_iter):
-            generator = self._build_generator(
-                study,
-                baseline.split.train_set,
-                baseline.dataset,
+        # create generator for study
+        generator = self._create_generator(study)
+
+        # initialize set of group ids
+        group_ids = set()
+        for variation_label in study.generator_config.variation_labels:
+            # build and store group record
+            group_record = GroupRecord(
+                study_id=study_id,
+                group_name=variation_label
             )
+            group_id = self.result_store.add(group_record)
+
+            # add the group id
+            group_ids.add(group_id)
+
+        # run model training loop
+        for _ in np.arange(n_iter):
+
+            # generate the study variations
             variations = generator.generate(random_state=random_state)
-            group_ids = set()
+
+            # run variation loop
             for j, variation in enumerate(variations):
-                if i == 0:
-                    group_record = GroupRecord(
-                        study_id=study_id,
-                        group_name=variation.label
-                    )
-                    group_id = self.result_store.add(group_record)
-                    group_ids.add(group_id)
 
-                match study.description:
-                    case (StudyName.MODEL, EvaluationMethod.POINTWISE):
-                        split = tuple(
-                            frame.to_numpy(dtype=np.float32, copy=True)
-                            for frame in baseline.split.full
-                        )
-                        architecture = variation.generated
+                # create the model's train-test split and architecture
+                split, architecture = self._create_split_and_architecture(
+                    study.description,
+                    baseline,
+                    variation.generated,
+                    test_size,
+                    random_state
+                )
 
-                    case (StudyName.MODEL, EvaluationMethod.AVERAGING):
-                        split = tuple(
-                            train_test_split(
-                                baseline.inputs,
-                                baseline.outputs,
-                                test_size=test_size,
-                                random_state=random_state
-                            )
-                        )
-                        architecture = variation.generated
-
-                    case (_, EvaluationMethod.POINTWISE):
-                        frames = (
-                            variation.generated[baseline.inputs.columns],
-                            baseline.split.x_test,
-                            variation.generated[baseline.outputs.columns],
-                            baseline.split.y_test,
-                        )
-                        split = tuple(
-                            frame.to_numpy(dtype=np.float32, copy=True)
-                            for frame in frames
-                        )
-                        architecture = baseline.architecture
-
-                    case (_, EvaluationMethod.AVERAGING):
-                        split = tuple(
-                            train_test_split(
-                                variation.generated[baseline.inputs.columns],
-                                variation.generated[baseline.outputs.columns],
-                                test_size=test_size,
-                                random_state=random_state
-                            )
-                        )
-                        architecture = baseline.architecture
-
-                    case _:
-                        raise ValueError(
-                            f'Unknown study: {study!r}.'
-                        )
-
+                # build and store model record
                 model_record = ModelRecord(
                     group_id=group_ids[j],
                     architecture=architecture.hidden_layers
                 )
                 model_id = self.result_store.add(model_record)
 
-                dataset_split = DatasetSplit(*split)
-
+                # train point record building loop
                 for inputs, outputs in zip(
-                    dataset_split.x_train.itertuples(),
-                    dataset_split.y_train.itertuples()
+                    split.x_train.itertuples(),
+                    split.y_train.itertuples()
                 ):
+                    # build and store the train point record
                     train_point_record = TrainPointRecord(
                         model_id=model_id,
                         run_id=None,
@@ -263,24 +286,28 @@ class BiasAnalyzer:
                     )
                     self.result_store.add(train_point_record)
 
+                # train model with model trainer
                 trained_model = trainer.train(
                     architecture=architecture,
-                    x_train=dataset_split.x_train,
-                    y_train=dataset_split.y_train,
+                    x_train=split.x_train,
+                    y_train=split.y_train,
                     random_state=random_state
                 )
-                
+
+                # get the model's predictions
                 model_predictions = get_model_predictions(
                     model=trained_model,
-                    x_test=dataset_split.x_test,
+                    x_test=split.x_test,
                     resolved_device=resolved_device,
                 )
 
+                # test point record building loop
                 for inputs, outputs, row_predictions in zip(
-                    dataset_split.x_test.itertuples(),
-                    dataset_split.y_test.itertuples(),
+                    split.x_test.itertuples(),
+                    split.y_test.itertuples(),
                     model_predictions
                 ):
+                    # build and store the test point record
                     test_point_record = TestPointRecord(
                         model_id=model_id,
                         run_id=None,
@@ -290,14 +317,17 @@ class BiasAnalyzer:
                         predictions=row_predictions
                     )
                     self.result_store.add(test_point_record)
-                
+
+                # get the model's scores
                 scores = get_model_scores(
                     predictions=row_predictions,
-                    y_test=dataset_split.y_test,
+                    y_test=split.y_test,
                     metrics=test_metrics,
                 )
 
+                # score record building loop
                 for metric, score in scores.items():
+                    # build and store score record
                     score_record = ScoreRecord(
                         model_id=model_id,
                         metric=metric,
@@ -310,6 +340,7 @@ class BiasAnalyzer:
         run_config: RunConfig,
         training_config: TrainingConfig,
     ) -> 'BiasAnalyzer':
+        # build and store run record
         run_record = RunRecord(
             run_id='--INSERT UUID--',
             created_at=datetime.now(tz=''),
@@ -331,14 +362,17 @@ class BiasAnalyzer:
             output_columns=run_config.baseline.outputs.columns
         )
         run_id = self.result_store.add(run_record)
-        
+
+        # build model trainer for every study
         trainer =  Trainer(training_config)
         trainer.set_model_builder(
             run_config.baseline.inputs.shape[1],
             run_config.baseline.outputs.shape[1]
         )
-        
+
+        # run study loop
         for study in run_config.studies:
+            # create and store study record
             study_record = StudyRecord(
                 run_id=run_id,
                 study_name=study.study_name.value,
@@ -346,6 +380,7 @@ class BiasAnalyzer:
             )
             study_id = self.result_store.add(study_record)
 
+            # run the study
             self._run_study(
                 study_id,
                 study,
@@ -357,11 +392,10 @@ class BiasAnalyzer:
                 run_config.baseline,
                 trainer
             )
-        
+
+        # commit all run results and close result store connection
         self.result_store.commit()
         self.result_store.close()
-
-        self.recent_run_id = run_id
 
         return self
 
@@ -370,7 +404,7 @@ class BiasAnalyzer:
         run_id: str | None = None
     ) -> pd.DataFrame:
         if run_id is None:
-            run_id = self.recent_run_id
+            run_id = self.result_store.get_recent_run()
 
         if not run_id:
             raise ValueError(
