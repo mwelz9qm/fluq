@@ -29,6 +29,13 @@ from bias_variance.persistence.serialize import (
 )
 
 type Record = RunRecord | StudyRecord | GroupRecord | ModelRecord | ScoreRecord | TrainPointRecord | TestPointRecord
+type BiasVarianceResult = tuple[
+    str,
+    str,
+    str,
+    tuple[float, ...] | None,
+    tuple[float, ...] | None,
+]
 
 
 class TableName(StrEnum):
@@ -595,6 +602,46 @@ class ResultStore:
         )
 
         return actuals, predictions
+
+    def get_bias_variance_results(
+        self,
+        run_id: str,
+    ) -> tuple[BiasVarianceResult, ...]:
+        """Return the evaluated bias and variance rows for one run."""
+        cur = self._connection.cursor()
+        cur.execute(
+            f'''
+            SELECT
+                s.study_name,
+                g.group_name,
+                s.evaluation_method,
+                g.bias,
+                g.variance
+            FROM {TableName.RUNS.value} AS r
+            INNER JOIN {TableName.STUDIES.value} AS s
+                ON r.run_id = s.run_id
+            INNER JOIN {TableName.GROUPS.value} AS g
+                ON s.study_id = g.study_id
+            WHERE r.run_id = ?
+            ORDER BY s.study_id, g.group_id
+            ''',
+            (run_id,),
+        )
+
+        return tuple(
+            (
+                str(row['study_name']),
+                str(row['group_name']),
+                str(row['evaluation_method']),
+                None if row['bias'] is None else tuple(
+                    float(value) for value in decode_json_array(row['bias'])
+                ),
+                None if row['variance'] is None else tuple(
+                    float(value) for value in decode_json_array(row['variance'])
+                ),
+            )
+            for row in cur.fetchall()
+        )
 
     def get_method(self, group_id: int) -> str:
         """Return the evaluation method that applies to a group.
