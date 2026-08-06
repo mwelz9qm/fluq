@@ -1,3 +1,4 @@
+import itertools
 from dataclasses import FrozenInstanceError
 
 import numpy as np
@@ -5,8 +6,8 @@ import pytest
 
 from bias_variance.generators.fnn_architecture import (
     ArchitectureName,
-    FnnArchitectureConfig,
     FnnArchitectureGenerator,
+    FnnArchitectureGeneratorConfig,
     FnnArchitectureVariation,
     FnnRandomArchitectureConfig,
     FnnTaperArchitectureConfig,
@@ -95,19 +96,19 @@ def test_max_size_must_cover_start_size_range_upper_bound():
 
 def test_architecture_collections_must_be_mappings():
     with pytest.raises(TypeError, match='range_architectures must be a mapping'):
-        FnnArchitectureConfig(range_architectures=[])
+        FnnArchitectureGeneratorConfig(range_architectures=[])
 
 
 def test_architecture_mapping_keys_must_be_architecture_names():
     with pytest.raises(TypeError, match='keys must be ArchitectureName'):
-        FnnArchitectureConfig(
+        FnnArchitectureGeneratorConfig(
             range_architectures={'wide': FnnRandomArchitectureConfig()}
         )
 
 
 def test_architecture_names_must_be_in_the_correct_mapping():
     with pytest.raises(ValueError, match='not supported'):
-        FnnArchitectureConfig(
+        FnnArchitectureGeneratorConfig(
             range_architectures={
                 ArchitectureName.TAPER: FnnRandomArchitectureConfig()
             }
@@ -116,7 +117,7 @@ def test_architecture_names_must_be_in_the_correct_mapping():
 
 def test_architecture_mapping_values_must_have_the_correct_config_type():
     with pytest.raises(TypeError, match='must be a FnnRandomArchitectureConfig'):
-        FnnArchitectureConfig(
+        FnnArchitectureGeneratorConfig(
             range_architectures={
                 ArchitectureName.WIDE: FnnTaperArchitectureConfig()
             }
@@ -125,7 +126,7 @@ def test_architecture_mapping_values_must_have_the_correct_config_type():
 
 def test_wide_and_narrow_layer_ranges_must_be_disjoint_and_ordered():
     with pytest.raises(ValueError, match='layer_range values must be disjoint'):
-        FnnArchitectureConfig(
+        FnnArchitectureGeneratorConfig(
             range_architectures={
                 ArchitectureName.WIDE: FnnRandomArchitectureConfig(
                     layer_range=(1, 17),
@@ -139,7 +140,7 @@ def test_wide_and_narrow_layer_ranges_must_be_disjoint_and_ordered():
 
 def test_wide_and_narrow_size_ranges_must_be_disjoint_and_ordered():
     with pytest.raises(ValueError, match='size_range values must be disjoint'):
-        FnnArchitectureConfig(
+        FnnArchitectureGeneratorConfig(
             range_architectures={
                 ArchitectureName.WIDE: FnnRandomArchitectureConfig(
                     size_range=(63, 256),
@@ -152,7 +153,7 @@ def test_wide_and_narrow_size_ranges_must_be_disjoint_and_ordered():
 
 
 def test_default_random_config_satisfies_cross_architecture_rules():
-    config = FnnArchitectureConfig(
+    config = FnnArchitectureGeneratorConfig(
         range_architectures={
             ArchitectureName.WIDE: FnnRandomArchitectureConfig(),
             ArchitectureName.NARROW: FnnRandomArchitectureConfig(),
@@ -187,7 +188,7 @@ def test_architecture_config_mappings_and_values_are_immutable():
     source = {
         ArchitectureName.WIDE: FnnRandomArchitectureConfig(),
     }
-    config = FnnArchitectureConfig(range_architectures=source)
+    config = FnnArchitectureGeneratorConfig(range_architectures=source)
     source.clear()
 
     assert ArchitectureName.WIDE in config.range_architectures
@@ -225,7 +226,7 @@ def test_reverse_taper_uses_a_positive_decay_multiplier():
         max_size=21,
     )
     generator = FnnArchitectureGenerator(
-        FnnArchitectureConfig(
+        FnnArchitectureGeneratorConfig(
             taper_architectures={
                 ArchitectureName.REVERSE_TAPER: config,
             }
@@ -252,7 +253,7 @@ def test_combined_taper_grows_and_then_shrinks():
         max_size=100,
     )
     generator = FnnArchitectureGenerator(
-        FnnArchitectureConfig(
+        FnnArchitectureGeneratorConfig(
             taper_architectures={
                 ArchitectureName.COMBINED_TAPER: config,
             }
@@ -266,10 +267,7 @@ def test_combined_taper_grows_and_then_shrinks():
 
     assert all(
         left <= right
-        for left, right in zip(
-            hidden_layers[:midpoint],
-            hidden_layers[1:midpoint],
-        )
+        for left, right in itertools.pairwise(hidden_layers)
     )
     assert all(
         left >= right

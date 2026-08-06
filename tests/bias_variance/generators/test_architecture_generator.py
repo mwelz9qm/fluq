@@ -1,3 +1,5 @@
+import itertools
+
 import pytest
 
 from bias_variance.generators.fnn_architecture import (
@@ -104,7 +106,7 @@ def test_taper_is_non_decreasing():
 
     assert all(
         left <= right
-        for left, right in zip(hidden_layers, hidden_layers[1:])
+        for left, right in itertools.pairwise(hidden_layers)
     )
 
 
@@ -123,7 +125,7 @@ def test_reverse_taper_is_non_increasing_and_never_zero():
 
     assert all(
         left >= right
-        for left, right in zip(hidden_layers, hidden_layers[1:])
+        for left, right in itertools.pairwise(hidden_layers)
     )
     assert min(hidden_layers) == 1
 
