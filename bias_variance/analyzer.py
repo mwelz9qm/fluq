@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from os import PathLike
+from pathlib import Path
+from typing import Self
 
 import numpy as np
 import pandas as pd
@@ -122,9 +125,12 @@ class RunConfig:
 class BiasAnalyzer:
     def __init__(
         self,
-        result_store: ResultStore,
-    ):
-        self.result_store = result_store
+        db_path: str | PathLike[str] = 'bias_variance.splite3',
+        *,
+        db_timeout: float = 5.0
+    ) -> None:
+        self.db_path = Path(db_path).expanduser().resolve()
+        self.db_timeout = db_timeout
 
     @staticmethod
     def _create_split_and_architecture(
@@ -230,6 +236,7 @@ class BiasAnalyzer:
         random_state: int | None,
         baseline: RunBaseline,
         trainer: Trainer,
+        store: ResultStore
     ) -> None:
         # create generator for study
         generator = self._create_generator(study)
@@ -242,7 +249,7 @@ class BiasAnalyzer:
                 study_id=study_id,
                 group_name=variation_label
             )
-            group_id = self.result_store.add(group_record)
+            group_id = store.add(group_record)
 
             # add the group id
             group_ids.add(group_id)
@@ -270,12 +277,12 @@ class BiasAnalyzer:
                     group_id=group_ids[j],
                     architecture=architecture.hidden_layers
                 )
-                model_id = self.result_store.add(model_record)
+                model_id = store.add(model_record)
 
                 # train point record building loop
                 for inputs, outputs in zip(
-                    split.x_train.itertuples(),
-                    split.y_train.itertuples()
+                    split.x_train.itertuples(index=False, name=None),
+                    split.y_train.itertuples(index=False, name=None),
                 ):
                     # build and store the train point record
                     train_point_record = TrainPointRecord(
@@ -284,7 +291,7 @@ class BiasAnalyzer:
                         inputs=inputs,
                         outputs=outputs,
                     )
-                    self.result_store.add(train_point_record)
+                    store.add(train_point_record)
 
                 # train model with model trainer
                 trained_model = trainer.train(
@@ -302,21 +309,22 @@ class BiasAnalyzer:
                 )
 
                 # test point record building loop
-                for inputs, outputs, row_predictions in zip(
-                    split.x_test.itertuples(),
-                    split.y_test.itertuples(),
-                    model_predictions
+                for set_position, inputs, outputs, row_predictions in zip(
+                    split.x_test.index,
+                    split.x_test.itertuples(index=False, name=None),
+                    split.y_test.itertuples(index=False, name=None),
+                    model_predictions,
                 ):
                     # build and store the test point record
                     test_point_record = TestPointRecord(
                         model_id=model_id,
                         run_id=None,
-                        set_position=inputs.index,
+                        set_position=int(set_position),
                         inputs=inputs,
                         outputs=outputs,
                         predictions=row_predictions
                     )
-                    self.result_store.add(test_point_record)
+                    store.add(test_point_record)
 
                 # get the model's scores
                 scores = get_model_scores(
@@ -333,69 +341,71 @@ class BiasAnalyzer:
                         metric=metric,
                         score=score
                     )
-                    self.result_store.add(score_record)
+                    store.add(score_record)
 
     def run_studies(
         self,
         run_config: RunConfig,
         training_config: TrainingConfig,
-    ) -> 'BiasAnalyzer':
-        # build and store run record
-        run_record = RunRecord(
-            run_id='--INSERT UUID--',
-            created_at=datetime.now(tz=''),
-            n_iter=run_config.n_iter,
-            test_size=run_config.test_size,
-            test_metrics=run_config.test_metrics,
-            optimizer=training_config.optimizer,
-            learning_rate=training_config.learning_rate,
-            train_loss=training_config.loss,
-            epochs=training_config.epochs,
-            batch_size=training_config.batch_size,
-            device=training_config.device,
-            base_architecture=run_config.baseline.architecture,
-            base_x_train=run_config.baseline.split.x_train.to_numpy(),
-            base_y_train=run_config.baseline.split.y_train.to_numpy(),
-            base_x_test=run_config.baseline.split.x_test.to_numpy(),
-            base_y_test=run_config.baseline.split.y_test.to_numpy(),
-            input_columns=run_config.baseline.inputs.columns,
-            output_columns=run_config.baseline.outputs.columns
-        )
-        run_id = self.result_store.add(run_record)
-
-        # build model trainer for every study
-        trainer =  Trainer(training_config)
-        trainer.set_model_builder(
-            run_config.baseline.inputs.shape[1],
-            run_config.baseline.outputs.shape[1]
-        )
-
-        # run study loop
-        for study in run_config.studies:
-            # create and store study record
-            study_record = StudyRecord(
-                run_id=run_id,
-                study_name=study.study_name.value,
-                evaluation_method=study.evaluation_method.value
+    ) -> Self:
+        # maintain result store lifecyle within method call
+        with ResultStore(self.db_path, timeout=self.db_timeout) as store:
+            # create the database tables
+            store.create_tables()
+        
+            # build and store run record
+            run_record = RunRecord(
+                run_id='--INSERT UUID--',
+                created_at=datetime.now(tz=''),
+                n_iter=run_config.n_iter,
+                test_size=run_config.test_size,
+                test_metrics=run_config.test_metrics,
+                optimizer=training_config.optimizer,
+                learning_rate=training_config.learning_rate,
+                train_loss=training_config.loss,
+                epochs=training_config.epochs,
+                batch_size=training_config.batch_size,
+                device=training_config.device,
+                base_architecture=run_config.baseline.architecture,
+                base_x_train=run_config.baseline.split.x_train.to_numpy(),
+                base_y_train=run_config.baseline.split.y_train.to_numpy(),
+                base_x_test=run_config.baseline.split.x_test.to_numpy(),
+                base_y_test=run_config.baseline.split.y_test.to_numpy(),
+                input_columns=run_config.baseline.inputs.columns,
+                output_columns=run_config.baseline.outputs.columns
             )
-            study_id = self.result_store.add(study_record)
+            run_id = store.add(run_record)
 
-            # run the study
-            self._run_study(
-                study_id,
-                study,
-                run_config.n_iter,
-                run_config.test_size,
-                run_config.test_metrics,
-                training_config.resolved_device,
-                run_config.random_state,
-                run_config.baseline,
-                trainer
+            # build model trainer for every study
+            trainer =  Trainer(training_config)
+            trainer.set_model_builder(
+                run_config.baseline.inputs.shape[1],
+                run_config.baseline.outputs.shape[1]
             )
 
-        # commit all run results and close result store connection
-        self.result_store.commit()
-        self.result_store.close()
+            # run study loop
+            for study in run_config.studies:
+                # create and store study record
+                study_record = StudyRecord(
+                    run_id=run_id,
+                    study_name=study.study_name.value,
+                    evaluation_method=study.evaluation_method.value
+                )
+                study_id = store.add(study_record)
+
+                # run the study
+                self._run_study(
+                    study_id,
+                    study,
+                    run_config.n_iter,
+                    run_config.test_size,
+                    run_config.test_metrics,
+                    training_config.resolved_device,
+                    run_config.random_state,
+                    run_config.baseline,
+                    trainer,
+                    store
+                )
 
         return self
 
@@ -403,23 +413,27 @@ class BiasAnalyzer:
         self,
         run_id: str | None = None
     ) -> pd.DataFrame:
-        if run_id is None:
-            run_id = self.result_store.get_recent_run()
+        with ResultStore(self.db_path, timeout=self.db_timeout) as store:
+            store.create_tables()
 
-        if not run_id:
-            raise ValueError(
-                'No runs performed. Call run_studies() to get run.'
-            )
-        
-        evaluator = Evaluator(self.result_store)
-        group_updates = evaluator.evaluate(run_id)
-        for group_update in group_updates:
-            self.result_store.update_group(
-                group_update.group_id,
-                group_update.bias,
-                group_update.variance
-            )
+            if run_id is None:
+                run_id = store.get_recent_run()
 
-        results = pd.DataFrame() # TODO: Use result_store to build dataframe with study_name, group_name, evaluation_method, strategy_bias, and strategy_variance.
+            if not run_id:
+                raise ValueError(
+                    'No runs performed. Call run_studies() to get run.'
+                )
+
+            evaluator = Evaluator(store)
+            group_updates = evaluator.evaluate(run_id)
+
+            for group_update in group_updates:
+                store.update_group(
+                    group_update.group_id,
+                    group_update.bias,
+                    group_update.variance
+                )
+
+            results = pd.DataFrame() # TODO: Use result_store to build dataframe with study_name, group_name, evaluation_method, strategy_bias, and strategy_variance.
 
         return results
