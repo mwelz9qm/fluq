@@ -1,9 +1,10 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from os import PathLike
 from pathlib import Path
 from typing import Self
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -114,18 +115,20 @@ class RunBaseline:
 
 @dataclass(frozen=True, slots=True)
 class RunConfig:
-    n_iter: int = 100
-    test_size: float = 0.2
-    test_metrics: frozenset[MetricName]
-    random_state: int | None = None
     baseline: RunBaseline
     studies: tuple[Study]
+    n_iter: int = 100
+    test_size: float = 0.2
+    test_metrics: frozenset[MetricName] = frozenset(
+        (MetricName.MSE, MetricName.R2)
+    )
+    random_state: int | None = None
 
 
 class BiasAnalyzer:
     def __init__(
         self,
-        db_path: str | PathLike[str] = 'bias_variance.splite3',
+        db_path: str | PathLike[str] = 'bias_variance.sqlite3',
         *,
         db_timeout: float = 5.0
     ) -> None:
@@ -143,7 +146,7 @@ class BiasAnalyzer:
         match study_description:
             case (StudyName.MODEL, EvaluationMethod.POINTWISE):
                 split = tuple(
-                    frame.to_numpy(dtype=np.float32, copy=True)
+                    frame.astype(np.float32).copy()
                     for frame in baseline.split.full
                 )
                 architecture = generated_variation
@@ -167,7 +170,7 @@ class BiasAnalyzer:
                     baseline.split.y_test,
                 )
                 split = tuple(
-                    frame.to_numpy(dtype=np.float32, copy=True)
+                    frame.astype(np.float32).copy()
                     for frame in frames
                 )
                 architecture = baseline.architecture
@@ -241,8 +244,8 @@ class BiasAnalyzer:
         # create generator for study
         generator = self._create_generator(study)
 
-        # initialize set of group ids
-        group_ids = set()
+        # Map variation labels to their persisted group IDs.
+        group_ids: dict[str, int] = {}
         for variation_label in study.generator_config.variation_labels:
             # build and store group record
             group_record = GroupRecord(
@@ -251,8 +254,7 @@ class BiasAnalyzer:
             )
             group_id = store.add(group_record)
 
-            # add the group id
-            group_ids.add(group_id)
+            group_ids[variation_label] = group_id
 
         # run model training loop
         for _ in np.arange(n_iter):
@@ -261,7 +263,7 @@ class BiasAnalyzer:
             variations = generator.generate(random_state=random_state)
 
             # run variation loop
-            for j, variation in enumerate(variations):
+            for variation in variations:
 
                 # create the model's train-test split and architecture
                 split, architecture = self._create_split_and_architecture(
@@ -274,7 +276,7 @@ class BiasAnalyzer:
 
                 # build and store model record
                 model_record = ModelRecord(
-                    group_id=group_ids[j],
+                    group_id=group_ids[variation.label],
                     architecture=architecture.hidden_layers
                 )
                 model_id = store.add(model_record)
@@ -328,7 +330,7 @@ class BiasAnalyzer:
 
                 # get the model's scores
                 scores = get_model_scores(
-                    predictions=row_predictions,
+                    predictions=model_predictions,
                     y_test=split.y_test,
                     metrics=test_metrics,
                 )
@@ -355,22 +357,20 @@ class BiasAnalyzer:
         
             # build and store run record
             run_record = RunRecord(
-                run_id='--INSERT UUID--',
-                created_at=datetime.now(tz=''),
+                run_id=str(uuid4()),
+                created_at=datetime.now(UTC),
                 n_iter=run_config.n_iter,
                 test_size=run_config.test_size,
                 test_metrics=run_config.test_metrics,
                 optimizer=training_config.optimizer,
                 learning_rate=training_config.learning_rate,
-                train_loss=training_config.loss,
+                loss=training_config.loss,
                 epochs=training_config.epochs,
                 batch_size=training_config.batch_size,
                 device=training_config.device,
-                base_architecture=run_config.baseline.architecture,
-                base_x_train=run_config.baseline.split.x_train.to_numpy(),
-                base_y_train=run_config.baseline.split.y_train.to_numpy(),
-                base_x_test=run_config.baseline.split.x_test.to_numpy(),
-                base_y_test=run_config.baseline.split.y_test.to_numpy(),
+                base_architecture=(
+                    run_config.baseline.architecture.hidden_layers
+                ),
                 input_columns=run_config.baseline.inputs.columns,
                 output_columns=run_config.baseline.outputs.columns
             )
@@ -378,7 +378,7 @@ class BiasAnalyzer:
 
             # build model trainer for every study
             trainer =  Trainer(training_config)
-            trainer.set_model_builder(
+            trainer.set_fnn_model_builder(
                 run_config.baseline.inputs.shape[1],
                 run_config.baseline.outputs.shape[1]
             )
@@ -434,6 +434,16 @@ class BiasAnalyzer:
                     group_update.variance
                 )
 
-            results = pd.DataFrame() # TODO: Use result_store to build dataframe with study_name, group_name, evaluation_method, strategy_bias, and strategy_variance.
+            result_rows = store.get_bias_variance_results(run_id)
+            results = pd.DataFrame(
+                result_rows,
+                columns=(
+                    'study_name',
+                    'group_name',
+                    'evaluation_method',
+                    'bias',
+                    'variance',
+                ),
+            )
 
         return results
