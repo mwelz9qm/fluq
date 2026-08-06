@@ -75,35 +75,71 @@ class Evaluator:
             case EvaluationMethod.AVERAGING.value:
                 items = self.result_store.get_models(group_id)
             case EvaluationMethod.POINTWISE.value:
-                items = self.result_store.get_test_positions(group_id)
+                items = self.result_store.get_test_set_positions(group_id)
             case _:
                 raise ValueError(
                     f'Unknown method: {method!r}.'
                 )
 
-        variances = []
-        squared_errors = []
+        variances: list[np.ndarray] = []
+        squared_errors: list[np.ndarray] = []
         for item in items:
             if method == EvaluationMethod.AVERAGING.value:
-                actuals, predictions = self.result_store.get_actuals_and_predictions(model_id=item)
-                error = np.mean(predictions) - np.mean(actuals)
+                actuals, predictions = (
+                    self.result_store.get_actuals_and_predictions(model_id=item)
+                )
             else:
-                actuals, predictions = self.result_store.get_actuals_and_predictions(group_id_and_tes_pos=(group_id, item))
-                error = np.mean(predictions) - actuals
+                actuals, predictions = (
+                    self.result_store.get_actuals_and_predictions(
+                        group_id_and_set_pos=(group_id, item)
+                    )
+                )
 
-            variance = np.var(predictions)
-            squared_error = error ** 2.0
+            actuals_array = np.asarray(actuals, dtype=float)
+            predictions_array = np.asarray(predictions, dtype=float)
+
+            if actuals_array.ndim != 2 or predictions_array.ndim != 2:
+                raise ValueError(
+                    'Actuals and predictions must each have shape '
+                    '(observations, outputs).'
+                )
+            if actuals_array.shape != predictions_array.shape:
+                raise ValueError(
+                    'Actuals and predictions must have matching shapes; '
+                    f'got {actuals_array.shape} and {predictions_array.shape}.'
+                )
+
+            if method == EvaluationMethod.POINTWISE.value:
+                if not np.allclose(actuals_array, actuals_array[0]):
+                    raise ValueError(
+                        'Inconsistent actual outputs for '
+                        f'group {group_id}, position {item}.'
+                    )
+                mean_error = (
+                    np.mean(predictions_array, axis=0) - actuals_array[0]
+                )
+            else:
+                mean_error = (
+                    np.mean(predictions_array, axis=0)
+                    - np.mean(actuals_array, axis=0)
+                )
+
+            variance = np.var(predictions_array, axis=0)
+            squared_error = mean_error ** 2.0
 
             variances.append(variance)
             squared_errors.append(squared_error)
 
-        strategy_variance = np.mean(variances)
-        strategy_bias = np.mean(squared_errors)
+        if not variances:
+            raise ValueError(f'No evaluation data found for group {group_id}.')
+
+        strategy_variance = np.mean(np.stack(variances), axis=0)
+        strategy_bias = np.mean(np.stack(squared_errors), axis=0)
 
         return GroupUpdateData(
             group_id,
-            strategy_bias,
-            strategy_variance
+            tuple(float(value) for value in strategy_bias),
+            tuple(float(value) for value in strategy_variance),
         )
 
     def evaluate(
