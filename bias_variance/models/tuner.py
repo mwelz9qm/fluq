@@ -243,14 +243,20 @@ class Tuner:
         test_metrics : frozenset[MetricName]
             Metrics used to score each tuning trial.
         random_state : int | None, default = None
-            Random seed used during training, if provided.
+            Random seed used during training and tuner trial selection,
+            if provided.
 
         Returns
         -------
         TrainingConfig
             Training configuration created from the best tuning result.
         """
-        study = optuna.create_study(direction=self.config.direction)
+        sampler = optuna.samplers.TPESampler(seed=random_state)
+
+        study = optuna.create_study(
+            direction=self.config.direction,
+            sampler=sampler,
+        )
         study.optimize(
             lambda trial: self._objective(
                 trial,
