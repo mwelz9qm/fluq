@@ -1,6 +1,13 @@
+import numpy as np
+import pandas as pd
 import pytest
 
-from bias_variance.models.evaluation import Evaluator, GroupUpdateData
+from bias_variance.models.evaluation import (
+    Evaluator,
+    GroupUpdateData,
+    MetricName,
+    get_model_scores,
+)
 
 
 class FakeResultStore:
@@ -94,3 +101,27 @@ def test_pointwise_rejects_inconsistent_actual_outputs() -> None:
         match='Inconsistent actual outputs for group 7, position 0',
     ):
         Evaluator(store)._evaluate_strategy_bias_and_variance(7)
+
+
+def test_get_model_scores_returns_requested_metrics() -> None:
+    predictions = np.array([[1.0], [3.0], [5.0]])
+    y_test = pd.DataFrame({'y': [1.0, 2.0, 7.0]})
+
+    scores = get_model_scores(
+        predictions=predictions,
+        y_test=y_test,
+        metrics=frozenset(
+            {
+                MetricName.RMSE,
+                MetricName.MSE,
+                MetricName.MAE,
+                MetricName.R2,
+            }
+        ),
+    )
+
+    assert set(scores) == {'rmse', 'mse', 'mae', 'r2'}
+    assert scores['mse'] == pytest.approx(5.0 / 3.0)
+    assert scores['rmse'] == pytest.approx((5.0 / 3.0) ** 0.5)
+    assert scores['mae'] == pytest.approx(1.0)
+    assert scores['r2'] == pytest.approx(141.0 / 186.0)
