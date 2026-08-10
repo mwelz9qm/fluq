@@ -207,6 +207,7 @@ class BiasAnalyzer:
                 for inputs, outputs in zip(
                     split.x_train.itertuples(index=False, name=None),
                     split.y_train.itertuples(index=False, name=None),
+                    strict=True
                 ):
                     # build and store the train point record
                     train_point_record = TrainPointRecord(
@@ -238,6 +239,7 @@ class BiasAnalyzer:
                         split.x_test.itertuples(index=False, name=None),
                         split.y_test.itertuples(index=False, name=None),
                         model_predictions,
+                        strict=True
                     )
                 ):
                     # build and store the test point record
@@ -300,7 +302,7 @@ class BiasAnalyzer:
                 loss=training_config.loss,
                 epochs=training_config.epochs,
                 batch_size=training_config.batch_size,
-                device=training_config.device,
+                device=str(training_config.resolved_device),
                 base_architecture=(
                     run_config.baseline.architecture.hidden_layers
                 ),
