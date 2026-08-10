@@ -96,7 +96,7 @@ class DatasetSplit:
     def train_set(
         self,
     ) -> pd.DataFrame:
-        return pd.concat([self.x_train, self.y_train])
+        return pd.concat([self.x_train, self.y_train], axis='columns')
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +110,7 @@ class RunBaseline:
     def dataset(
         self,
     ) -> pd.DataFrame:
-        return pd.concat([self.inputs, self.outputs])
+        return pd.concat([self.inputs, self.outputs], axis='columns')
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,11 +256,16 @@ class BiasAnalyzer:
 
             group_ids[variation_label] = group_id
 
+        # build the seed sequence for each model
+        seed_sequence = np.random.SeedSequence(random_state)
+        model_seeds = seed_sequence.generate_state(n_iter)
+
         # run model training loop
-        for _ in np.arange(n_iter):
+        for model_seed in model_seeds:
+            resolved_seed = int(model_seed)
 
             # generate the study variations
-            variations = generator.generate(random_state=random_state)
+            variations = generator.generate(random_state=resolved_seed)
 
             # run variation loop
             for variation in variations:
@@ -271,7 +276,7 @@ class BiasAnalyzer:
                     baseline,
                     variation.generated,
                     test_size,
-                    random_state
+                    resolved_seed
                 )
 
                 # build and store model record
@@ -300,7 +305,7 @@ class BiasAnalyzer:
                     architecture=architecture,
                     x_train=split.x_train,
                     y_train=split.y_train,
-                    random_state=random_state
+                    random_state=resolved_seed
                 )
 
                 # get the model's predictions
