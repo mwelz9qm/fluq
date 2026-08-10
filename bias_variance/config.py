@@ -5,7 +5,11 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from bias_variance.generators.base import GeneratorConfig
-from bias_variance.generators.fnn_architecture import FnnArchitectureGeneratorConfig
+from bias_variance.generators.fnn_architecture import (
+    DEFAULT_RANDOM_CONFIG,
+    DEFAULT_TAPER_CONFIG,
+    FnnArchitectureGeneratorConfig,
+)
 from bias_variance.generators.noise import NoiseGeneratorConfig
 from bias_variance.generators.sampling import SamplingGeneratorConfig
 from bias_variance.models.evaluation import EvaluationMethod, MetricName
@@ -120,50 +124,56 @@ def _build_run_config(
     )
 
     if studies is None:
-        studies = []
-        studies.append(
+        default_studies: list[Study] = []
+        default_studies.append(
             Study(
                 StudyName.MODEL,
                 EvaluationMethod.AVERAGING,
-                FnnArchitectureGeneratorConfig()
+                FnnArchitectureGeneratorConfig(
+                    range_architectures=DEFAULT_RANDOM_CONFIG,
+                    taper_architectures=DEFAULT_TAPER_CONFIG
+                )
             )
         )
-        studies.append(
+        default_studies.append(
             Study(
                 StudyName.SAMPLING,
                 EvaluationMethod.AVERAGING,
                 SamplingGeneratorConfig(baseline.dataset)
             )
         )
-        studies.append(
+        default_studies.append(
             Study(
                 StudyName.DATA,
                 EvaluationMethod.AVERAGING,
                 NoiseGeneratorConfig(baseline.dataset)
             )
         )
-        studies.append(
+        default_studies.append(
             Study(
                 StudyName.MODEL,
                 EvaluationMethod.POINTWISE,
-                FnnArchitectureGeneratorConfig()
+                FnnArchitectureGeneratorConfig(
+                    range_architectures=DEFAULT_RANDOM_CONFIG,
+                    taper_architectures=DEFAULT_TAPER_CONFIG
+                )
             )
         )
-        studies.append(
+        default_studies.append(
             Study(
                 StudyName.SAMPLING,
                 EvaluationMethod.POINTWISE,
                 SamplingGeneratorConfig(baseline.split.train_set)
             )
         )
-        studies.append(
+        default_studies.append(
             Study(
                 StudyName.DATA,
                 EvaluationMethod.POINTWISE,
                 NoiseGeneratorConfig(baseline.split.train_set)
             )
         )
-        studies = tuple(studies)
+        studies = tuple(default_studies)
 
     return RunConfig(
         baseline=baseline,
