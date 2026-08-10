@@ -1,6 +1,4 @@
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import StrEnum
 from os import PathLike
 from pathlib import Path
 from typing import Self
@@ -11,16 +9,11 @@ import pandas as pd
 import torch
 from sklearn.model_selection import train_test_split
 
-from bias_variance.generators.base import Generator, GeneratorConfig
-from bias_variance.generators.fnn_architecture import (
-    FnnArchitectureGenerator,
-    FnnArchitectureGeneratorConfig,
-)
-from bias_variance.generators.noise import NoiseGenerator, NoiseGeneratorConfig
-from bias_variance.generators.sampling import (
-    SamplingGenerator,
-    SamplingGeneratorConfig,
-)
+from bias_variance.config import DatasetSplit, RunBaseline, RunConfig, Study, StudyName
+from bias_variance.generators.base import Generator
+from bias_variance.generators.fnn_architecture import FnnArchitectureGenerator
+from bias_variance.generators.noise import NoiseGenerator
+from bias_variance.generators.sampling import SamplingGenerator
 from bias_variance.models.evaluation import (
     EvaluationMethod,
     Evaluator,
@@ -40,89 +33,6 @@ from bias_variance.persistence.records import (
     TrainPointRecord,
 )
 from bias_variance.persistence.store import ResultStore
-
-
-class StudyName(StrEnum):
-    MODEL = 'model'
-    SAMPLING = 'sampling'
-    DATA = 'data'
-
-
-@dataclass(frozen=True, slots=True)
-class Study:
-    study_name: StudyName
-    evaluation_method: EvaluationMethod
-    generator_config: GeneratorConfig
-
-    def __post_init__(self) -> None:
-        match self.study_name:
-            case StudyName.MODEL:
-                if not isinstance(self.generator_config, FnnArchitectureGeneratorConfig):
-                    raise TypeError(
-                        f'Mismatched generator_config type with study_name: {self.generator_config!r}, {self.study_name!r}.'
-                    )
-                
-            case StudyName.SAMPLING:
-                if not isinstance(self.generator_config, SamplingGeneratorConfig):
-                    raise TypeError(
-                        f'Mismatched generator_config type with study_name: {self.generator_config!r}, {self.study_name!r}.'
-                    )
-
-            case StudyName.DATA:
-                if not isinstance(self.generator_config, NoiseGeneratorConfig):
-                    raise TypeError(
-                        f'Mismatched generator_config type with study_name: {self.generator_config!r}, {self.study_name!r}.'
-                    )
-
-    @property
-    def description(self) -> tuple[StudyName, EvaluationMethod]:
-        return (self.study_name, self.evaluation_method)
-
-
-@dataclass(frozen=True, slots=True)
-class DatasetSplit:
-    x_train: pd.DataFrame
-    x_test: pd.DataFrame
-    y_train: pd.DataFrame
-    y_test: pd.DataFrame
-
-    @property
-    def full(
-        self,
-    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        return (self.x_train, self.x_test, self.y_train, self.y_test)
-
-    @property
-    def train_set(
-        self,
-    ) -> pd.DataFrame:
-        return pd.concat([self.x_train, self.y_train], axis='columns')
-
-
-@dataclass(frozen=True, slots=True)
-class RunBaseline:
-    inputs: pd.DataFrame
-    outputs: pd.DataFrame
-    split: DatasetSplit
-    architecture: FnnArchitecture
-
-    @property
-    def dataset(
-        self,
-    ) -> pd.DataFrame:
-        return pd.concat([self.inputs, self.outputs], axis='columns')
-
-
-@dataclass(frozen=True, slots=True)
-class RunConfig:
-    baseline: RunBaseline
-    studies: tuple[Study]
-    n_iter: int = 100
-    test_size: float = 0.2
-    test_metrics: frozenset[MetricName] = frozenset(
-        (MetricName.MSE, MetricName.R2)
-    )
-    random_state: int | None = None
 
 
 class BiasAnalyzer:
@@ -316,11 +226,12 @@ class BiasAnalyzer:
                 )
 
                 # test point record building loop
-                for set_position, inputs, outputs, row_predictions in zip(
-                    split.x_test.index,
-                    split.x_test.itertuples(index=False, name=None),
-                    split.y_test.itertuples(index=False, name=None),
-                    model_predictions,
+                for set_position, (inputs, outputs, row_predictions) in enumerate(
+                    zip(
+                        split.x_test.itertuples(index=False, name=None),
+                        split.y_test.itertuples(index=False, name=None),
+                        model_predictions,
+                    )
                 ):
                     # build and store the test point record
                     test_point_record = TestPointRecord(
@@ -366,7 +277,11 @@ class BiasAnalyzer:
                 created_at=datetime.now(UTC),
                 n_iter=run_config.n_iter,
                 test_size=run_config.test_size,
-                test_metrics=run_config.test_metrics,
+                test_metrics=tuple(
+                    metric.value
+                    for metric
+                    in run_config.test_metrics
+                ),
                 optimizer=training_config.optimizer,
                 learning_rate=training_config.learning_rate,
                 loss=training_config.loss,
@@ -376,8 +291,16 @@ class BiasAnalyzer:
                 base_architecture=(
                     run_config.baseline.architecture.hidden_layers
                 ),
-                input_columns=run_config.baseline.inputs.columns,
-                output_columns=run_config.baseline.outputs.columns
+                input_columns=tuple(
+                    str(column)
+                    for column
+                    in run_config.baseline.inputs.columns
+                ),
+                output_columns=tuple(
+                    str(column)
+                    for column
+                    in run_config.baseline.outputs.columns
+                )
             )
             run_id = store.add(run_record)
 
@@ -423,8 +346,13 @@ class BiasAnalyzer:
 
             if run_id is None:
                 run_id = store.get_recent_run()
+            
+            elif not store.does_run_exist(run_id):
+                raise ValueError(
+                    f'Run does not exist: {run_id}.'
+                )
 
-            if not run_id:
+            if run_id is None:
                 raise ValueError(
                     'No runs performed. Call run_studies() to get run.'
                 )
