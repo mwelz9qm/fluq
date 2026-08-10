@@ -207,30 +207,30 @@ class FnnTaperArchitectureConfig:
 
 DEFAULT_RANDOM_CONFIG = MappingProxyType({
     ArchitectureName.WIDE: FnnRandomArchitectureConfig(
-        layer_range=(1, 16),
+        layer_range=(1, 8),
         size_range=(64, 256),
     ),
     ArchitectureName.NARROW: FnnRandomArchitectureConfig(
-        layer_range=(16, 64),
+        layer_range=(8, 32),
         size_range=(2, 64),
     ),
 })
 
 DEFAULT_TAPER_CONFIG = MappingProxyType({
     ArchitectureName.TAPER: FnnTaperArchitectureConfig(
-        layer_range=(16, 64),
+        layer_range=(1, 32),
         start_size_range=(1, 9),
         taper_rate_range=(0.25, 0.5),
         max_size=256,
     ),
     ArchitectureName.REVERSE_TAPER: FnnTaperArchitectureConfig(
-        layer_range=(16, 64),
+        layer_range=(1, 32),
         start_size_range=(128, 256),
         taper_rate_range=(0.25, 0.5),
         max_size=256,
     ),
     ArchitectureName.COMBINED_TAPER: FnnTaperArchitectureConfig(
-        layer_range=(16, 64),
+        layer_range=(1, 32),
         start_size_range=(1, 9),
         taper_rate_range=(0.25, 0.5),
         max_size=256,
