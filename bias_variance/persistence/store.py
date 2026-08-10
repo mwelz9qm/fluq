@@ -11,7 +11,7 @@ import sqlite3
 from dataclasses import asdict
 from enum import StrEnum
 from os import PathLike
-from typing import Self
+from typing import Self, overload
 
 from bias_variance.persistence.records import (
     GroupRecord,
@@ -263,6 +263,20 @@ class ResultStore:
         statement = f'INSERT INTO {table_name.value} ({columns}) VALUES ({placeholders})'
 
         return statement, tuple(attributes.values())
+
+    @overload
+    def add(self, record: RunRecord) -> str: ...
+
+    @overload
+    def add(
+        self,
+        record: StudyRecord
+        | GroupRecord
+        | ModelRecord
+        | ScoreRecord
+        | TrainPointRecord
+        | TestPointRecord
+    ) -> int: ...
 
     def add(self, record: Record) -> int | str:
         """Stage one record for insertion into its corresponding table.
@@ -678,3 +692,15 @@ class ResultStore:
             raise KeyError(f'Unknown group_id: {group_id}')
 
         return str(row['evaluation_method'])
+
+    def does_run_exist(self, run_id: str) -> bool:
+        cur = self._connection.cursor()
+
+        cur.execute(
+            f'SELECT run_id FROM {TableName.RUNS.value} WHERE run_id = ? LIMIT 1',
+            (run_id,)
+        )
+
+        row = cur.fetchone()
+
+        return row is not None
