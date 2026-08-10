@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 import pandas as pd
+from sklearn.model_selection import train_test_split
 
 from bias_variance.generators.base import GeneratorConfig
 from bias_variance.generators.fnn_architecture import FnnArchitectureGeneratorConfig
@@ -85,10 +86,90 @@ class RunBaseline:
 @dataclass(frozen=True, slots=True)
 class RunConfig:
     baseline: RunBaseline
-    studies: tuple[Study]
-    n_iter: int = 100
-    test_size: float = 0.2
+    studies: tuple[Study, ...]
+    n_iter: int
+    test_size: float
+    test_metrics: frozenset[MetricName]
+    random_state: int | None
+
+
+def _build_run_config(
+    inputs: pd.DataFrame,
+    outputs: pd.DataFrame,
+    studies: tuple[Study, ...] | None = None,
+    base_architecture: tuple[int, ...] = (64, 64, 64, 64, 64, 64, 64, 64),
+    n_iter: int = 100,
+    test_size: float = 0.2,
     test_metrics: frozenset[MetricName] = frozenset(
         (MetricName.MSE, MetricName.R2)
-    )
+    ),
     random_state: int | None = None
+) -> RunConfig:
+    split = train_test_split(
+        inputs,
+        outputs,
+        test_size=test_size,
+        random_state=random_state
+    )
+
+    baseline = RunBaseline(
+        inputs=inputs,
+        outputs=outputs,
+        split=DatasetSplit(*split),
+        architecture=FnnArchitecture(base_architecture)
+    )
+
+    if studies is None:
+        studies = []
+        studies.append(
+            Study(
+                StudyName.MODEL,
+                EvaluationMethod.AVERAGING,
+                FnnArchitectureGeneratorConfig()
+            )
+        )
+        studies.append(
+            Study(
+                StudyName.SAMPLING,
+                EvaluationMethod.AVERAGING,
+                SamplingGeneratorConfig(baseline.dataset)
+            )
+        )
+        studies.append(
+            Study(
+                StudyName.DATA,
+                EvaluationMethod.AVERAGING,
+                NoiseGeneratorConfig(baseline.dataset)
+            )
+        )
+        studies.append(
+            Study(
+                StudyName.MODEL,
+                EvaluationMethod.POINTWISE,
+                FnnArchitectureGeneratorConfig()
+            )
+        )
+        studies.append(
+            Study(
+                StudyName.SAMPLING,
+                EvaluationMethod.POINTWISE,
+                SamplingGeneratorConfig(baseline.split.train_set)
+            )
+        )
+        studies.append(
+            Study(
+                StudyName.DATA,
+                EvaluationMethod.POINTWISE,
+                NoiseGeneratorConfig(baseline.split.train_set)
+            )
+        )
+        studies = tuple(studies)
+
+    return RunConfig(
+        baseline=baseline,
+        studies=studies,
+        n_iter=n_iter,
+        test_size=test_size,
+        test_metrics=test_metrics,
+        random_state=random_state
+    )
