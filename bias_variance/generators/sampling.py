@@ -1,9 +1,16 @@
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any
 
 import pandas as pd
+
+from common.sampling._sampling import (
+    generate_latin_hypercube_samples,
+    get_quantile_stratified_random_samples,
+    get_random_samples,
+)
 
 from .base import Generator, GeneratorConfig, Variation
 
@@ -21,10 +28,37 @@ class SamplingStrategy:
     kwargs: Mapping[str, Any] = field(default_factory=dict)
 
 
+DEFAULT_SAMPLING_STRATEGIES = MappingProxyType({
+    SamplingStrategyName.BOOTSTRAP: SamplingStrategy(
+        function=get_random_samples,
+        kwargs=MappingProxyType({
+            'sample_fraction': 1.0,
+            'with_replacement': True,
+        }),
+    ),
+    SamplingStrategyName.STRATIFIED: SamplingStrategy(
+        function=get_quantile_stratified_random_samples,
+        kwargs=MappingProxyType({
+            'stratify_col_index': 0,
+            'sample_fraction': 1.0,
+        }),
+    ),
+    SamplingStrategyName.LHS: SamplingStrategy(
+        function=generate_latin_hypercube_samples,
+        kwargs=MappingProxyType({
+            'sample_fraction': 1.0,
+        }),
+    ),
+})
+
+
 @dataclass(frozen=True, slots=True)
 class SamplingGeneratorConfig(GeneratorConfig):
     dataset: pd.DataFrame
-    sampling_strategies: Mapping[SamplingStrategyName, SamplingStrategy]
+    sampling_strategies: Mapping[
+        SamplingStrategyName,
+        SamplingStrategy,
+    ] = field(default_factory=lambda: DEFAULT_SAMPLING_STRATEGIES)
 
     @property
     def variation_labels(self) -> tuple[str]:
@@ -49,7 +83,7 @@ class SamplingGenerator(Generator[pd.DataFrame]):
         settings: SamplingGeneratorConfig,
     ) -> None:
         self._dataset = settings.dataset.copy()
-        self._strategies = settings.sampling_strategies
+        self._strategies = dict(settings.sampling_strategies)
 
     def add_strategy(
         self,
