@@ -61,13 +61,12 @@ class SamplingGeneratorConfig(GeneratorConfig):
     ] = field(default_factory=lambda: DEFAULT_SAMPLING_STRATEGIES)
 
     @property
-    def variation_labels(self) -> tuple[str]:
-        labels = (
+    def variation_labels(self) -> tuple[str, ...]:
+        return tuple(
             name.value
             for name
             in self.sampling_strategies
         )
-        return labels
 
 @dataclass(frozen=True, slots=True)
 class SamplingVariation(Variation[pd.DataFrame]):

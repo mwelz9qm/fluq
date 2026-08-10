@@ -15,13 +15,12 @@ class NoiseGeneratorConfig(GeneratorConfig):
     )
 
     @property
-    def variation_labels(self) -> tuple[str]:
-        labels = (
+    def variation_labels(self) -> tuple[str, ...]:
+        return tuple(
             f"std_{standard_deviation:g}"
             for standard_deviation
             in self.standard_deviations
         )
-        return labels
 
 
 @dataclass(frozen=True, slots=True)
