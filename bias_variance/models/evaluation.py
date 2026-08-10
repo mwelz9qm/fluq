@@ -123,8 +123,7 @@ class Evaluator:
                 )
             else:
                 mean_error = (
-                    np.mean(predictions_array, axis=0)
-                    - np.mean(actuals_array, axis=0)
+                    np.mean(predictions_array - actuals_array, axis=0)
                 )
 
             variance = np.var(predictions_array, axis=0)
