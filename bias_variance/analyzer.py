@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from os import PathLike
 from pathlib import Path
@@ -7,6 +8,7 @@ from uuid import uuid4
 import numpy as np
 import pandas as pd
 import torch
+from matplotlib.axes import Axes
 from sklearn.model_selection import train_test_split
 
 from bias_variance.config import (
@@ -40,6 +42,10 @@ from bias_variance.persistence.records import (
     TrainPointRecord,
 )
 from bias_variance.persistence.store import ResultStore
+from bias_variance.plotting import (
+    plot_bias_variance,
+    plot_prediction_comparison,
+)
 
 
 class BiasAnalyzer:
@@ -395,3 +401,323 @@ class BiasAnalyzer:
             )
 
         return results
+
+    @staticmethod
+    def _select_plot_value(value, index: int, *, name: str) -> float:
+        """Select one output or input value from a scalar or vector cell."""
+        try:
+            values = np.asarray(value, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(f'{name} must contain numeric values.') from exc
+
+        if values.ndim == 0:
+            if index != 0:
+                raise IndexError(f'{name} has no value at index {index}.')
+            selected = float(values)
+        else:
+            flattened = values.reshape(-1)
+            if index >= len(flattened):
+                raise IndexError(f'{name} has no value at index {index}.')
+            selected = float(flattened[index])
+
+        if not np.isfinite(selected):
+            raise ValueError(f'{name} must contain only finite values.')
+        return selected
+
+    @classmethod
+    def _prepare_group_plot_data(
+        col,
+        rows,
+        *,
+        input_index: int,
+        output_index: int,
+    ) -> pd.DataFrame:
+        """Normalize result-store rows into scalar plotting columns.
+
+        The result-store query is expected to return either a DataFrame, a
+        column mapping, or records containing 'x', 'actual',
+        'prediction_mean', 'bias', and 'variance'.  For convenience,
+        pointwise rows may use 'input'/'actual_output' and averaging rows
+        may use 'r2'/'sample_mean' instead of 'x'/'actual'.  A
+        'test_points' or 'model_ids' cell may alternatively contain a
+        mapping with 'x' and 'actual' keys or an '(x, actual)' pair.
+        """
+        if isinstance(rows, pd.DataFrame):
+            frame = rows.copy()
+        elif isinstance(rows, Mapping):
+            try:
+                frame = pd.DataFrame(rows)
+            except ValueError:
+                frame = pd.DataFrame([rows])
+        else:
+            frame = pd.DataFrame.from_records(rows)
+
+        if frame.empty:
+            return frame
+
+        if 'x' not in frame:
+            if 'r2' in frame:
+                frame['x'] = frame['r2']
+            elif 'input' in frame:
+                frame['x'] = frame['input']
+        if 'actual' not in frame:
+            if 'sample_mean' in frame:
+                frame['actual'] = frame['sample_mean']
+            elif 'actual_output' in frame:
+                frame['actual'] = frame['actual_output']
+
+        if 'x' not in frame or 'actual' not in frame:
+            paired_column = next(
+                (
+                    column
+                    for column in ('test_points', 'model_ids')
+                    if column in frame
+                ),
+                None,
+            )
+            if paired_column is not None:
+                paired_values: list[tuple[object, object]] = []
+                for value in frame[paired_column]:
+                    if isinstance(value, Mapping):
+                        try:
+                            pair = (value['x'], value['actual'])
+                        except KeyError as exc:
+                            raise ValueError(
+                                f'{paired_column} mappings must contain x '
+                                'and actual values.'
+                            ) from exc
+                    else:
+                        try:
+                            pair = tuple(value)
+                        except TypeError as exc:
+                            raise ValueError(
+                                f'{paired_column} values must be (x, actual) '
+                                'pairs, not identifiers alone.'
+                            ) from exc
+                        if len(pair) != 2:
+                            raise ValueError(
+                                f'{paired_column} values must be (x, actual) '
+                                'pairs.'
+                            )
+                    paired_values.append(pair)
+
+                if 'x' not in frame:
+                    frame['x'] = [pair[0] for pair in paired_values]
+                if 'actual' not in frame:
+                    frame['actual'] = [pair[1] for pair in paired_values]
+
+        required = {'x', 'actual', 'prediction_mean', 'bias', 'variance'}
+        missing = required - set(frame.columns)
+        if missing:
+            raise ValueError(
+                'Group plot results are missing required columns: '
+                f'{sorted(missing)}.'
+            )
+
+        normalized = pd.DataFrame(index=frame.index)
+        normalized['x'] = [
+            col._select_plot_value(value, input_index, name='x')
+            for value in frame['x']
+        ]
+        for column in ('actual', 'prediction_mean', 'bias', 'variance'):
+            normalized[column] = [
+                col._select_plot_value(value, output_index, name=column)
+                for value in frame[column]
+            ]
+
+        for optional_column in ('group_name', 'evaluation_method'):
+            if optional_column in frame:
+                normalized[optional_column] = frame[optional_column].to_numpy()
+
+        if 'evaluation_method' not in normalized:
+            if 'test_points' in frame:
+                normalized['evaluation_method'] = (
+                    EvaluationMethod.POINTWISE.value
+                )
+            elif 'model_ids' in frame:
+                normalized['evaluation_method'] = (
+                    EvaluationMethod.AVERAGING.value
+                )
+
+        if (normalized['bias'] < 0).any():
+            raise ValueError('bias must contain non-negative squared errors.')
+        if (normalized['variance'] < 0).any():
+            raise ValueError('variance must contain non-negative values.')
+
+        return normalized.reset_index(drop=True)
+
+    @staticmethod
+    def _has_extreme_plot_range(
+        data: pd.DataFrame,
+        max_axis_range: float | None,
+    ) -> bool:
+        if max_axis_range is None:
+            return False
+
+        errors = np.sqrt(data['variance'].to_numpy(dtype=float))
+        x_values = data['x'].to_numpy(dtype=float)
+        lower = np.minimum(
+            data['actual'].to_numpy(dtype=float),
+            data['prediction_mean'].to_numpy(dtype=float) - errors,
+        )
+        upper = np.maximum(
+            data['actual'].to_numpy(dtype=float),
+            data['prediction_mean'].to_numpy(dtype=float) + errors,
+        )
+
+        values = (
+            x_values,
+            lower,
+            upper,
+            data['bias'].to_numpy(dtype=float),
+            data['variance'].to_numpy(dtype=float),
+        )
+        return any(
+            np.ptp(axis_values) > max_axis_range
+            or np.max(np.abs(axis_values)) > max_axis_range
+            for axis_values in values
+        )
+
+    def plot_results(
+        self,
+        run_id: str | None = None,
+        *,
+        max_plots: int = 12,
+        max_axis_range: float | None = 1000000.0,
+        input_index: int = 0,
+        output_index: int = 0,
+        settings: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> tuple[Axes, ...]:
+        """Plot prediction comparisons and bias/variance for a run's groups.
+
+        The forthcoming result table must be exposed through
+        'ResultStore.get_group_plot_results(group_id)'. That query should
+        resolve method-specific database values into plot-ready rows. For a
+        pointwise row, 'x' is a test input and 'actual' is its true output.
+        For an averaging row, 'x' is a model R2 score and 'actual' is that
+        model's test-set sample mean. Every row also supplies
+        'prediction_mean', squared 'bias', and prediction 'variance'.
+
+        'max_plots' limits plotted groups, with two Axes returned per group.
+        Groups whose selected values exceed 'max_axis_range' are skipped.
+        """
+        if not isinstance(max_plots, int) or isinstance(max_plots, bool):
+            raise TypeError('max_plots must be an integer.')
+        if max_plots <= 0:
+            raise ValueError('max_plots must be positive.')
+        if max_axis_range is not None and max_axis_range <= 0:
+            raise ValueError('max_axis_range must be positive or None.')
+        for name, index in (
+            ('input_index', input_index),
+            ('output_index', output_index),
+        ):
+            if not isinstance(index, int) or isinstance(index, bool):
+                raise TypeError(f'{name} must be an integer.')
+            if index < 0:
+                raise ValueError(f'{name} must be non-negative.')
+        if settings is not None and not isinstance(settings, Mapping):
+            raise TypeError('settings must be a mapping or None.')
+
+        resolved_settings = settings or {}
+        axes: list[Axes] = []
+        plotted_groups = 0
+
+        # Maintain result store lifecyle within method call
+        with ResultStore(self.db_path, timeout=self.db_timeout) as store:
+            store.create_tables()
+
+            if run_id is None:
+                run_id = store.get_recent_run()
+
+            elif not store.does_run_exist(run_id):
+                raise ValueError(f'Run does not exist: {run_id}.')
+
+            if run_id is None:
+                raise ValueError(
+                    'No runs performed. Call run_studies() to get run.'
+                )
+
+            get_plot_results = getattr(
+                store,
+                'get_group_plot_results',
+                None,
+            )
+            if get_plot_results is None:
+                raise NotImplementedError(
+                    'ResultStore.get_group_plot_results(group_id) must be '
+                    'implemented before run plots can be loaded.'
+                )
+
+            # Iterate through the studies and groups, plotting each group's results
+            for study_id in store.get_studies(run_id):
+                for group_id in store.get_groups(study_id):
+                    if plotted_groups >= max_plots:
+                        break
+
+                    # Prepare the group plot data and skip if empty or extreme
+                    group_data = self._prepare_group_plot_data(
+                        get_plot_results(group_id),
+                        input_index=input_index,
+                        output_index=output_index,
+                    )
+                    if group_data.empty or self._has_extreme_plot_range(
+                        group_data,
+                        max_axis_range,
+                    ):
+                        continue
+
+                    # Resolve the group name and evaluation method for plot titles
+                    group_name = (
+                        str(group_data['group_name'].iloc[0])
+                        if 'group_name' in group_data
+                        else f'Group {group_id}'
+                    )
+                    evaluation_method = (
+                        str(group_data['evaluation_method'].iloc[0])
+                        if 'evaluation_method' in group_data
+                        else store.get_method(group_id)
+                    )
+
+                    # Set up scatter plot settings and plot the prediction comparison
+                    comparison_settings = dict(
+                        resolved_settings.get('comparison', {})
+                    )
+                    comparison_settings.setdefault(
+                        'title',
+                        f'{group_name} ({evaluation_method})',
+                    )
+                    comparison_settings.setdefault(
+                        'xlabel',
+                        'R2 score'
+                        if evaluation_method == EvaluationMethod.AVERAGING.value
+                        else 'Test input',
+                    )
+                    comparison_ax = plot_prediction_comparison(
+                        group_data['x'],
+                        group_data['actual'],
+                        group_data['prediction_mean'],
+                        np.sqrt(group_data['variance']),
+                        settings=comparison_settings,
+                    )
+
+                    # Set up bar plot settings and plot the bias/variance bar chart
+                    bar_settings = dict(
+                        resolved_settings.get('bias_variance', {})
+                    )
+                    bar_settings.setdefault(
+                        'title',
+                        f'{group_name}: Mean Bias and Variance',
+                    )
+                    bar_ax = plot_bias_variance(
+                        (group_name,),
+                        (float(group_data['bias'].mean()),),
+                        (float(group_data['variance'].mean()),),
+                        settings=bar_settings,
+                    )
+                    axes.extend((comparison_ax, bar_ax))
+                    plotted_groups += 1
+
+                if plotted_groups >= max_plots:
+                    break
+
+        return tuple(axes)
