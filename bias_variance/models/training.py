@@ -119,43 +119,58 @@ class Trainer:
         else:
             y_train = y_train.to(dtype=torch.float32)
 
-        model = _build_model(
-            architecture,
-            self.model_builder,
-            self.config.resolved_device
-        )
-
         train_dataset = TensorDataset(x_train, y_train)
-        loader_generator = torch.Generator()
 
-        if random_state is not None:
-            loader_generator.manual_seed(random_state)
+        forked_devices: list[int] = []
 
-        loader = DataLoader(
-            train_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=True,
-            generator=loader_generator
-        )
+        if self.config.resolved_device.type == 'cuda':
+            device_index = self.config.resolved_device.index
+            forked_devices.append(
+                torch.cuda.current_device()
+                if device_index is None
+                else device_index
+            )
 
-        criterion = _build_loss(self.config.loss)
-        optimizer = _build_optimizer(
-            model,
-            self.config.optimizer,
-            self.config.learning_rate
-        )
+        with torch.random.fork_rng(devices=forked_devices):
+            if random_state is not None:
+                torch.manual_seed(random_state)
 
-        model.train()
+            model = _build_model(
+                architecture,
+                self.model_builder,
+                self.config.resolved_device
+            )
 
-        for _ in np.arange(self.config.epochs):
-            for batch_x, batch_y in loader:
-                batch_x = batch_x.to(self.config.resolved_device)
-                batch_y = batch_y.to(self.config.resolved_device)
-                optimizer.zero_grad()
-                predictions  = model(batch_x)
-                loss = criterion(predictions, batch_y)
-                loss.backward()
-                optimizer.step()
+            loader_generator = torch.Generator()
+
+            if random_state is not None:
+                loader_generator.manual_seed(random_state)
+
+            loader = DataLoader(
+                train_dataset,
+                batch_size=self.config.batch_size,
+                shuffle=True,
+                generator=loader_generator
+            )
+
+            criterion = _build_loss(self.config.loss)
+            optimizer = _build_optimizer(
+                model,
+                self.config.optimizer,
+                self.config.learning_rate
+            )
+            
+            model.train()
+            
+            for _ in np.arange(self.config.epochs):
+                for batch_x, batch_y in loader:
+                    batch_x = batch_x.to(self.config.resolved_device)
+                    batch_y = batch_y.to(self.config.resolved_device)
+                    optimizer.zero_grad()
+                    predictions  = model(batch_x)
+                    loss = criterion(predictions, batch_y)
+                    loss.backward()
+                    optimizer.step()
 
         return model
 
