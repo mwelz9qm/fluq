@@ -9,7 +9,14 @@ import pandas as pd
 import torch
 from sklearn.model_selection import train_test_split
 
-from bias_variance.config import DatasetSplit, RunBaseline, RunConfig, Study, StudyName
+from bias_variance.config import (
+    DatasetSplit,
+    RunBaseline,
+    RunConfig,
+    Study,
+    StudyName,
+    _build_run_config,
+)
 from bias_variance.generators.base import Generator
 from bias_variance.generators.fnn_architecture import FnnArchitectureGenerator
 from bias_variance.generators.noise import NoiseGenerator
@@ -263,9 +270,15 @@ class BiasAnalyzer:
 
     def run_studies(
         self,
-        run_config: RunConfig,
-        training_config: TrainingConfig,
+        inputs: pd.DataFrame,
+        outputs: pd.DataFrame,
+        *,
+        run_config: RunConfig | None = None,
+        training_config: TrainingConfig | None = None,
     ) -> Self:
+        run_config = run_config or _build_run_config(inputs, outputs)
+        training_config = training_config or TrainingConfig()
+        
         # maintain result store lifecyle within method call
         with ResultStore(self.db_path, timeout=self.db_timeout) as store:
             # create the database tables
