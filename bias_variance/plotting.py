@@ -92,7 +92,8 @@ def plot_prediction_comparison(
         color=resolved_settings.get('prediction_color', 'tab:blue'),
         ecolor=resolved_settings.get('error_color', 'tab:gray'),
         capsize=resolved_settings.get('capsize', 4),
-        alpha=resolved_settings.get('alpha', 0.8),
+        markersize=resolved_settings.get('markersize', 4.75),
+        alpha=resolved_settings.get('alpha', 0.5),
         label=resolved_settings.get('prediction_label', 'Mean prediction'),
     )
     resolved_ax.set_title(
