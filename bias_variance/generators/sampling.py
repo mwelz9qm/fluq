@@ -79,9 +79,9 @@ class SamplingVariation(Variation[pd.DataFrame]):
 class SamplingGenerator(VariationGenerator[pd.DataFrame]):
     def __init__(
         self,
-        settings: SamplingGeneratorConfig,
+        settings: SamplingGeneratorConfig | None = None,
     ) -> None:
-        self.settings = settings
+        self.settings = SamplingGeneratorConfig() if settings is None else settings
         self._base_dataset: pd.DataFrame | None = None
 
     @property
@@ -115,7 +115,7 @@ class SamplingGenerator(VariationGenerator[pd.DataFrame]):
                 label=label.value,
                 random_state=random_state,
                 generated=strategy.function(
-                    self.settings.dataset,
+                    self.dataset,
                     random_state=random_state,
                     **strategy.kwargs,
                 ),
