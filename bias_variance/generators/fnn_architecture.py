@@ -7,7 +7,7 @@ from types import MappingProxyType
 import numpy as np
 
 from ..models.fnn import FnnArchitecture
-from .base import Generator, GeneratorConfig, Variation
+from .base import Variation, VariationGenerator, VariationGeneratorConfig
 
 
 class ArchitectureName(StrEnum):
@@ -239,7 +239,7 @@ DEFAULT_TAPER_CONFIG = MappingProxyType({
 
 
 @dataclass(frozen=True, slots=True)
-class FnnArchitectureGeneratorConfig(GeneratorConfig):
+class FnnArchitectureGeneratorConfig(VariationGeneratorConfig):
     '''
     Represents the complete configuration for the FNN architecture generator.
 
@@ -462,7 +462,7 @@ class FnnArchitectureVariation(Variation[FnnArchitecture]):
         return self.generated
 
 
-class FnnArchitectureGenerator(Generator[FnnArchitecture]):
+class FnnArchitectureGenerator(VariationGenerator[FnnArchitecture]):
     '''
     Generate FNN architectures that describe a model's hidden-layer structure.
 
@@ -510,8 +510,12 @@ class FnnArchitectureGenerator(Generator[FnnArchitecture]):
             DEFAULT_TAPER_CONFIG
         )
 
+    @property
+    def variation_labels(self):
+        return self.settings.variation_labels
+
+    @staticmethod
     def _generate_random_sizes(
-        self,
         config: FnnRandomArchitectureConfig,
         rng: np.random.Generator,
     ) -> FnnArchitecture:
@@ -549,8 +553,8 @@ class FnnArchitectureGenerator(Generator[FnnArchitecture]):
             )
         )
 
+    @staticmethod
     def _generate_taper_sizes(
-        self,
         config: FnnTaperArchitectureConfig,
         taper_type: ArchitectureName,
         rng: np.random.Generator,
