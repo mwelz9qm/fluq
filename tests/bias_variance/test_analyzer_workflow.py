@@ -1,22 +1,24 @@
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from bias_variance.analyzer import (
     BiasAnalyzer,
-    DatasetSplit,
-    RunBaseline,
-    RunConfig,
-    Study,
-    StudyName,
 )
+from bias_variance.config import RunConfigBuilder, StudyBias
 from bias_variance.generators.fnn_architecture import (
     ArchitectureName,
+    FnnArchitectureGenerator,
     FnnArchitectureGeneratorConfig,
     FnnRandomArchitectureConfig,
 )
+from bias_variance.generators.noise import NoiseGenerator, NoiseGeneratorConfig
+from bias_variance.generators.sampling import (
+    SamplingGenerator,
+    SamplingGeneratorConfig,
+)
 from bias_variance.models.evaluation import EvaluationMethod, MetricName
-from bias_variance.models.fnn import FnnArchitecture
 from bias_variance.models.training import TrainingConfig
 
 
@@ -30,44 +32,30 @@ def test_workflows_share_file_database_and_return_multioutput_results(
             'z': [1.0, 2.0, 3.0, 4.0],
         }
     )
-    split = DatasetSplit(
-        x_train=inputs.iloc[:2],
-        x_test=inputs.iloc[2:],
-        y_train=outputs.iloc[:2],
-        y_test=outputs.iloc[2:],
-    )
-    baseline = RunBaseline(
-        inputs=inputs,
-        outputs=outputs,
-        split=split,
-        architecture=FnnArchitecture((2,)),
-    )
     generator_config = FnnArchitectureGeneratorConfig(
         range_architectures={
             ArchitectureName.WIDE: FnnRandomArchitectureConfig(
                 layer_range=(1, 2),
                 size_range=(2, 3),
             )
-        }
-    )
-    run_config = RunConfig(
-        baseline=baseline,
-        studies=(
-            Study(
-                study_name=StudyName.MODEL,
-                evaluation_method=EvaluationMethod.POINTWISE,
-                generator_config=generator_config,
-            ),
-        ),
-        n_iter=2,
-        test_metrics=frozenset((MetricName.MSE,)),
-        random_state=7,
+        },
+        taper_architectures={},
     )
     analyzer = BiasAnalyzer(tmp_path / 'results.sqlite3')
 
     analyzer.run_studies(
-        run_config,
-        TrainingConfig(epochs=0, device='cpu'),
+        inputs,
+        outputs,
+        run_settings={
+            'variation_generator_configs': (generator_config,),
+            'evaluation_methods': (EvaluationMethod.POINTWISE,),
+            'n_iter': 2,
+            'test_size': 0.5,
+            'test_metrics': (MetricName.MSE,),
+            'random_state': 7,
+            'base_architecture': (2,),
+        },
+        training_config=TrainingConfig(epochs=0, device='cpu'),
     )
     results = analyzer.decompose_bias_and_variance()
 
@@ -83,3 +71,96 @@ def test_workflows_share_file_database_and_return_multioutput_results(
     assert results.loc[0, 'evaluation_method'] == 'pointwise'
     assert len(results.loc[0, 'bias']) == 2
     assert len(results.loc[0, 'variance']) == 2
+
+
+def test_run_studies_accepts_mapped_run_settings(tmp_path: Path) -> None:
+    inputs = pd.DataFrame({'x': [0.0, 1.0, 2.0, 3.0]})
+    outputs = pd.DataFrame({'y': [0.0, 2.0, 4.0, 6.0]})
+    analyzer = BiasAnalyzer(tmp_path / 'raw-results.sqlite3')
+
+    analyzer.run_studies(
+        inputs,
+        outputs,
+        {
+            'variation_generator_configs': {
+                StudyBias.MODEL.value: {
+                    'range_architectures': {
+                        ArchitectureName.WIDE: FnnRandomArchitectureConfig(
+                            layer_range=(1, 2),
+                            size_range=(2, 3),
+                        ),
+                    },
+                    'taper_architectures': {},
+                },
+            },
+            'n_iter': 1,
+            'test_size': 0.5,
+            'test_metrics': ['mse'],
+            'evaluation_methods': ['pointwise'],
+            'random_state': 7,
+        },
+        training_config=TrainingConfig(epochs=0, device='cpu'),
+    )
+
+
+def test_run_studies_rejects_unknown_run_setting(
+    tmp_path: Path,
+) -> None:
+    inputs = pd.DataFrame({'x': [0.0, 1.0]})
+    outputs = pd.DataFrame({'y': [0.0, 1.0]})
+
+    with pytest.raises(ValueError, match='Unknown run settings'):
+        BiasAnalyzer(tmp_path / 'mixed.sqlite3').run_studies(
+            inputs,
+            outputs,
+            {'unknown': True},
+        )
+
+
+def test_builder_uses_defaults_for_undefined_run_settings() -> None:
+    inputs = pd.DataFrame({'x': [0.0, 1.0, 2.0, 3.0]})
+    outputs = pd.DataFrame({'y': [0.0, 1.0, 2.0, 3.0]})
+
+    config = (
+        RunConfigBuilder()
+        .set_X(inputs)
+        .set_Y(outputs)
+        .apply_run_settings(None)
+        .build()
+    )
+
+    assert config.n_iter == 100
+    assert config.test_size == 0.2
+    assert config.evaluation_methods == (
+        EvaluationMethod.AVERAGING,
+        EvaluationMethod.POINTWISE,
+    )
+    assert {study.study_bias for study in config.studies} == set(StudyBias)
+
+
+def test_generators_construct_their_own_default_configs() -> None:
+    assert isinstance(
+        FnnArchitectureGenerator().settings,
+        FnnArchitectureGeneratorConfig,
+    )
+    assert isinstance(NoiseGenerator().settings, NoiseGeneratorConfig)
+    assert isinstance(SamplingGenerator().settings, SamplingGeneratorConfig)
+    assert FnnArchitectureGeneratorConfig().variation_labels == (
+        'wide',
+        'narrow',
+        'taper',
+        'reverse_taper',
+        'combined_taper',
+    )
+
+
+def test_noise_generator_changes_values_without_mutating_base_data() -> None:
+    dataset = pd.DataFrame({'x': [1.0, 2.0, 3.0, 4.0]})
+    original = dataset.copy()
+    generator = NoiseGenerator(NoiseGeneratorConfig((0.1,)))
+    generator.base_dataset = dataset
+
+    generated = generator.generate(random_state=7)[0].generated
+
+    assert not generated.equals(original)
+    pd.testing.assert_frame_equal(dataset, original)
