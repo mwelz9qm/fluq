@@ -264,21 +264,21 @@ class FnnArchitectureGeneratorConfig(VariationGeneratorConfig):
 
     Attributes
     -------------
-        range_architectures: Mapping[ArchitectureName, FnnRandomArchitectureConfig], default = dict()
+        range_architectures: Mapping[ArchitectureName, FnnRandomArchitectureConfig], default = DEFAULT_RANDOM_CONFIG
             A read-only mapping of selected random-range architectures and their
             configurations after initialization.
-        taper_architectures: Mapping[ArchitectureName, FnnTaperArchitectureConfig], default = dict()
+        taper_architectures: Mapping[ArchitectureName, FnnTaperArchitectureConfig], default = DEFAULT_TAPER_CONFIG
             A read-only mapping of selected taper architectures and their
             configurations after initialization.
     '''
     range_architectures: Mapping[
         ArchitectureName,
         FnnRandomArchitectureConfig,
-    ] = field(default_factory=dict)
+    ] = field(default_factory=lambda: DEFAULT_RANDOM_CONFIG)
     taper_architectures: Mapping[
         ArchitectureName,
         FnnTaperArchitectureConfig,
-    ] = field(default_factory=dict)
+    ] = field(default_factory=lambda: DEFAULT_TAPER_CONFIG)
 
     def __post_init__(self) -> None:
         '''
@@ -505,9 +505,10 @@ class FnnArchitectureGenerator(VariationGenerator[FnnArchitecture]):
         self,
         settings: FnnArchitectureGeneratorConfig | None = None,
     ) -> None:
-        self.settings = settings or FnnArchitectureGeneratorConfig(
-            DEFAULT_RANDOM_CONFIG,
-            DEFAULT_TAPER_CONFIG
+        self.settings = (
+            FnnArchitectureGeneratorConfig()
+            if settings is None
+            else settings
         )
 
     @property
