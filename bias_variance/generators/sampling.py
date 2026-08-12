@@ -54,7 +54,6 @@ DEFAULT_SAMPLING_STRATEGIES = MappingProxyType({
 
 @dataclass(frozen=True, slots=True)
 class SamplingGeneratorConfig(VariationGeneratorConfig):
-    _base_dataset: pd.DataFrame
     sampling_strategies: Mapping[
         SamplingStrategyName,
         SamplingStrategy,
@@ -68,12 +67,6 @@ class SamplingGeneratorConfig(VariationGeneratorConfig):
             in self.sampling_strategies
         )
 
-    @property
-    def dataset(self) -> pd.DataFrame:
-        return self._base_dataset.copy()
-
-    def __post_init__(self) -> None:
-        self._validate_dataset(self._base_dataset)
 
 @dataclass(frozen=True, slots=True)
 class SamplingVariation(Variation[pd.DataFrame]):
@@ -89,10 +82,28 @@ class SamplingGenerator(VariationGenerator[pd.DataFrame]):
         settings: SamplingGeneratorConfig,
     ) -> None:
         self.settings = settings
+        self._base_dataset: pd.DataFrame | None = None
 
     @property
-    def variation_labels(self):
+    def variation_labels(self) -> tuple[str, ...]:
         return self.settings.variation_labels
+
+    @property
+    def base_dataset(self) -> pd.DataFrame | None:
+        return self._base_dataset
+
+    @base_dataset.setter
+    def base_dataset(self, value) -> None:
+        self._validate_dataset(value)
+        self._base_dataset = value
+
+    @property
+    def dataset(self) -> pd.DataFrame:
+        if self._base_dataset is None:
+            raise ValueError(
+                'Base dataset is not set.'
+            )
+        return self._base_dataset.copy()
     
     def generate(
         self,

@@ -9,7 +9,6 @@ from .base import Variation, VariationGenerator, VariationGeneratorConfig
 
 @dataclass(frozen=True, slots=True)
 class NoiseGeneratorConfig(VariationGeneratorConfig):
-    _base_dataset: pd.DataFrame
     standard_deviations: tuple[float] = (
         0.1, 0.2, 0.3, 0.4, 0.5
     )
@@ -21,10 +20,6 @@ class NoiseGeneratorConfig(VariationGeneratorConfig):
             for standard_deviation
             in self.standard_deviations
         )
-
-    @property
-    def dataset(self) -> pd.DataFrame:
-        return self._base_dataset.copy()
 
     @staticmethod
     def _validate_standard_deviations(values: tuple[float]) -> None:
@@ -61,7 +56,6 @@ class NoiseGeneratorConfig(VariationGeneratorConfig):
             )
 
     def __post_init__(self) -> None:
-        self._validate_dataset(self._base_dataset)
         self._validate_standard_deviations(self.standard_deviations)
 
 
@@ -79,10 +73,28 @@ class NoiseGenerator(VariationGenerator[pd.DataFrame]):
         settings: NoiseGeneratorConfig
     ) -> None:
         self.settings = settings
+        self._base_dataset: pd.DataFrame | None = None
 
     @property
-    def variation_labels(self):
+    def variation_labels(self) -> tuple[str, ...]:
         return self.settings.variation_labels
+
+    @property
+    def base_dataset(self) -> pd.DataFrame | None:
+        return self._base_dataset
+
+    @base_dataset.setter
+    def base_dataset(self, value) -> None:
+        self._validate_dataset(value)
+        self._base_dataset = value
+
+    @property
+    def dataset(self) -> pd.DataFrame:
+        if self._base_dataset is None:
+            raise ValueError(
+                'Base dataset is not set.'
+            )
+        return self._base_dataset.copy()
 
     def generate(
         self,
