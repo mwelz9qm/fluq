@@ -12,7 +12,7 @@ from common.sampling._sampling import (
     get_random_samples,
 )
 
-from .base import Generator, GeneratorConfig, Variation
+from .base import Variation, VariationGenerator, VariationGeneratorConfig
 
 SamplingFunction = Callable[..., pd.DataFrame]
 
@@ -53,8 +53,8 @@ DEFAULT_SAMPLING_STRATEGIES = MappingProxyType({
 
 
 @dataclass(frozen=True, slots=True)
-class SamplingGeneratorConfig(GeneratorConfig):
-    dataset: pd.DataFrame
+class SamplingGeneratorConfig(VariationGeneratorConfig):
+    _base_dataset: pd.DataFrame
     sampling_strategies: Mapping[
         SamplingStrategyName,
         SamplingStrategy,
@@ -68,6 +68,13 @@ class SamplingGeneratorConfig(GeneratorConfig):
             in self.sampling_strategies
         )
 
+    @property
+    def dataset(self) -> pd.DataFrame:
+        return self._base_dataset.copy()
+
+    def __post_init__(self) -> None:
+        self._validate_dataset(self._base_dataset)
+
 @dataclass(frozen=True, slots=True)
 class SamplingVariation(Variation[pd.DataFrame]):
     @property
@@ -76,55 +83,34 @@ class SamplingVariation(Variation[pd.DataFrame]):
         return self.generated
 
 
-class SamplingGenerator(Generator[pd.DataFrame]):
+class SamplingGenerator(VariationGenerator[pd.DataFrame]):
     def __init__(
         self,
         settings: SamplingGeneratorConfig,
     ) -> None:
-        self._dataset = settings.dataset.copy()
-        self._strategies = dict(settings.sampling_strategies)
+        self.settings = settings
 
-    def add_strategy(
-        self,
-        strategy_name: SamplingStrategyName,
-        strategy: SamplingStrategy,
-    ) -> 'SamplingGenerator':
-        if strategy_name in self._strategies:
-            raise ValueError(
-                f'Duplicate sampling strategy label: {strategy.label!r}'
-            )
-        
-        if 'random_state' in strategy.kwargs:
-            raise ValueError(
-                'Configure random_state on BiasAnalyzer, not on a strategy.'
-            )
-        
-        self._strategies[strategy_name] = strategy
-
-        return self
-    
-    def remove_strategy(self, strategy_name: SamplingStrategyName) -> 'SamplingGenerator':
-        self._strategies.pop(strategy_name, None)
-
-        return self
+    @property
+    def variation_labels(self):
+        return self.settings.variation_labels
     
     def generate(
         self,
         *,
-        random_state:  int | None = None,
-    ) -> list[Variation[pd.DataFrame]]:
-        variations = []
-
-        for label, strategy in self._strategies.items():
-            variation = SamplingVariation(
+        random_state: int | None = None,
+    ) -> list[SamplingVariation]:
+        variations = [
+            SamplingVariation(
                 label=label.value,
                 random_state=random_state,
                 generated=strategy.function(
-                    self._dataset.copy(),
+                    self.settings.dataset,
                     random_state=random_state,
                     **strategy.kwargs,
                 ),
             )
-            variations.append(variation)
+            for label, strategy
+            in self.settings.sampling_strategies.items()
+        ]
         
         return variations
