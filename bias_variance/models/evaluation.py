@@ -12,6 +12,7 @@ from sklearn.metrics import (
 )
 from torch import nn
 
+from bias_variance.persistence.records import EvaluationRecord
 from bias_variance.persistence.store import ResultStore
 
 
@@ -49,6 +50,12 @@ class GroupUpdateData:
         return (self.group_id, self.bias, self.variance)
 
 
+@dataclass(frozen=True, slots=True)
+class EvaluationData:
+    update_groups: tuple[GroupUpdateData]
+    evaluations: tuple[EvaluationRecord]
+
+
 class Evaluator:
     '''
     Evaluates the run data across all models under a variation and study.
@@ -72,7 +79,10 @@ class Evaluator:
     ):
         self.result_store = result_store
 
-    def _evaluate_strategy_bias_and_variance(self, group_id: int) -> GroupUpdateData:
+    def _evaluate_strategy_bias_and_variance(
+        self,
+        group_id: int
+    ) -> tuple[GroupUpdateData, tuple[EvaluationRecord, ...]]:
         method = self.result_store.get_method(group_id)
         match method:
             case EvaluationMethod.AVERAGING.value:
@@ -84,8 +94,9 @@ class Evaluator:
                     f'Unknown method: {method!r}.'
                 )
 
+        records: list[EvaluationRecord] = []
         variances: list[np.ndarray] = []
-        squared_errors: list[np.ndarray] = []
+        biases: list[np.ndarray] = []
         for item in items:
             if method == EvaluationMethod.AVERAGING.value:
                 actuals, predictions = (
@@ -118,36 +129,52 @@ class Evaluator:
                         'Inconsistent actual outputs for '
                         f'group {group_id}, position {item}.'
                     )
-                mean_error = (
+                bias = (
                     np.mean(predictions_array, axis=0) - actuals_array[0]
                 )
+                squared_bias = bias ** 2.0
+                biases.append(squared_bias)
             else:
-                mean_error = (
-                    np.mean(predictions_array - actuals_array, axis=0)
+                model_strategy_bias = (
+                    np.mean((predictions_array - actuals_array) ** 2.0, axis=0)
                 )
+                # NOTE: is equal to model's MSE; maybe try to store this during testing?
+                # Or, maybe just make MSE mandatory in scores and query scores by group_id.
+                # Strategy bias would be equal to average MSE across all models for AVERAGING.
+                biases.append(model_strategy_bias)
 
             variance = np.var(predictions_array, axis=0)
-            squared_error = mean_error ** 2.0
-
             variances.append(variance)
-            squared_errors.append(squared_error)
+
+            evaluation_record = EvaluationRecord(
+                group_id=group_id,
+                model_id=item if method == EvaluationMethod.AVERAGING.value else None,
+                test_set_position=item if method == EvaluationMethod.POINTWISE else None,
+                bias=biases[-1],
+                variance=variance,
+            )
+
+            records.append(evaluation_record)
 
         if not variances:
             raise ValueError(f'No evaluation data found for group {group_id}.')
 
         strategy_variance = np.mean(np.stack(variances), axis=0)
-        strategy_bias = np.mean(np.stack(squared_errors), axis=0)
+        strategy_bias = np.mean(np.stack(biases), axis=0)
 
-        return GroupUpdateData(
-            group_id,
-            tuple(float(value) for value in strategy_bias),
-            tuple(float(value) for value in strategy_variance),
+        return tuple(
+            GroupUpdateData(
+                group_id,
+                tuple(float(value) for value in strategy_bias),
+                tuple(float(value) for value in strategy_variance),
+            ),
+            tuple(records),
         )
 
     def evaluate(
         self,
         run_id: str,
-    ) -> tuple[GroupUpdateData, ...]:
+    ) -> EvaluationData:
         '''
         Evaluates the biases and variances for all variation groups in a study.
         There are two types of bias and variance pairs:
@@ -167,14 +194,19 @@ class Evaluator:
         tuple[GroupUpdateData]
         '''
         studies = self.result_store.get_studies(run_id)
-        group_results = []
+        update_groups: list[GroupUpdateData] = []
+        evaluation_records: list[EvaluationRecord] = []
         for study_id in studies:
             groups = self.result_store.get_groups(study_id)
             for group_id in groups:
-                group_update = self._evaluate_strategy_bias_and_variance(group_id)
-                group_results.append(group_update)
+                group, records = self._evaluate_strategy_bias_and_variance(group_id)
+                update_groups.append(group)
+                evaluation_records.extend(records)
 
-        return tuple(group_results)
+        return EvaluationData(
+            update_groups=tuple(update_groups),
+            evaluations=tuple(evaluation_records)
+        )
 
 
 ########## HELPER FUNCTIONS ##########
