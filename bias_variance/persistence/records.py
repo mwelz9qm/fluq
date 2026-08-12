@@ -31,8 +31,15 @@ class StudyRecord:
 class GroupRecord:
     study_id: int # foreign
     group_name: str
-    bias: tuple[float, ...] | None = None
-    variance: tuple[float, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationRecord:
+    group_id: int # foreign
+    model_id: int | None # foreign
+    test_set_position: int | None # foreign
+    bias: float
+    variance: float
 
 
 @dataclass(frozen=True, slots=True)
