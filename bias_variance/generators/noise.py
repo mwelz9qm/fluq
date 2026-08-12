@@ -70,9 +70,9 @@ class NoiseVariation(Variation[pd.DataFrame]):
 class NoiseGenerator(VariationGenerator[pd.DataFrame]):
     def __init__(
         self,
-        settings: NoiseGeneratorConfig
+        settings: NoiseGeneratorConfig | None = None,
     ) -> None:
-        self.settings = settings
+        self.settings = NoiseGeneratorConfig() if settings is None else settings
         self._base_dataset: pd.DataFrame | None = None
 
     @property
@@ -107,7 +107,7 @@ class NoiseGenerator(VariationGenerator[pd.DataFrame]):
         # generation loop
         for standard_deviation in self.settings.standard_deviations:
             # get copy from base dataset
-            noisy_dataset = self.settings.dataset
+            noisy_dataset = self.dataset
 
             # construct scale factor matrix
             scale_factor_matrix = rng.normal(
@@ -118,7 +118,7 @@ class NoiseGenerator(VariationGenerator[pd.DataFrame]):
 
             # multiply by scale factor for each
             # corresponding entry in dataset and matrix
-            noisy_dataset.mul(
+            noisy_dataset = noisy_dataset.mul(
                 scale_factor_matrix,
                 axis="columns",
             )
