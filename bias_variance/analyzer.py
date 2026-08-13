@@ -254,7 +254,10 @@ class BiasAnalyzer:
             .apply_run_settings(run_settings)
             .build()
         )
-        training_config = training_config or TrainingConfig()
+
+        # Add tuner implementation here
+
+        training_config = training_config or TrainingConfig() # Swap default to tuner's best hyperparams
         
         # maintain result store lifecyle within method call
         with ResultStore(self.db_path, timeout=self.db_timeout) as store:
