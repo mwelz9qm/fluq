@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import numpy as np
@@ -14,7 +15,7 @@ class VariationGeneratorConfig(ABC):
     def variation_labels(self) -> tuple[str, ...]:
         '''Returns all variation labels.'''
         raise NotImplementedError
-
+    
 
 @dataclass(frozen=True, slots=True)
 class Variation[VaritionGeneratedT]:
@@ -29,6 +30,35 @@ class Variation[VaritionGeneratedT]:
     label: str
     random_state: int | None
     generated: VaritionGeneratedT
+
+    @staticmethod
+    def _validate_label(label: str):
+        if not isinstance(label, str):
+            raise TypeError(
+                'label must be a string.'
+            )
+        
+        if label.strip() == '':
+            raise ValueError(
+                'label cannot be empty string or whitespace.'
+            )
+
+    @staticmethod
+    def _validate_random_state(random_state: int | None):
+        if (
+            not isinstance(random_state, int)
+            or isinstance(random_state, bool)
+        ) and random_state is not None:
+            raise TypeError('random_state must be an integer or None.')
+
+        if random_state is not None and not (0 <= random_state < 2**32):
+            raise ValueError(
+                'random_state out of bounds.'
+            )
+
+    def __post_init__(self):
+        self._validate_label(self.label)
+        self._validate_random_state(self.random_state)
 
 
 class VariationGenerator[VaritionGeneratedT](ABC):
@@ -45,7 +75,7 @@ class VariationGenerator[VaritionGeneratedT](ABC):
         self,
         *,
         random_state: int | None = None,
-    ) -> list[Variation[VaritionGeneratedT]]:
+    ) -> Iterable[Variation[VaritionGeneratedT]]:
         '''Generates one variation per configured label.'''
         raise NotImplementedError
 
