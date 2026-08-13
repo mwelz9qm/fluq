@@ -14,6 +14,7 @@ from os import PathLike
 from typing import Self, overload
 
 from bias_variance.persistence.records import (
+    EvaluationRecord,
     GroupRecord,
     ModelRecord,
     RunRecord,
@@ -28,7 +29,7 @@ from bias_variance.persistence.serialize import (
     encode_tuple,
 )
 
-type Record = RunRecord | StudyRecord | GroupRecord | ModelRecord | ScoreRecord | TrainPointRecord | TestPointRecord
+type Record = RunRecord | StudyRecord | GroupRecord | EvaluationRecord | ModelRecord | ScoreRecord | TrainPointRecord | TestPointRecord
 type BiasVarianceResult = tuple[
     str,
     str,
@@ -42,6 +43,7 @@ class TableName(StrEnum):
     RUNS = 'runs'
     STUDIES = 'studies'
     GROUPS = 'groups'
+    EVALUTAIONS = 'evaluations'
     MODELS = 'models'
     SCORES = 'scores'
     TRAIN_POINTS = 'train_points'
@@ -146,9 +148,24 @@ class ResultStore:
                 group_id INTEGER PRIMARY KEY,
                 study_id INTEGER NOT NULL,
                 group_name TEXT NOT NULL,
-                bias TEXT,
-                variance TEXT,
+                strategy_bias TEXT,
+                strategy_variance TEXT,
                 FOREIGN KEY (study_id) REFERENCES studies (study_id)
+            ) STRICT
+            '''
+        )
+
+        cur.execute(
+            f'''
+            CREATE TABLE IF NOT EXISTS {TableName.EVALUTAIONS.value} (
+                evaluation_id INTEGER PRIMARY KEY,
+                group_id INTEGER NOT NULL,
+                test_set_position INTEGER NOT NULL,
+                y_true TEXT NOT NULL,
+                point_mean_prediction TEXT NOT NULL,
+                bias TEXT NOT NULL,
+                variance TEXT NOT NULL,
+                FOREIGN KEY (group_id) REFERENCES groups (group_id)
             ) STRICT
             '''
         )
@@ -159,6 +176,8 @@ class ResultStore:
                 model_id INTEGER PRIMARY KEY,
                 group_id INTEGER NOT NULL,
                 architecture TEXT NOT NULL,
+                model_mean_prediction TEXT NOT NULL,
+                model_variance_prediction TEXT NOT NULL,
                 FOREIGN KEY (group_id) REFERENCES groups (group_id)
             ) STRICT
             '''
@@ -182,8 +201,8 @@ class ResultStore:
                 train_point_id INTEGER PRIMARY KEY,
                 model_id INTEGER,
                 run_id TEXT,
-                inputs TEXT NOT NULL,
-                outputs TEXT NOT NULL,
+                input TEXT NOT NULL,
+                output TEXT NOT NULL,
                 FOREIGN KEY (model_id) REFERENCES models (model_id),
                 FOREIGN KEY (run_id) REFERENCES runs (run_id)
             ) STRICT
@@ -197,9 +216,9 @@ class ResultStore:
                 model_id INTEGER,
                 run_id TEXT,
                 set_position INTEGER NOT NULL,
-                inputs TEXT NOT NULL,
-                outputs TEXT NOT NULL,
-                predictions TEXT NOT NULL,
+                input TEXT NOT NULL,
+                output TEXT NOT NULL,
+                prediction TEXT NOT NULL,
                 FOREIGN KEY (model_id) REFERENCES models (model_id),
                 FOREIGN KEY (run_id) REFERENCES runs (run_id)
             ) STRICT
@@ -229,24 +248,38 @@ class ResultStore:
             case GroupRecord():
                 table_name = TableName.GROUPS
                 tuple_keys = (
+                    'strategy_bias',
+                    'strategy_variance'
+                )
+
+            case EvaluationRecord():
+                table_name = TableName.EVALUTAIONS
+                tuple_keys = (
+                    'y_true',
+                    'point_mean_prediction',
                     'bias',
                     'variance'
                 )
 
+
             case ModelRecord():
                 table_name = TableName.MODELS
-                tuple_keys = ('architecture',)
+                tuple_keys = (
+                    'architecture',
+                    'model_mean_prediction',
+                    'model_variance_prediction'
+                )
 
             case ScoreRecord():
                 table_name = TableName.SCORES
 
             case TrainPointRecord():
                 table_name = TableName.TRAIN_POINTS
-                tuple_keys = ('inputs', 'outputs')
+                tuple_keys = ('input', 'output')
 
             case TestPointRecord():
                 table_name = TableName.TEST_POINTS
-                tuple_keys = ('inputs', 'outputs', 'predictions')
+                tuple_keys = ('input', 'output', 'prediction')
 
             case _:
                 raise TypeError(
@@ -348,7 +381,7 @@ class ResultStore:
         cur.execute(
             f'''
             UPDATE {TableName.GROUPS.value}
-            SET (bias, variance) = (?, ?)
+            SET (strategy_bias, strategy_variance) = (?, ?)
             WHERE group_id = ?
             ''',
             (serialized_bias, serialized_variance, group_id)
@@ -629,8 +662,8 @@ class ResultStore:
                 s.study_name,
                 g.group_name,
                 s.evaluation_method,
-                g.bias,
-                g.variance
+                g.strategy_bias,
+                g.strategy_variance
             FROM {TableName.RUNS.value} AS r
             INNER JOIN {TableName.STUDIES.value} AS s
                 ON r.run_id = s.run_id
@@ -647,11 +680,11 @@ class ResultStore:
                 str(row['study_name']),
                 str(row['group_name']),
                 str(row['evaluation_method']),
-                None if row['bias'] is None else tuple(
-                    float(value) for value in decode_json_array(row['bias'])
+                None if row['strategy_bias'] is None else tuple(
+                    float(value) for value in decode_json_array(row['strategy_bias'])
                 ),
-                None if row['variance'] is None else tuple(
-                    float(value) for value in decode_json_array(row['variance'])
+                None if row['strategy_variance'] is None else tuple(
+                    float(value) for value in decode_json_array(row['strategy_variance'])
                 ),
             )
             for row in cur.fetchall()
