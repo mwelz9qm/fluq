@@ -28,6 +28,7 @@ from bias_variance.models.evaluation import (
 )
 from bias_variance.models.fnn import FnnArchitecture
 from bias_variance.models.training import Trainer, TrainingConfig
+from bias_variance.models.tuner import Tuner
 from bias_variance.persistence.records import (
     GroupRecord,
     ModelRecord,
@@ -42,7 +43,6 @@ from bias_variance.plotting import (
     plot_bias_variance,
     plot_prediction_comparison,
 )
-from bias_variance.models.tuner import Tuner
 
 
 class BiasAnalyzer:
@@ -166,10 +166,50 @@ class BiasAnalyzer:
                     resolved_seed
                 )
 
+                #------START MODEL BUILD, TRAIN, PREDICT, TEST------
+
+                # build and train model with model trainer
+                trained_model = trainer.train(
+                    architecture=architecture,
+                    x_train=X_train,
+                    y_train=Y_train,
+                    random_state=resolved_seed
+                )
+
+                # get the model's predictions
+                model_predictions = get_model_predictions(
+                    model=trained_model,
+                    x_test=X_test,
+                    resolved_device=resolved_device,
+                )
+
+                # get model's mean and variance of predictions
+                model_mean_prediction = np.mean(
+                    np.asarray(model_predictions, dtype=float),
+                    axis=0
+                )
+                model_variance_prediction = np.var(
+                    np.asarray(model_predictions, dtype=float),
+                    axis=0
+                )
+
+                # get the model's scores
+                scores = get_model_scores(
+                    predictions=model_predictions,
+                    y_test=Y_test,
+                    metrics=test_metrics,
+                )
+
+                #------END MODEL BUILD, TRAIN, PREDICT, TEST------
+
+                #------START RECORD BUILDING------
+
                 # build and store model record
                 model_record = ModelRecord(
                     group_id=group_ids[variation.label],
-                    architecture=architecture.hidden_layers
+                    architecture=architecture.hidden_layers,
+                    model_mean_prediction=model_mean_prediction,
+                    model_variance_prediction=model_variance_prediction
                 )
                 model_id = store.add(model_record)
 
@@ -187,21 +227,6 @@ class BiasAnalyzer:
                         outputs=outputs,
                     )
                     store.add(train_point_record)
-
-                # train model with model trainer
-                trained_model = trainer.train(
-                    architecture=architecture,
-                    x_train=X_train,
-                    y_train=Y_train,
-                    random_state=resolved_seed
-                )
-
-                # get the model's predictions
-                model_predictions = get_model_predictions(
-                    model=trained_model,
-                    x_test=X_test,
-                    resolved_device=resolved_device,
-                )
 
                 # test point record building loop
                 for set_position, (inputs, outputs, row_predictions) in enumerate(
@@ -223,13 +248,6 @@ class BiasAnalyzer:
                     )
                     store.add(test_point_record)
 
-                # get the model's scores
-                scores = get_model_scores(
-                    predictions=model_predictions,
-                    y_test=Y_test,
-                    metrics=test_metrics,
-                )
-
                 # score record building loop
                 for metric, score in scores.items():
                     # build and store score record
@@ -240,6 +258,8 @@ class BiasAnalyzer:
                     )
                     store.add(score_record)
 
+                #------END RECORD BUILDING------
+
     def run_studies(
         self,
         X: pd.DataFrame,
@@ -248,6 +268,8 @@ class BiasAnalyzer:
         *,
         training_config: TrainingConfig | None = None,
     ) -> Self:
+        # Build the run config from the run_settings, and
+        # inputs (X) and outputs(Y)
         run_config = (
             RunConfigBuilder()
             .set_X(X)
@@ -264,6 +286,7 @@ class BiasAnalyzer:
                 test_metrics=run_config.test_metrics,
                 random_state=run_config.random_state,
             )
+
         # maintain result store lifecyle within method call
         with ResultStore(self.db_path, timeout=self.db_timeout) as store:
             # create the database tables
@@ -309,6 +332,7 @@ class BiasAnalyzer:
                 run_config.baseline.Y.shape[1]
             )
 
+            # Iterate through the methods and studies
             for method in run_config.evaluation_methods:
                 for study in run_config.studies:
                     study_record = StudyRecord(
