@@ -79,35 +79,46 @@ class Evaluator:
     ):
         self.result_store = result_store
 
-    def _evaluate_strategy_bias_and_variance(
+    def _evaluate_averaging(
         self,
-        group_id: int
-    ) -> tuple[GroupUpdateData, tuple[EvaluationRecord, ...]]:
-        method = self.result_store.get_method(group_id)
-        match method:
-            case EvaluationMethod.AVERAGING.value:
-                items = self.result_store.get_models(group_id)
-            case EvaluationMethod.POINTWISE.value:
-                items = self.result_store.get_test_set_positions(group_id)
-            case _:
-                raise ValueError(
-                    f'Unknown method: {method!r}.'
-                )
+        run_id: str,
+        group_id: int,
+    ) -> GroupUpdateData:
+        """Average stored per-model MSE and prediction variance by output."""
+        mse_scores, model_variances = (
+            self.result_store.get_averaging_evaluation_data(run_id, group_id)
+        )
+        mse_array = np.asarray(mse_scores, dtype=float)
+        variance_array = np.asarray(model_variances, dtype=float)
+        if (
+            mse_array.ndim != 2
+            or variance_array.ndim != 2
+            or mse_array.shape != variance_array.shape
+            or mse_array.size == 0
+        ):
+            raise ValueError(
+                'Averaging MSE scores and variances must have matching shape '
+                '(models, outputs).'
+            )
 
+        return GroupUpdateData(
+            group_id=group_id,
+            bias=tuple(float(value) for value in mse_array.mean(axis=0)),
+            variance=tuple(
+                float(value) for value in variance_array.mean(axis=0)
+            ),
+        )
+
+    def _evaluate_pointwise(
+        self,
+        group_id: int,
+    ) -> tuple[GroupUpdateData, tuple[EvaluationRecord, ...]]:
+        """Evaluate and record predictions at each shared test position."""
         records: list[EvaluationRecord] = []
-        variances: list[np.ndarray] = []
-        biases: list[np.ndarray] = []
-        for item in items:
-            if method == EvaluationMethod.AVERAGING.value:
-                actuals, predictions = (
-                    self.result_store.get_actuals_and_predictions(model_id=item)
-                )
-            else:
-                actuals, predictions = (
-                    self.result_store.get_actuals_and_predictions(
-                        group_id_and_set_pos=(group_id, item)
-                    )
-                )
+        for position in self.result_store.get_test_set_positions(group_id):
+            actuals, predictions = self.result_store.get_actuals_and_predictions(
+                group_id_and_set_pos=(group_id, position)
+            )
 
             actuals_array = np.asarray(actuals, dtype=float)
             predictions_array = np.asarray(predictions, dtype=float)
@@ -122,51 +133,43 @@ class Evaluator:
                     'Actuals and predictions must have matching shapes; '
                     f'got {actuals_array.shape} and {predictions_array.shape}.'
                 )
-
-            if method == EvaluationMethod.POINTWISE.value:
-                if not np.allclose(actuals_array, actuals_array[0]):
-                    raise ValueError(
-                        'Inconsistent actual outputs for '
-                        f'group {group_id}, position {item}.'
-                    )
-                bias = (
-                    np.mean(predictions_array, axis=0) - actuals_array[0]
+            if not np.allclose(actuals_array, actuals_array[0]):
+                raise ValueError(
+                    'Inconsistent actual outputs for '
+                    f'group {group_id}, position {position}.'
                 )
-                squared_bias = bias ** 2.0
-                biases.append(squared_bias)
-            else:
-                model_strategy_bias = (
-                    np.mean((predictions_array - actuals_array) ** 2.0, axis=0)
-                )
-                # NOTE: is equal to model's MSE; maybe try to store this during testing?
-                # Or, maybe just make MSE mandatory in scores and query scores by group_id.
-                # Strategy bias would be equal to average MSE across all models for AVERAGING.
-                biases.append(model_strategy_bias)
-
+            point_mean = np.mean(predictions_array, axis=0)
+            squared_bias = (point_mean - actuals_array[0]) ** 2.0
             variance = np.var(predictions_array, axis=0)
-            variances.append(variance)
-
-            evaluation_record = EvaluationRecord(
-                group_id=group_id,
-                model_id=item if method == EvaluationMethod.AVERAGING.value else None,
-                test_set_position=item if method == EvaluationMethod.POINTWISE else None,
-                bias=biases[-1],
-                variance=variance,
+            records.append(
+                EvaluationRecord(
+                    group_id=group_id,
+                    test_set_position=position,
+                    y_true=tuple(float(value) for value in actuals_array[0]),
+                    point_mean_prediction=tuple(
+                        float(value) for value in point_mean
+                    ),
+                    bias=tuple(float(value) for value in squared_bias),
+                    variance=tuple(float(value) for value in variance),
+                )
             )
 
-            records.append(evaluation_record)
-
-        if not variances:
+        if not records:
             raise ValueError(f'No evaluation data found for group {group_id}.')
-
-        strategy_variance = np.mean(np.stack(variances), axis=0)
-        strategy_bias = np.mean(np.stack(biases), axis=0)
 
         return (
             GroupUpdateData(
-                group_id,
-                tuple(float(value) for value in strategy_bias),
-                tuple(float(value) for value in strategy_variance),
+                group_id=group_id,
+                bias=tuple(
+                    float(value)
+                    for value in np.mean([record.bias for record in records], axis=0)
+                ),
+                variance=tuple(
+                    float(value)
+                    for value in np.mean(
+                        [record.variance for record in records], axis=0
+                    )
+                ),
             ),
             tuple(records),
         )
@@ -199,7 +202,18 @@ class Evaluator:
         for study_id in studies:
             groups = self.result_store.get_groups(study_id)
             for group_id in groups:
-                group, records = self._evaluate_strategy_bias_and_variance(group_id)
+                match self.result_store.get_method(group_id):
+                    case EvaluationMethod.AVERAGING.value:
+                        group = self._evaluate_averaging(run_id, group_id)
+                        records = ()
+                    case EvaluationMethod.POINTWISE.value:
+                        group, records = self._evaluate_pointwise(group_id)
+                    case method:
+                        raise ValueError(f'Unknown method: {method!r}.')
+
+                self.result_store.update_group(*group.data_row)
+                for record in records:
+                    self.result_store.add(record)
                 update_groups.append(group)
                 evaluation_records.extend(records)
 
