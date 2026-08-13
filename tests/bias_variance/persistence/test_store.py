@@ -56,7 +56,14 @@ def test_add_and_query_complete_record_hierarchy(store: ResultStore) -> None:
     run_id = _add_run(store)
     study_id = store.add(StudyRecord(run_id, 'model', 'averaging'))
     group_id = store.add(GroupRecord(study_id, 'small'))
-    model_id = store.add(ModelRecord(group_id, (8,)))
+    model_id = store.add(
+        ModelRecord(
+            group_id,
+            (8,),
+            np.float32(2.5),
+            np.float32(0.25),
+        )
+    )
 
     assert store.add(ScoreRecord(model_id, 'mse', 0.5)) == 1
     assert store.add(TrainPointRecord(model_id, None, (1.0,), (2.0,))) == 1
@@ -94,8 +101,8 @@ def test_prediction_queries_have_deterministic_tiebreakers(
     run_id = _add_run(store)
     study_id = store.add(StudyRecord(run_id, 'model', 'pointwise'))
     group_id = store.add(GroupRecord(study_id, 'small'))
-    first_model_id = store.add(ModelRecord(group_id, (8,)))
-    second_model_id = store.add(ModelRecord(group_id, (16,)))
+    first_model_id = store.add(ModelRecord(group_id, (8,), 2.5, 0.25))
+    second_model_id = store.add(ModelRecord(group_id, (16,), 3.5, 0.5))
 
     store.add(StoredTestPointRecord(first_model_id, None, 2, (0.0,), (1.0,), (1.1,)))
     store.add(StoredTestPointRecord(first_model_id, None, 2, (0.0,), (2.0,), (2.1,)))

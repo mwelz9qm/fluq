@@ -160,7 +160,7 @@ def test_noise_generator_changes_values_without_mutating_base_data() -> None:
     generator = NoiseGenerator(NoiseGeneratorConfig((0.1,)))
     generator.base_dataset = dataset
 
-    generated = generator.generate(random_state=7)[0].generated
+    generated = next(generator.generate(random_state=7)).generated
 
     assert not generated.equals(original)
     pd.testing.assert_frame_equal(dataset, original)
