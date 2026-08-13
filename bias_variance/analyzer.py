@@ -223,8 +223,8 @@ class BiasAnalyzer:
                     train_point_record = TrainPointRecord(
                         model_id=model_id,
                         run_id=None,
-                        inputs=inputs,
-                        outputs=outputs,
+                        input=inputs,
+                        output=outputs,
                     )
                     store.add(train_point_record)
 
@@ -242,9 +242,9 @@ class BiasAnalyzer:
                         model_id=model_id,
                         run_id=None,
                         set_position=int(set_position),
-                        inputs=inputs,
-                        outputs=outputs,
-                        predictions=row_predictions
+                        input=inputs,
+                        output=outputs,
+                        prediction=row_predictions
                     )
                     store.add(test_point_record)
 
@@ -388,14 +388,7 @@ class BiasAnalyzer:
                 )
 
             evaluator = Evaluator(store)
-            evaluation_data = evaluator.evaluate(run_id)
-
-            for group_update in evaluation_data.update_groups:
-                store.update_group(
-                    group_update.group_id,
-                    group_update.bias,
-                    group_update.variance
-                )
+            evaluator.evaluate(run_id)
 
             result_rows = store.get_bias_variance_results(run_id)
             results = pd.DataFrame(
