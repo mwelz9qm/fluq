@@ -337,6 +337,10 @@ class RunConfigBuilder:
         if not test_metrics:
             raise ValueError('At least one test metric must be configured.')
 
+        test_metrics = set(test_metrics)
+        if EvaluationMethod.AVERAGING in evaluation_methods:
+            test_metrics.add(MetricName.MSE)
+
         self.reset()
 
         return RunConfig(
