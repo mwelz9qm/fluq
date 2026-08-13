@@ -1,4 +1,4 @@
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
@@ -109,9 +109,9 @@ class SamplingGenerator(VariationGenerator[pd.DataFrame]):
         self,
         *,
         random_state: int | None = None,
-    ) -> list[SamplingVariation]:
-        variations = [
-            SamplingVariation(
+    ) -> Iterable[SamplingVariation]:
+        for label, strategy in self.settings.sampling_strategies.items():
+            variation = SamplingVariation(
                 label=label.value,
                 random_state=random_state,
                 generated=strategy.function(
@@ -120,8 +120,6 @@ class SamplingGenerator(VariationGenerator[pd.DataFrame]):
                     **strategy.kwargs,
                 ),
             )
-            for label, strategy
-            in self.settings.sampling_strategies.items()
-        ]
+
+            yield variation
         
-        return variations

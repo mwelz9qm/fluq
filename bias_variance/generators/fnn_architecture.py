@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from numbers import Real
@@ -441,17 +441,7 @@ class FnnArchitectureVariation(Variation[FnnArchitecture]):
         '''
         Validate the inherited label, random state, and generated architecture.
         '''
-        if not isinstance(self.label, str):
-            raise TypeError('label must be a string.')
-
-        if not self.label:
-            raise ValueError('label must not be empty.')
-
-        if (
-            not isinstance(self.random_state, int)
-            or isinstance(self.random_state, bool)
-        ) and self.random_state is not None:
-            raise TypeError('random_state must be an integer or None.')
+        Variation.__post_init__(self)
 
         if not isinstance(self.generated, FnnArchitecture):
             raise TypeError('generated must be an FnnArchitecture.')
@@ -662,7 +652,7 @@ class FnnArchitectureGenerator(VariationGenerator[FnnArchitecture]):
         self,
         *,
         random_state: int | None = None,
-    ) -> list[Variation[FnnArchitecture]]:
+    ) -> Iterable[FnnArchitectureVariation]:
         '''
         Generate FNN architectures.
 
@@ -684,11 +674,10 @@ class FnnArchitectureGenerator(VariationGenerator[FnnArchitecture]):
         
         Returns
         ----------
-        list[Variation[FnnArchitecture]]
-            A list of FNN architectures variations.
+        Iterable[FnnArchitectureVariation]
+            A Generator of FNN architectures variations.
         '''
         rng = np.random.default_rng(random_state)
-        variations = []
 
         for name, config in self.settings.range_architectures.items():
             variation = FnnArchitectureVariation(
@@ -696,7 +685,7 @@ class FnnArchitectureGenerator(VariationGenerator[FnnArchitecture]):
                 random_state=random_state,
                 generated=self._generate_random_sizes(config, rng)
             )
-            variations.append(variation)
+            yield variation
 
         for name, config in self.settings.taper_architectures.items():
             variation = FnnArchitectureVariation(
@@ -704,6 +693,4 @@ class FnnArchitectureGenerator(VariationGenerator[FnnArchitecture]):
                 random_state=random_state,
                 generated=self._generate_taper_sizes(config, name, rng)
             )
-            variations.append(variation)
-        
-        return variations
+            yield variation

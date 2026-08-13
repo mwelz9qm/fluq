@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from dataclasses import dataclass
 from numbers import Real
 
@@ -100,9 +101,8 @@ class NoiseGenerator(VariationGenerator[pd.DataFrame]):
         self,
         *,
         random_state: int | None = None,
-    ) -> list[NoiseVariation]:
+    ) -> Iterable[NoiseVariation]:
         rng = np.random.default_rng(random_state)
-        variations: list[NoiseVariation] = []
 
         # generation loop
         for standard_deviation in self.settings.standard_deviations:
@@ -124,12 +124,10 @@ class NoiseGenerator(VariationGenerator[pd.DataFrame]):
             )
 
             # add the generated variation
-            variations.append(
-                NoiseVariation(
-                    label=f"std_{standard_deviation:g}",
-                    random_state=random_state,
-                    generated=noisy_dataset,
-                )
+            variation = NoiseVariation(
+                label=f"std_{standard_deviation:g}",
+                random_state=random_state,
+                generated=noisy_dataset,
             )
 
-        return variations
+            yield variation
