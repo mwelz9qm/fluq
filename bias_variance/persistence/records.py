@@ -36,16 +36,19 @@ class GroupRecord:
 @dataclass(frozen=True, slots=True)
 class EvaluationRecord:
     group_id: int # foreign
-    model_id: int | None # foreign
-    test_set_position: int | None # foreign
-    bias: float
-    variance: float
+    test_set_position: int
+    y_true: tuple[float, ...]
+    point_mean_prediction: tuple[float, ...]
+    bias: tuple[float, ...]
+    variance: tuple[float, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class ModelRecord:
     group_id: int # foreign
     architecture: tuple[int, ...]
+    model_mean_prediction: tuple[float, ...]
+    model_variance_prediction: tuple[float, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,8 +62,8 @@ class ScoreRecord:
 class TrainPointRecord:
     model_id: int | None # foreign
     run_id: str | None # foreign
-    inputs: tuple[float, ...]
-    outputs: tuple[float, ...]
+    input: tuple[float, ...]
+    output: tuple[float, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +71,6 @@ class TestPointRecord:
     model_id: int | None # foreign
     run_id: str | None # foreign
     set_position: int
-    inputs: tuple[float, ...]
-    outputs: tuple[float, ...]
-    predictions: tuple[float, ...]
+    input: tuple[float, ...]
+    output: tuple[float, ...]
+    prediction: tuple[float, ...]
