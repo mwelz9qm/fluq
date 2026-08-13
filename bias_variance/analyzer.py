@@ -42,6 +42,7 @@ from bias_variance.plotting import (
     plot_bias_variance,
     plot_prediction_comparison,
 )
+from bias_variance.models.tuner import Tuner
 
 
 class BiasAnalyzer:
@@ -243,8 +244,8 @@ class BiasAnalyzer:
         self,
         X: pd.DataFrame,
         Y: pd.DataFrame,
-        *,
         run_settings: Mapping[str, object] | None = None,
+        *,
         training_config: TrainingConfig | None = None,
     ) -> Self:
         run_config = (
@@ -255,10 +256,14 @@ class BiasAnalyzer:
             .build()
         )
 
-        # Add tuner implementation here
-
-        training_config = training_config or TrainingConfig() # Swap default to tuner's best hyperparams
-        
+        # Tune training hyperparameters when the user does not provide them.
+        if training_config is None:
+            tuner = Tuner()
+            training_config = tuner.tune(
+                baseline=run_config.baseline,
+                test_metrics=run_config.test_metrics,
+                random_state=run_config.random_state,
+            )
         # maintain result store lifecyle within method call
         with ResultStore(self.db_path, timeout=self.db_timeout) as store:
             # create the database tables
@@ -298,7 +303,7 @@ class BiasAnalyzer:
             run_id = store.add(run_record)
 
             # build model trainer for every study
-            trainer =  Trainer(training_config)
+            trainer = Trainer(training_config)
             trainer.set_fnn_model_builder(
                 run_config.baseline.X.shape[1],
                 run_config.baseline.Y.shape[1]
@@ -359,9 +364,9 @@ class BiasAnalyzer:
                 )
 
             evaluator = Evaluator(store)
-            group_updates = evaluator.evaluate(run_id)
+            evaluation_data = evaluator.evaluate(run_id)
 
-            for group_update in group_updates:
+            for group_update in evaluation_data.update_groups:
                 store.update_group(
                     group_update.group_id,
                     group_update.bias,

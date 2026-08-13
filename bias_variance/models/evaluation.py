@@ -162,7 +162,7 @@ class Evaluator:
         strategy_variance = np.mean(np.stack(variances), axis=0)
         strategy_bias = np.mean(np.stack(biases), axis=0)
 
-        return tuple(
+        return (
             GroupUpdateData(
                 group_id,
                 tuple(float(value) for value in strategy_bias),
