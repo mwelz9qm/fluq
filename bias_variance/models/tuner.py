@@ -9,16 +9,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import numpy as np
 import optuna
-import torch
 
 from bias_variance.models.evaluation import (
     MetricName,
     get_model_predictions,
     get_model_scores,
 )
+
 from bias_variance.models.training import Trainer, TrainingConfig
+from bias_variance.models.utils import _to_tensor
 
 if TYPE_CHECKING:
     from bias_variance.analyzer import RunBaseline
@@ -308,8 +308,9 @@ class Tuner:
             baseline.outputs.shape[1],
         )
 
-        x_train = self._to_tensor(baseline.split.x_train)
-        y_train = self._to_tensor(baseline.split.y_train)
+        x_train = _to_tensor(baseline.split.x_train)
+        y_train = _to_tensor(baseline.split.y_train)
+
         x_test = baseline.split.x_test
         y_test = baseline.split.y_test
 
@@ -333,24 +334,6 @@ class Tuner:
         )
 
         return scores[self.config.metric]
-
-    @staticmethod
-    def _to_tensor(data) -> torch.Tensor:
-        """Convert tabular data into a float32 torch tensor.
-
-        Parameters
-        ----------
-        data
-            DataFrame or array-like object to convert.
-
-        Returns
-        -------
-        torch.Tensor
-            Float32 tensor created from the provided data.
-        """
-        return torch.from_numpy(
-            data.to_numpy(dtype=np.float32, copy=True)
-        )
 
     def _build_training_config_from_params(
         self,

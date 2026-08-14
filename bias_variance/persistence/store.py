@@ -583,9 +583,9 @@ class ResultStore:
         )
 
     def get_actuals_and_predictions(
-        self,
-        model_id: int | None = None,
-        group_id_and_set_pos: tuple[int, int] | None = None,
+            self,
+            model_id: int | None = None,
+            group_id_and_set_pos: tuple[int, int] | None = None,
     ) -> tuple[
         tuple[tuple[float, ...], ...],
         tuple[tuple[float, ...], ...],
@@ -614,18 +614,18 @@ class ResultStore:
         if model_id is not None and group_id_and_set_pos is None:
             cur.execute(
                 f'''
-                SELECT outputs, predictions
+                SELECT output, prediction
                 FROM {TableName.TEST_POINTS.value}
                 WHERE model_id = ?
                 ORDER BY set_position, test_point_id
                 ''',
                 (model_id,)
             )
-            
+
         elif model_id is None and group_id_and_set_pos is not None:
             cur.execute(
                 f'''
-                SELECT tp.outputs, tp.predictions
+                SELECT tp.output, tp.prediction
                 FROM {TableName.MODELS.value} AS m
                 INNER JOIN {TableName.TEST_POINTS.value} AS tp
                     ON m.model_id = tp.model_id
@@ -640,12 +640,12 @@ class ResultStore:
             raise ValueError(
                 'model_id and group_id_and_set_pos arguments are mutually exclusive.'
             )
-        
+
         rows = cur.fetchall()
 
-        actuals = tuple(decode_json_array(row['outputs']) for row in rows)
+        actuals = tuple(decode_json_array(row['output']) for row in rows)
         predictions = tuple(
-            decode_json_array(row['predictions']) for row in rows
+            decode_json_array(row['prediction']) for row in rows
         )
 
         return actuals, predictions
