@@ -375,73 +375,66 @@ class ResultStore:
             for row in rows
         )
 
-    def get_actuals_and_predictions(
-            self,
-            model_id: int | None = None,
-            group_id_and_set_pos: tuple[int, int] | None = None,
+    def get_actual_and_predictions(
+        self,
+        group_id: int,
+        test_set_pos: int,
     ) -> tuple[
-        tuple[tuple[float, ...], ...],
+        tuple[float, ...],
         tuple[tuple[float, ...], ...],
     ]:
-        """Load every prediction produced by one model.
+        """Load a shared actual and all predictions for one test position.
 
-        The implementation should select the model's serialized prediction
-        field, decode it, and preserve its original test-row order and numeric
-        precision.
+        All models in a variation group are expected to use the same actual
+        output at a given test-set position. The first actual is therefore
+        returned once, while every model prediction is returned in model-ID
+        order.
 
         Parameters
         ----------
-        model_id:
-            ID of the model row to query.
-        group_id_and_set_pos:
-            Group ID and testing-set position used to load actual and predicted
-            outputs across all models in that group.
+        group_id : int
+            ID of the variation group whose model predictions are loaded.
+        test_set_pos : int
+            Shared test-set position to load across the group's models.
 
         Returns
         -------
-        tuple[tuple[tuple[float, ...], ...], tuple[tuple[float, ...], ...]]
-            The ordered actual-output rows and prediction rows.
+        tuple[tuple[float, ...], tuple[tuple[float, ...], ...]]
+            The shared actual-output row and ordered model prediction rows.
+
+        Raises
+        ------
+        ValueError
+            If the group has no predictions at the requested position.
         """
         cur = self._connection.cursor()
 
-        if model_id is not None and group_id_and_set_pos is None:
-            cur.execute(
-                f'''
-                SELECT output, prediction
-                FROM {TestPointTable.TABLE_NAME}
-                WHERE model_id = ?
-                ORDER BY set_position, test_point_id
-                ''',
-                (model_id,)
-            )
-
-        elif model_id is None and group_id_and_set_pos is not None:
-            cur.execute(
-                f'''
-                SELECT tp.output, tp.prediction
-                FROM {ModelTable.TABLE_NAME} AS m
-                INNER JOIN {TestPointTable.TABLE_NAME} AS tp
-                    ON m.model_id = tp.model_id
-                WHERE m.group_id = ?
-                AND tp.set_position = ?
-                ORDER BY m.model_id, tp.test_point_id
-                ''',
-                group_id_and_set_pos
-            )
-
-        else:
-            raise ValueError(
-                'model_id and group_id_and_set_pos arguments are mutually exclusive.'
-            )
+        cur.execute(
+            f'''
+            SELECT tp.output, tp.prediction
+            FROM {ModelTable.TABLE_NAME} AS m
+            INNER JOIN {TestPointTable.TABLE_NAME} AS tp
+                ON m.model_id = tp.model_id
+            WHERE m.group_id = ?
+            AND tp.set_position = ?
+            ORDER BY m.model_id, tp.test_point_id
+            ''',
+            (group_id, test_set_pos)
+        )
 
         rows = cur.fetchall()
 
-        actuals = tuple(decode_json_array(row['output']) for row in rows)
+        if not rows:
+            raise ValueError(
+                'query returned empty rows.'
+            )
+
+        actual = decode_json_array(rows[0]['output'])
         predictions = tuple(
             decode_json_array(row['prediction']) for row in rows
         )
 
-        return actuals, predictions
+        return actual, predictions
 
     def get_bias_variance_results(
         self,
@@ -530,3 +523,68 @@ class ResultStore:
         row = cur.fetchone()
 
         return row is not None
+
+    def get_averaging_evaluation_data(
+        self,
+        group_id: int,
+    ) -> tuple[
+        tuple[
+            tuple[float, ...], ...
+        ],
+        tuple[
+            tuple[float, ...], ...
+        ]
+    ]:
+        """Load per-output MSE scores and variances for a variation group.
+
+        Results are ordered by model ID. Each outer tuple contains one inner
+        tuple per model, and each inner tuple contains one value per output.
+
+        Parameters
+        ----------
+        group_id : int
+            ID of the variation group whose model results are loaded.
+
+        Returns
+        -------
+        tuple[tuple[tuple[float, ...], ...], tuple[tuple[float, ...], ...]]
+            Per-model MSE score tuples followed by per-model prediction
+            variance tuples.
+        """
+        cur = self._connection.cursor()
+
+        cur.execute(
+            f'''
+            SELECT
+                {ScoreTable.TABLE_NAME}.{ScoreTable.SCORE.name},
+                {ModelTable.TABLE_NAME}.{ModelTable.MODEL_VARIANCE_PREDICTION.name}
+            FROM {ModelTable.TABLE_NAME}
+            INNER JOIN {ScoreTable.TABLE_NAME}
+            ON {ScoreTable.TABLE_NAME}.{ScoreTable.MODEL_ID.name} = {ModelTable.TABLE_NAME}.{ModelTable.MODEL_ID.name}
+            WHERE {ModelTable.TABLE_NAME}.{ModelTable.GROUP_ID.name} = ?
+            AND {ScoreTable.TABLE_NAME}.{ScoreTable.METRIC.name} = ?
+            ORDER BY {ModelTable.TABLE_NAME}.{ModelTable.MODEL_ID.name}, {ScoreTable.SCORE_ID.name}
+            ''',
+            (group_id, 'mse')
+        )
+
+        rows = cur.fetchall()
+
+        return (
+            tuple(
+                tuple(
+                    float(value)
+                    for value in decode_json_array(row[ScoreTable.SCORE.name])
+                )
+                for row in rows
+            ),
+            tuple(
+                tuple(
+                    float(value)
+                    for value in decode_json_array(
+                        row[ModelTable.MODEL_VARIANCE_PREDICTION.name]
+                    )
+                )
+                for row in rows
+            ),
+        )
