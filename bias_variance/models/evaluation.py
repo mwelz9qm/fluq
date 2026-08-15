@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Literal, overload
 
 import numpy as np
 import pandas as pd
@@ -57,22 +58,18 @@ class EvaluationData:
 
 
 class Evaluator:
-    '''
-    Evaluates the run data across all models under a variation and study.
+    """Evaluate stored model results for every variation group in a run.
 
-    Uses the result store to query data for evaluation. For a given
-    evaluation method (i.e. averaging or pointwise), the Evaluator
-    decomposes the bias and variance based on the method or methods and
-    returns the overall values.
-    
-    Note that the Evaluator is not responsible for building the variation
-    record after getting the results.
+    Averaging evaluation combines the per-output MSE score and prediction
+    variance stored for each model. Pointwise evaluation combines predictions
+    from all models that share a test-set position and stores a detailed
+    :class:`EvaluationRecord` for that position.
 
     Attributes
-    -------------
-    result_store: ResultStore
+    ----------
+    result_store : ResultStore
         The interface for inserting and accessing data from the cache tables.
-    '''
+    """
     def __init__(
         self,
         result_store: ResultStore,
@@ -81,13 +78,11 @@ class Evaluator:
 
     def _evaluate_averaging(
         self,
-        run_id: str,
         group_id: int,
     ) -> GroupUpdateData:
-        """Average stored per-model MSE and prediction variance by output."""
-        mse_scores, model_variances = (
-            self.result_store.get_averaging_evaluation_data(run_id, group_id)
-        )
+        """Average per-model MSE and prediction variance for every output."""
+
+        mse_scores, model_variances = self.result_store.get_averaging_evaluation_data(group_id)
         mse_array = np.asarray(mse_scores, dtype=float)
         variance_array = np.asarray(model_variances, dtype=float)
         if (
@@ -113,39 +108,41 @@ class Evaluator:
         self,
         group_id: int,
     ) -> tuple[GroupUpdateData, tuple[EvaluationRecord, ...]]:
-        """Evaluate and record predictions at each shared test position."""
+        """Evaluate predictions from all models at each shared test position."""
         records: list[EvaluationRecord] = []
         for position in self.result_store.get_test_set_positions(group_id):
-            actuals, predictions = self.result_store.get_actuals_and_predictions(
-                group_id_and_set_pos=(group_id, position)
+            actual, predictions = self.result_store.get_actual_and_predictions(
+                group_id, position
             )
 
-            actuals_array = np.asarray(actuals, dtype=float)
+            actual_array = np.asarray(actual, dtype=float)
             predictions_array = np.asarray(predictions, dtype=float)
 
-            if actuals_array.ndim != 2 or predictions_array.ndim != 2:
+            if actual_array.ndim != 1:
                 raise ValueError(
-                    'Actuals and predictions must each have shape '
-                    '(observations, outputs).'
+                    'actual must be one-dimensional'
                 )
-            if actuals_array.shape != predictions_array.shape:
+
+            if predictions_array.ndim != 2:
+                raise ValueError(
+                    'predictions must be two dimensional'
+                )
+
+            if actual_array.shape != predictions_array.shape[1:]:
                 raise ValueError(
                     'Actuals and predictions must have matching shapes; '
-                    f'got {actuals_array.shape} and {predictions_array.shape}.'
+                    f'got {actual_array.shape} and '
+                    f'{predictions_array.shape[1:]}.'
                 )
-            if not np.allclose(actuals_array, actuals_array[0]):
-                raise ValueError(
-                    'Inconsistent actual outputs for '
-                    f'group {group_id}, position {position}.'
-                )
+
             point_mean = np.mean(predictions_array, axis=0)
-            squared_bias = (point_mean - actuals_array[0]) ** 2.0
+            squared_bias = (point_mean - actual_array) ** 2.0
             variance = np.var(predictions_array, axis=0)
             records.append(
                 EvaluationRecord(
                     group_id=group_id,
                     test_set_position=position,
-                    y_true=tuple(float(value) for value in actuals_array[0]),
+                    y_true=tuple(float(value) for value in actual_array),
                     point_mean_prediction=tuple(
                         float(value) for value in point_mean
                     ),
@@ -178,24 +175,22 @@ class Evaluator:
         self,
         run_id: str,
     ) -> EvaluationData:
-        '''
-        Evaluates the biases and variances for all variation groups in a study.
-        There are two types of bias and variance pairs:
-        - averaging
-        - pointwise
+        """Evaluate every study and variation group belonging to a run.
 
-        The method will insert the results based on the selected evaluation
-        methods.
+        Group-level bias and variance values are updated in the store.
+        Pointwise evaluation records are also inserted for groups configured
+        with the ``pointwise`` evaluation method.
 
         Parameters
         -----------
-        run_id: str
+        run_id : str
             The run identifier used to query results in the cache tables.
 
         Returns
         ------------
-        tuple[GroupUpdateData]
-        '''
+        EvaluationData
+            Updated group values and any pointwise evaluation records created.
+        """
         studies = self.result_store.get_studies(run_id)
         update_groups: list[GroupUpdateData] = []
         evaluation_records: list[EvaluationRecord] = []
@@ -204,7 +199,7 @@ class Evaluator:
             for group_id in groups:
                 match self.result_store.get_method(group_id):
                     case EvaluationMethod.AVERAGING.value:
-                        group = self._evaluate_averaging(run_id, group_id)
+                        group = self._evaluate_averaging(group_id)
                         records = ()
                     case EvaluationMethod.POINTWISE.value:
                         group, records = self._evaluate_pointwise(group_id)
@@ -267,32 +262,96 @@ def get_model_predictions(
 
     return predictions.cpu().numpy()
 
+@overload
 def get_model_scores(
     predictions: np.ndarray,
     y_test: torch.Tensor | pd.DataFrame,
-    metrics: frozenset[MetricName]
+    metrics: frozenset[MetricName],
+    is_uniform: Literal[True] = True,
 ) -> dict[str, float]:
+    ...
+
+
+@overload
+def get_model_scores(
+    predictions: np.ndarray,
+    y_test: torch.Tensor | pd.DataFrame,
+    metrics: frozenset[MetricName],
+    is_uniform: Literal[False],
+) -> dict[str, tuple[float, ...]]:
+    ...
+
+
+def get_model_scores(
+    predictions: np.ndarray,
+    y_test: torch.Tensor | pd.DataFrame,
+    metrics: frozenset[MetricName],
+    is_uniform: bool = True,
+) -> dict[str, float | tuple[float, ...]]:
+    """Calculate requested metrics using uniform or per-output aggregation.
+
+    Parameters
+    ----------
+    predictions : np.ndarray
+        Predicted values shaped ``(observations, outputs)``.
+    y_test : torch.Tensor | pd.DataFrame
+        Actual values with the same shape as ``predictions``.
+    metrics : frozenset[MetricName]
+        Metrics to calculate.
+    is_uniform : bool, default=True
+        Return one uniformly averaged float per metric when true. When false,
+        return one tuple containing a score for each output. The analyzer uses
+        raw tuples for persistence, while model tuning uses scalar values.
+
+    Returns
+    -------
+    dict[str, float | tuple[float, ...]]
+        Metric names mapped to scalar or per-output results according to
+        ``is_uniform``.
+    """
     if isinstance(y_test, torch.Tensor):
         y_test = y_test.detach().cpu().numpy()
 
-    scores = {}
+    scores: dict[str, float | tuple[float, ...]] = {}
+    multioutput = 'uniform_average' if is_uniform else 'raw_values'
     for metric in metrics:
         match(metric):
             case MetricName.RMSE:
-                scores[metric.value] = root_mean_squared_error(y_test, predictions)
+                score = root_mean_squared_error(
+                    y_test,
+                    predictions,
+                    multioutput=multioutput,
+                )
 
             case MetricName.MSE:
-                scores[metric.value] = mean_squared_error(y_test, predictions)
+                score = mean_squared_error(
+                    y_test,
+                    predictions,
+                    multioutput=multioutput,
+                )
 
             case MetricName.MAE:
-                scores[metric.value] = mean_absolute_error(y_test, predictions)
+                score = mean_absolute_error(
+                    y_test,
+                    predictions,
+                    multioutput=multioutput,
+                )
 
             case MetricName.R2:
-                scores[metric.value] = r2_score(y_test, predictions)
+                score = r2_score(
+                    y_test,
+                    predictions,
+                    multioutput=multioutput,
+                )
 
             case _:
                 raise ValueError(
                     f'metrics contains unknown metric: {metric!r}.'
                 )
-            
+
+        if is_uniform:
+            scores[metric.value] = float(score)
+        else:
+            scores[metric.value] = tuple(float(value) for value in score)
+
     return scores
