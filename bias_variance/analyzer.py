@@ -198,6 +198,7 @@ class BiasAnalyzer:
                     predictions=model_predictions,
                     y_test=Y_test,
                     metrics=test_metrics,
+                    is_uniform=False
                 )
 
                 #------END MODEL BUILD, TRAIN, PREDICT, TEST------
