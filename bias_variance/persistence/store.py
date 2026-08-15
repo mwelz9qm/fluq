@@ -9,27 +9,22 @@ particular serialization format for array-valued record fields.
 
 import sqlite3
 from dataclasses import asdict
-from enum import StrEnum
 from os import PathLike
-from typing import Self, overload
+from typing import Self
 
-from bias_variance.persistence.records import (
-    EvaluationRecord,
-    GroupRecord,
-    ModelRecord,
-    RunRecord,
-    ScoreRecord,
-    StudyRecord,
-    TestPointRecord,
-    TrainPointRecord,
-)
-from bias_variance.persistence.serialize import (
-    decode_json_array,
-    encode_datetime,
-    encode_tuple,
+from bias_variance.persistence.records import Record, RunRecord
+from bias_variance.persistence.serialize import decode_json_array, encode_tuple
+from bias_variance.persistence.tables import (
+    EvaluationTable,
+    GroupTable,
+    ModelTable,
+    RunTable,
+    ScoreTable,
+    StudyTable,
+    TestPointTable,
+    TrainPointTable,
 )
 
-type Record = RunRecord | StudyRecord | GroupRecord | EvaluationRecord | ModelRecord | ScoreRecord | TrainPointRecord | TestPointRecord
 type BiasVarianceResult = tuple[
     str,
     str,
@@ -37,17 +32,6 @@ type BiasVarianceResult = tuple[
     tuple[float, ...] | None,
     tuple[float, ...] | None,
 ]
-
-
-class TableName(StrEnum):
-    RUNS = 'runs'
-    STUDIES = 'studies'
-    GROUPS = 'groups'
-    EVALUTAIONS = 'evaluations'
-    MODELS = 'models'
-    SCORES = 'scores'
-    TRAIN_POINTS = 'train_points'
-    TEST_POINTS = 'test_points'
 
 
 class ResultStore:
@@ -108,208 +92,17 @@ class ResultStore:
     def create_tables(self) -> None:
         cur = self._connection.cursor()
         cur.execute('PRAGMA foreign_keys = ON')
-
-        cur.execute(
-            f'''
-            CREATE TABLE IF NOT EXISTS {TableName.RUNS.value} (
-                run_id TEXT PRIMARY KEY,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                n_iter INTEGER NOT NULL,
-                test_size REAL NOT NULL,
-                test_metrics TEXT NOT NULL,
-                optimizer TEXT NOT NULL,
-                learning_rate REAL NOT NULL,
-                loss TEXT NOT NULL,
-                epochs INTEGER NOT NULL,
-                batch_size INTEGER NOT NULL,
-                device TEXT NOT NULL,
-                input_columns TEXT NOT NULL,
-                output_columns TEXT NOT NULL,
-                base_architecture TEXT NOT NULL
-            ) STRICT
-            '''
-        )
-
-        cur.execute(
-            f'''
-            CREATE TABLE IF NOT EXISTS {TableName.STUDIES.value} (
-                study_id INTEGER PRIMARY KEY,
-                run_id TEXT NOT NULL,
-                study_name TEXT NOT NULL,
-                evaluation_method TEXT NOT NULL,
-                FOREIGN KEY (run_id) REFERENCES runs (run_id)
-            ) STRICT
-            '''
-        )
-
-        cur.execute(
-            f'''
-            CREATE TABLE IF NOT EXISTS {TableName.GROUPS.value} (
-                group_id INTEGER PRIMARY KEY,
-                study_id INTEGER NOT NULL,
-                group_name TEXT NOT NULL,
-                strategy_bias TEXT,
-                strategy_variance TEXT,
-                FOREIGN KEY (study_id) REFERENCES studies (study_id)
-            ) STRICT
-            '''
-        )
-
-        cur.execute(
-            f'''
-            CREATE TABLE IF NOT EXISTS {TableName.EVALUTAIONS.value} (
-                evaluation_id INTEGER PRIMARY KEY,
-                group_id INTEGER NOT NULL,
-                test_set_position INTEGER NOT NULL,
-                y_true TEXT NOT NULL,
-                point_mean_prediction TEXT NOT NULL,
-                bias TEXT NOT NULL,
-                variance TEXT NOT NULL,
-                FOREIGN KEY (group_id) REFERENCES groups (group_id)
-            ) STRICT
-            '''
-        )
-
-        cur.execute(
-            f'''
-            CREATE TABLE IF NOT EXISTS {TableName.MODELS.value} (
-                model_id INTEGER PRIMARY KEY,
-                group_id INTEGER NOT NULL,
-                architecture TEXT NOT NULL,
-                model_mean_prediction TEXT NOT NULL,
-                model_variance_prediction TEXT NOT NULL,
-                FOREIGN KEY (group_id) REFERENCES groups (group_id)
-            ) STRICT
-            '''
-        )
-
-        cur.execute(
-            f'''
-            CREATE TABLE IF NOT EXISTS {TableName.SCORES.value} (
-                score_id INTEGER PRIMARY KEY,
-                model_id INTEGER NOT NULL,
-                metric TEXT NOT NULL,
-                score REAL NOT NULL,
-                FOREIGN KEY (model_id) REFERENCES models (model_id)
-            ) STRICT
-            '''
-        )
-
-        cur.execute(
-            f'''
-            CREATE TABLE IF NOT EXISTS {TableName.TRAIN_POINTS.value} (
-                train_point_id INTEGER PRIMARY KEY,
-                model_id INTEGER,
-                run_id TEXT,
-                input TEXT NOT NULL,
-                output TEXT NOT NULL,
-                FOREIGN KEY (model_id) REFERENCES models (model_id),
-                FOREIGN KEY (run_id) REFERENCES runs (run_id)
-            ) STRICT
-            '''
-        )
-
-        cur.execute(
-            f'''
-            CREATE TABLE IF NOT EXISTS {TableName.TEST_POINTS.value} (
-                test_point_id INTEGER PRIMARY KEY,
-                model_id INTEGER,
-                run_id TEXT,
-                set_position INTEGER NOT NULL,
-                input TEXT NOT NULL,
-                output TEXT NOT NULL,
-                prediction TEXT NOT NULL,
-                FOREIGN KEY (model_id) REFERENCES models (model_id),
-                FOREIGN KEY (run_id) REFERENCES runs (run_id)
-            ) STRICT
-            '''
-        )
-
-    @staticmethod
-    def _create_insert_statement(record: Record) -> tuple[str, tuple]:
-        attributes = asdict(record).copy()
-        tuple_keys: tuple[str, ...] = ()
-        match record:
-            case RunRecord():
-                table_name = TableName.RUNS
-                dt_value = attributes.get('created_at', None)
-                if dt_value is not None:
-                    attributes['created_at'] = encode_datetime(dt_value)
-                tuple_keys = (
-                    'test_metrics',
-                    'input_columns',
-                    'output_columns',
-                    'base_architecture',
-                )
-
-            case StudyRecord():
-                table_name = TableName.STUDIES
-
-            case GroupRecord():
-                table_name = TableName.GROUPS
-                tuple_keys = (
-                    'strategy_bias',
-                    'strategy_variance'
-                )
-
-            case EvaluationRecord():
-                table_name = TableName.EVALUTAIONS
-                tuple_keys = (
-                    'y_true',
-                    'point_mean_prediction',
-                    'bias',
-                    'variance'
-                )
-
-
-            case ModelRecord():
-                table_name = TableName.MODELS
-                tuple_keys = (
-                    'architecture',
-                    'model_mean_prediction',
-                    'model_variance_prediction'
-                )
-
-            case ScoreRecord():
-                table_name = TableName.SCORES
-
-            case TrainPointRecord():
-                table_name = TableName.TRAIN_POINTS
-                tuple_keys = ('input', 'output')
-
-            case TestPointRecord():
-                table_name = TableName.TEST_POINTS
-                tuple_keys = ('input', 'output', 'prediction')
-
-            case _:
-                raise TypeError(
-                    f'No matching record class type: {type(record)!r}.'
-                )
-
-        for key in tuple_keys:
-            value = attributes.get(key, None)
-            if value is not None:
-                attributes[key] = encode_tuple(value)
-
-        columns = ', '.join(attributes.keys())
-        placeholders = ', '.join('?' for _ in attributes)
-        statement = f'INSERT INTO {table_name.value} ({columns}) VALUES ({placeholders})'
-
-        return statement, tuple(attributes.values())
-
-    @overload
-    def add(self, record: RunRecord) -> str: ...
-
-    @overload
-    def add(
-        self,
-        record: StudyRecord
-        | GroupRecord
-        | ModelRecord
-        | ScoreRecord
-        | TrainPointRecord
-        | TestPointRecord
-    ) -> int: ...
+        for table in (
+            RunTable,
+            StudyTable,
+            GroupTable,
+            EvaluationTable,
+            ModelTable,
+            ScoreTable,
+            TrainPointTable,
+            TestPointTable,
+        ):
+            cur.execute(table.create_table_sql())
 
     def add(self, record: Record) -> int | str:
         """Stage one record for insertion into its corresponding table.
@@ -332,7 +125,7 @@ class ResultStore:
             The inserted row's primary-key ID, whether supplied by ``record``
             or generated by the store.
         """
-        insert_statement, params = self._create_insert_statement(record)
+        insert_statement, params = record.table.insert_sql(asdict(record))
 
         cur = self._connection.cursor()
         cur.execute(insert_statement, params)
@@ -380,9 +173,9 @@ class ResultStore:
         cur = self._connection.cursor()
         cur.execute(
             f'''
-            UPDATE {TableName.GROUPS.value}
-            SET (strategy_bias, strategy_variance) = (?, ?)
-            WHERE group_id = ?
+            UPDATE {GroupTable.TABLE_NAME}
+            SET ({GroupTable.STRATEGY_BIAS.name}, {GroupTable.STRATEGY_VARIANCE.name}) = (?, ?)
+            WHERE {GroupTable.GROUP_ID.name} = ?
             ''',
             (serialized_bias, serialized_variance, group_id)
         )
@@ -446,16 +239,16 @@ class ResultStore:
         # Get one run where runs are ordered by created_at descending
         cur.execute(
             f'''
-            SELECT run_id
-            FROM {TableName.RUNS.value}
-            ORDER BY created_at DESC, run_id DESC
+            SELECT {RunTable.RUN_ID.name}
+            FROM {RunTable.TABLE_NAME}
+            ORDER BY {RunTable.CREATED_AT.name} DESC, {RunTable.RUN_ID.name} DESC
             LIMIT 1
             '''
         )
 
         row = cur.fetchone()
 
-        return None if row is None else str(row['run_id'])
+        return None if row is None else str(row[RunTable.RUN_ID.name])
 
     def get_studies(self, run_id: str) -> tuple[int, ...]:
         """Return all study IDs belonging to a run.
@@ -477,17 +270,17 @@ class ResultStore:
 
         cur.execute(
             f'''
-            SELECT study_id
-            FROM {TableName.STUDIES.value}
-            WHERE run_id = ?
-            ORDER BY study_id
+            SELECT {StudyTable.STUDY_ID.name}
+            FROM {StudyTable.TABLE_NAME}
+            WHERE {StudyTable.RUN_ID.name} = ?
+            ORDER BY {StudyTable.STUDY_ID.name}
             ''',
             (run_id,)
         )
         rows = cur.fetchall()
 
         return tuple(
-            int(row['study_id'])
+            int(row[StudyTable.STUDY_ID.name])
             for row in rows
         )
 
@@ -511,17 +304,17 @@ class ResultStore:
         
         cur.execute(
             f'''
-            SELECT group_id
-            FROM {TableName.GROUPS.value}
-            WHERE study_id = ?
-            ORDER BY group_id
+            SELECT {GroupTable.GROUP_ID.name}
+            FROM {GroupTable.TABLE_NAME}
+            WHERE {GroupTable.STUDY_ID.name} = ?
+            ORDER BY {GroupTable.GROUP_ID.name}
             ''',
             (study_id,)
         )
         rows = cur.fetchall()
         
         return tuple(
-            int(row['group_id'])
+            int(row[GroupTable.GROUP_ID.name])
             for row in rows
         )
 
@@ -546,17 +339,17 @@ class ResultStore:
         
         cur.execute(
             f'''
-            SELECT model_id
-            FROM {TableName.MODELS.value}
-            WHERE group_id = ?
-            ORDER BY model_id
+            SELECT {ModelTable.MODEL_ID.name}
+            FROM {ModelTable.TABLE_NAME}
+            WHERE {ModelTable.GROUP_ID.name} = ?
+            ORDER BY {ModelTable.MODEL_ID.name}
             ''',
             (group_id,)
         )
         rows = cur.fetchall()
         
         return tuple(
-            int(row['model_id'])
+            int(row[ModelTable.MODEL_ID.name])
             for row in rows
         )
 
@@ -568,8 +361,8 @@ class ResultStore:
         cur.execute(
             f'''
             SELECT DISTINCT tp.set_position
-            FROM {TableName.TEST_POINTS.value} AS tp
-            JOIN {TableName.MODELS.value} AS m ON m.model_id = tp.model_id
+            FROM {TestPointTable.TABLE_NAME} AS tp
+            JOIN {ModelTable.TABLE_NAME} AS m ON m.model_id = tp.model_id
             WHERE m.group_id = ?
             ORDER BY tp.set_position
             ''',
@@ -615,7 +408,7 @@ class ResultStore:
             cur.execute(
                 f'''
                 SELECT output, prediction
-                FROM {TableName.TEST_POINTS.value}
+                FROM {TestPointTable.TABLE_NAME}
                 WHERE model_id = ?
                 ORDER BY set_position, test_point_id
                 ''',
@@ -626,8 +419,8 @@ class ResultStore:
             cur.execute(
                 f'''
                 SELECT tp.output, tp.prediction
-                FROM {TableName.MODELS.value} AS m
-                INNER JOIN {TableName.TEST_POINTS.value} AS tp
+                FROM {ModelTable.TABLE_NAME} AS m
+                INNER JOIN {TestPointTable.TABLE_NAME} AS tp
                     ON m.model_id = tp.model_id
                 WHERE m.group_id = ?
                 AND tp.set_position = ?
@@ -664,10 +457,10 @@ class ResultStore:
                 s.evaluation_method,
                 g.strategy_bias,
                 g.strategy_variance
-            FROM {TableName.RUNS.value} AS r
-            INNER JOIN {TableName.STUDIES.value} AS s
+            FROM {RunTable.TABLE_NAME} AS r
+            INNER JOIN {StudyTable.TABLE_NAME} AS s
                 ON r.run_id = s.run_id
-            INNER JOIN {TableName.GROUPS.value} AS g
+            INNER JOIN {GroupTable.TABLE_NAME} AS g
                 ON s.study_id = g.study_id
             WHERE r.run_id = ?
             ORDER BY s.study_id, g.group_id
@@ -712,10 +505,10 @@ class ResultStore:
         cur.execute(
             f'''
             SELECT studies.evaluation_method
-            FROM {TableName.GROUPS.value}
-            JOIN {TableName.STUDIES.value}
-                ON {TableName.STUDIES.value}.study_id = {TableName.GROUPS.value}.study_id
-            WHERE {TableName.GROUPS.value}.group_id = ? LIMIT 1
+            FROM {GroupTable.TABLE_NAME}
+            JOIN {StudyTable.TABLE_NAME}
+                ON {StudyTable.TABLE_NAME}.study_id = {GroupTable.TABLE_NAME}.study_id
+            WHERE {GroupTable.TABLE_NAME}.group_id = ? LIMIT 1
             ''',
             (group_id,)
         )
@@ -730,7 +523,7 @@ class ResultStore:
         cur = self._connection.cursor()
 
         cur.execute(
-            f'SELECT run_id FROM {TableName.RUNS.value} WHERE run_id = ? LIMIT 1',
+            f'SELECT run_id FROM {RunTable.TABLE_NAME} WHERE run_id = ? LIMIT 1',
             (run_id,)
         )
 
