@@ -82,11 +82,36 @@ class RunTable(Table):
 
     @classmethod
     def create_table_sql(cls) -> str:
-        return cls._build_create_table(cls.TABLE_NAME, (cls.RUN_ID, cls.CREATED_AT, cls.N_ITER, cls.TEST_SIZE, cls.TEST_METRICS, cls.OPTIMIZER, cls.LEARNING_RATE, cls.LOSS, cls.EPOCHS, cls.BATCH_SIZE, cls.DEVICE, cls.INPUT_COLUMNS, cls.OUTPUT_COLUMNS, cls.BASE_ARCHITECTURE))
+        return cls._build_create_table(
+            cls.TABLE_NAME, (
+                cls.RUN_ID,
+                cls.CREATED_AT,
+                cls.N_ITER,
+                cls.TEST_SIZE,
+                cls.TEST_METRICS,
+                cls.OPTIMIZER,
+                cls.LEARNING_RATE,
+                cls.LOSS,
+                cls.EPOCHS,
+                cls.BATCH_SIZE,
+                cls.DEVICE,
+                cls.INPUT_COLUMNS,
+                cls.OUTPUT_COLUMNS,
+                cls.BASE_ARCHITECTURE
+            )
+        )
 
     @classmethod
     def insert_sql(cls, record_dict: Mapping[str, Any]) -> tuple[str, tuple[Any, ...]]:
-        return cls._encoded_insert(record_dict, {cls.CREATED_AT.name: encode_datetime, cls.TEST_METRICS.name: encode_tuple, cls.INPUT_COLUMNS.name: encode_tuple, cls.OUTPUT_COLUMNS.name: encode_tuple, cls.BASE_ARCHITECTURE.name: encode_tuple})
+        return cls._encoded_insert(
+            record_dict, {
+                cls.CREATED_AT.name: encode_datetime,
+                cls.TEST_METRICS.name: encode_tuple,
+                cls.INPUT_COLUMNS.name: encode_tuple,
+                cls.OUTPUT_COLUMNS.name: encode_tuple,
+                cls.BASE_ARCHITECTURE.name: encode_tuple
+            }
+        )
 
 
 class StudyTable(Table):
@@ -98,7 +123,15 @@ class StudyTable(Table):
 
     @classmethod
     def create_table_sql(cls) -> str:
-        return cls._build_create_table(cls.TABLE_NAME, (cls.STUDY_ID, cls.RUN_ID, cls.STUDY_NAME, cls.EVALUATION_METHOD), ('FOREIGN KEY (run_id) REFERENCES runs (run_id)',))
+        return cls._build_create_table(
+            cls.TABLE_NAME, (
+                cls.STUDY_ID,
+                cls.RUN_ID,
+                cls.STUDY_NAME,
+                cls.EVALUATION_METHOD
+            ),
+            ('FOREIGN KEY (run_id) REFERENCES runs (run_id)',)
+        )
 
 
 class GroupTable(Table):
@@ -111,7 +144,16 @@ class GroupTable(Table):
 
     @classmethod
     def create_table_sql(cls) -> str:
-        return cls._build_create_table(cls.TABLE_NAME, (cls.GROUP_ID, cls.STUDY_ID, cls.GROUP_NAME, cls.STRATEGY_BIAS, cls.STRATEGY_VARIANCE), ('FOREIGN KEY (study_id) REFERENCES studies (study_id)',))
+        return cls._build_create_table(
+            cls.TABLE_NAME, (
+                cls.GROUP_ID,
+                cls.STUDY_ID,
+                cls.GROUP_NAME,
+                cls.STRATEGY_BIAS,
+                cls.STRATEGY_VARIANCE
+            ),
+            ('FOREIGN KEY (study_id) REFERENCES studies (study_id)',)
+        )
 
 
 class EvaluationTable(Table):
@@ -126,11 +168,33 @@ class EvaluationTable(Table):
 
     @classmethod
     def create_table_sql(cls) -> str:
-        return cls._build_create_table(cls.TABLE_NAME, (cls.EVALUATION_ID, cls.GROUP_ID, cls.TEST_SET_POSITION, cls.Y_TRUE, cls.POINT_MEAN_PREDICTION, cls.BIAS, cls.VARIANCE), ('FOREIGN KEY (group_id) REFERENCES groups (group_id)',))
+        return cls._build_create_table(
+            cls.TABLE_NAME, (
+                cls.EVALUATION_ID,
+                cls.GROUP_ID,
+                cls.TEST_SET_POSITION,
+                cls.Y_TRUE,
+                cls.POINT_MEAN_PREDICTION,
+                cls.BIAS,
+                cls.VARIANCE
+            ),
+            ('FOREIGN KEY (group_id) REFERENCES groups (group_id)',)
+        )
 
     @classmethod
     def insert_sql(cls, record_dict: Mapping[str, Any]) -> tuple[str, tuple[Any, ...]]:
-        return cls._encoded_insert(record_dict, {column.name: encode_tuple for column in (cls.Y_TRUE, cls.POINT_MEAN_PREDICTION, cls.BIAS, cls.VARIANCE)})
+        return cls._encoded_insert(
+            record_dict, {
+                column.name: encode_tuple
+                for column
+                in (
+                    cls.Y_TRUE,
+                    cls.POINT_MEAN_PREDICTION,
+                    cls.BIAS,
+                    cls.VARIANCE
+                )
+            }
+        )
 
 
 class ModelTable(Table):
@@ -143,11 +207,30 @@ class ModelTable(Table):
 
     @classmethod
     def create_table_sql(cls) -> str:
-        return cls._build_create_table(cls.TABLE_NAME, (cls.MODEL_ID, cls.GROUP_ID, cls.ARCHITECTURE, cls.MODEL_MEAN_PREDICTION, cls.MODEL_VARIANCE_PREDICTION), ('FOREIGN KEY (group_id) REFERENCES groups (group_id)',))
+        return cls._build_create_table(
+            cls.TABLE_NAME, (
+                cls.MODEL_ID,
+                cls.GROUP_ID,
+                cls.ARCHITECTURE,
+                cls.MODEL_MEAN_PREDICTION,
+                cls.MODEL_VARIANCE_PREDICTION
+            ),
+            ('FOREIGN KEY (group_id) REFERENCES groups (group_id)',)
+        )
 
     @classmethod
     def insert_sql(cls, record_dict: Mapping[str, Any]) -> tuple[str, tuple[Any, ...]]:
-        return cls._encoded_insert(record_dict, {column.name: encode_tuple for column in (cls.ARCHITECTURE, cls.MODEL_MEAN_PREDICTION, cls.MODEL_VARIANCE_PREDICTION)})
+        return cls._encoded_insert(
+            record_dict, {
+                column.name: encode_tuple
+                for column
+                in (
+                    cls.ARCHITECTURE,
+                    cls.MODEL_MEAN_PREDICTION,
+                    cls.MODEL_VARIANCE_PREDICTION
+                )
+            }
+        )
 
 
 class ScoreTable(Table):
@@ -155,12 +238,27 @@ class ScoreTable(Table):
     SCORE_ID = Column('score_id', 'INTEGER', primary_key=True)
     MODEL_ID = Column('model_id', 'INTEGER')
     METRIC = Column('metric', 'TEXT')
-    SCORE = Column('score', 'REAL')
+    SCORE = Column('score', 'TEXT')
 
     @classmethod
     def create_table_sql(cls) -> str:
-        return cls._build_create_table(cls.TABLE_NAME, (cls.SCORE_ID, cls.MODEL_ID, cls.METRIC, cls.SCORE), ('FOREIGN KEY (model_id) REFERENCES models (model_id)',))
+        return cls._build_create_table(
+            cls.TABLE_NAME, (
+                cls.SCORE_ID,
+                cls.MODEL_ID,
+                cls.METRIC,
+                cls.SCORE
+            ),
+            ('FOREIGN KEY (model_id) REFERENCES models (model_id)',)
+        )
 
+    @classmethod
+    def insert_sql(cls, record_dict: Mapping[str, Any]) -> tuple[str, tuple[Any, ...]]:
+        return cls._encoded_insert(
+            record_dict, {
+                cls.SCORE.name: encode_tuple,
+            }
+        )
 
 class TrainPointTable(Table):
     TABLE_NAME = 'train_points'
@@ -172,7 +270,18 @@ class TrainPointTable(Table):
 
     @classmethod
     def create_table_sql(cls) -> str:
-        return cls._build_create_table(cls.TABLE_NAME, (cls.TRAIN_POINT_ID, cls.MODEL_ID, cls.RUN_ID, cls.INPUT, cls.OUTPUT), ('FOREIGN KEY (model_id) REFERENCES models (model_id)', 'FOREIGN KEY (run_id) REFERENCES runs (run_id)'))
+        return cls._build_create_table(
+            cls.TABLE_NAME, (
+                cls.TRAIN_POINT_ID,
+                cls.MODEL_ID,
+                cls.RUN_ID,
+                cls.INPUT,
+                cls.OUTPUT
+            ), (
+                'FOREIGN KEY (model_id) REFERENCES models (model_id)',
+                'FOREIGN KEY (run_id) REFERENCES runs (run_id)'
+            )
+        )
 
     @classmethod
     def insert_sql(cls, record_dict: Mapping[str, Any]) -> tuple[str, tuple[Any, ...]]:
@@ -191,7 +300,20 @@ class TestPointTable(Table):
 
     @classmethod
     def create_table_sql(cls) -> str:
-        return cls._build_create_table(cls.TABLE_NAME, (cls.TEST_POINT_ID, cls.MODEL_ID, cls.RUN_ID, cls.SET_POSITION, cls.INPUT, cls.OUTPUT, cls.PREDICTION), ('FOREIGN KEY (model_id) REFERENCES models (model_id)', 'FOREIGN KEY (run_id) REFERENCES runs (run_id)'))
+        return cls._build_create_table(
+            cls.TABLE_NAME, (
+                cls.TEST_POINT_ID,
+                cls.MODEL_ID,
+                cls.RUN_ID,
+                cls.SET_POSITION,
+                cls.INPUT,
+                cls.OUTPUT,
+                cls.PREDICTION
+            ), (
+                'FOREIGN KEY (model_id) REFERENCES models (model_id)',
+                'FOREIGN KEY (run_id) REFERENCES runs (run_id)'
+            )
+        )
 
     @classmethod
     def insert_sql(cls, record_dict: Mapping[str, Any]) -> tuple[str, tuple[Any, ...]]:

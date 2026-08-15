@@ -11,46 +11,30 @@ from bias_variance.models.evaluation import (
 
 
 class FakeResultStore:
-    def __init__(self, method, items, results):
-        self.method = method
-        self.items = items
-        self.results = results
-
-    def get_method(self, group_id):
-        return self.method
-
-    def get_models(self, group_id):
-        return self.items
+    def __init__(self, positions=(), pointwise_results=None, averaging_data=None):
+        self.positions = positions
+        self.pointwise_results = pointwise_results or {}
+        self.averaging_data = averaging_data
 
     def get_test_set_positions(self, group_id):
-        return self.items
+        return self.positions
 
-    def get_actuals_and_predictions(
-        self,
-        model_id=None,
-        group_id_and_set_pos=None,
-    ):
-        key = model_id if model_id is not None else group_id_and_set_pos[1]
-        return self.results[key]
+    def get_actual_and_predictions(self, group_id, position):
+        return self.pointwise_results[position]
+
+    def get_averaging_evaluation_data(self, group_id):
+        return self.averaging_data
 
 
 def test_averaging_preserves_one_result_per_output() -> None:
     store = FakeResultStore(
-        method='averaging',
-        items=(1, 2),
-        results={
-            1: (
-                ((1.0, 10.0), (3.0, 14.0)),
-                ((2.0, 12.0), (4.0, 16.0)),
-            ),
-            2: (
-                ((1.0, 10.0), (3.0, 14.0)),
-                ((0.0, 9.0), (2.0, 13.0)),
-            ),
-        },
+        averaging_data=(
+            ((1.0, 4.0), (1.0, 1.0)),
+            ((1.0, 4.0), (1.0, 4.0)),
+        )
     )
 
-    result = Evaluator(store)._evaluate_strategy_bias_and_variance(7)
+    result = Evaluator(store)._evaluate_averaging(7)
 
     assert result == GroupUpdateData(
         group_id=7,
@@ -59,51 +43,67 @@ def test_averaging_preserves_one_result_per_output() -> None:
     )
 
 
+def test_averaging_rejects_mismatched_model_output_shapes() -> None:
+    store = FakeResultStore(
+        averaging_data=(
+            ((1.0, 4.0),),
+            ((1.0,),),
+        )
+    )
+
+    with pytest.raises(ValueError, match='matching shape'):
+        Evaluator(store)._evaluate_averaging(7)
+
+
 def test_pointwise_preserves_one_result_per_output() -> None:
     store = FakeResultStore(
-        method='pointwise',
-        items=(0, 1),
-        results={
+        positions=(0, 1),
+        pointwise_results={
             0: (
-                ((1.0, 10.0), (1.0, 10.0)),
-                ((2.0, 12.0), (4.0, 14.0)),
+                (1.0, 10.0),
+                ((2.0, 12.0), (0.0, 9.0)),
             ),
             1: (
-                ((3.0, 20.0), (3.0, 20.0)),
+                (3.0, 20.0),
                 ((3.0, 18.0), (5.0, 22.0)),
             ),
         },
     )
 
-    result = Evaluator(store)._evaluate_strategy_bias_and_variance(7)
+    update, records = Evaluator(store)._evaluate_pointwise(7)
 
-    assert result == GroupUpdateData(
+    assert update == GroupUpdateData(
         group_id=7,
-        bias=(2.5, 4.5),
-        variance=(1.0, 2.5),
+        bias=(0.5, 0.125),
+        variance=(1.0, 3.125),
+    )
+    assert tuple(record.y_true for record in records) == (
+        (1.0, 10.0),
+        (3.0, 20.0),
     )
 
 
-def test_pointwise_rejects_inconsistent_actual_outputs() -> None:
+def test_pointwise_rejects_mismatched_output_shapes() -> None:
     store = FakeResultStore(
-        method='pointwise',
-        items=(0,),
-        results={
+        positions=(0,),
+        pointwise_results={
             0: (
-                ((1.0, 10.0), (2.0, 10.0)),
-                ((2.0, 12.0), (4.0, 14.0)),
+                (1.0, 10.0),
+                ((2.0,), (4.0,)),
             ),
         },
     )
 
-    with pytest.raises(
-        ValueError,
-        match='Inconsistent actual outputs for group 7, position 0',
-    ):
-        Evaluator(store)._evaluate_strategy_bias_and_variance(7)
+    with pytest.raises(ValueError, match='matching shapes'):
+        Evaluator(store)._evaluate_pointwise(7)
 
 
-def test_get_model_scores_returns_requested_metrics() -> None:
+def test_pointwise_rejects_empty_position_set() -> None:
+    with pytest.raises(ValueError, match='No evaluation data found'):
+        Evaluator(FakeResultStore())._evaluate_pointwise(7)
+
+
+def test_get_model_scores_returns_uniform_metrics() -> None:
     predictions = np.array([[1.0], [3.0], [5.0]])
     y_test = pd.DataFrame({'y': [1.0, 2.0, 7.0]})
 
@@ -125,3 +125,17 @@ def test_get_model_scores_returns_requested_metrics() -> None:
     assert scores['rmse'] == pytest.approx((5.0 / 3.0) ** 0.5)
     assert scores['mae'] == pytest.approx(1.0)
     assert scores['r2'] == pytest.approx(141.0 / 186.0)
+
+
+def test_get_model_scores_returns_raw_values_per_output() -> None:
+    predictions = np.array([[2.0, 12.0], [4.0, 16.0]])
+    y_test = pd.DataFrame([[1.0, 10.0], [3.0, 14.0]])
+
+    scores = get_model_scores(
+        predictions=predictions,
+        y_test=y_test,
+        metrics=frozenset({MetricName.MSE}),
+        is_uniform=False,
+    )
+
+    assert scores == {'mse': (1.0, 4.0)}
