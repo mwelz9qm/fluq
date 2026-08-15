@@ -162,7 +162,7 @@ def test_default_random_config_satisfies_cross_architecture_rules():
 
     assert config.range_architectures[ArchitectureName.WIDE].layer_range == (
         1,
-        16,
+        8,
     )
     assert config.range_architectures[ArchitectureName.NARROW].size_range == (
         2,
@@ -227,13 +227,14 @@ def test_reverse_taper_uses_a_positive_decay_multiplier():
     )
     generator = FnnArchitectureGenerator(
         FnnArchitectureGeneratorConfig(
+            range_architectures={},
             taper_architectures={
                 ArchitectureName.REVERSE_TAPER: config,
             }
         )
     )
 
-    architecture = generator.generate(random_state=42)[0].generated
+    architecture = next(generator.generate(random_state=42)).generated
 
     assert architecture.hidden_layers[0] == 20
     assert all(
@@ -254,20 +255,21 @@ def test_combined_taper_grows_and_then_shrinks():
     )
     generator = FnnArchitectureGenerator(
         FnnArchitectureGeneratorConfig(
+            range_architectures={},
             taper_architectures={
                 ArchitectureName.COMBINED_TAPER: config,
             }
         )
     )
 
-    hidden_layers = generator.generate(
-        random_state=42
-    )[0].generated.hidden_layers
+    hidden_layers = next(
+        generator.generate(random_state=42)
+    ).generated.hidden_layers
     midpoint = 4
 
     assert all(
         left <= right
-        for left, right in itertools.pairwise(hidden_layers)
+        for left, right in itertools.pairwise(hidden_layers[:midpoint])
     )
     assert all(
         left >= right
@@ -291,7 +293,7 @@ def test_combined_taper_grows_and_then_shrinks():
         (
             {'label': '', 'random_state': None, 'generated': FnnArchitecture(())},
             ValueError,
-            'label must not be empty',
+            'label cannot be empty string or whitespace',
         ),
         (
             {'label': 'wide', 'random_state': True, 'generated': FnnArchitecture(())},

@@ -4,6 +4,7 @@ import pytest
 
 from bias_variance.generators.noise import (
     NoiseGenerator,
+    NoiseGeneratorConfig,
     NoiseVariation,
 )
 
@@ -18,13 +19,28 @@ def dataset() -> pd.DataFrame:
         index=["row_a", "row_b", "row_c", "row_d"],
     )
 
-def test_generate_returns_labeled_noise_variations(dataset):
+def _generate_by_label(
+    dataset: pd.DataFrame,
+    standard_deviations: tuple[float, ...] = (0.1,),
+    *,
+    random_state: int | None = 42,
+) -> dict[str, NoiseVariation]:
     generator = NoiseGenerator(
-        dataset,
-        standard_deviations=[0.1, 0.25],
+        NoiseGeneratorConfig(standard_deviations)
     )
+    generator.base_dataset = dataset
 
-    generated = generator.generate(random_state=42)
+    return {
+        variation.label: variation
+        for variation in generator.generate(random_state=random_state)
+    }
+
+def test_generate_returns_labeled_noise_variations(dataset):
+    generated = _generate_by_label(
+        dataset,
+        (0.1, 0.25),
+        random_state=42,
+    )
 
     assert set(generated) == {"std_0.1", "std_0.25"}
 
@@ -33,16 +49,22 @@ def test_generate_returns_labeled_noise_variations(dataset):
 
     assert isinstance(first, NoiseVariation)
     assert first.label == "std_0.1"
-    assert first.standard_deviation == 0.1
     assert first.random_state == 42
+    pd.testing.assert_frame_equal(first.dataset, first.generated)
 
     assert isinstance(second, NoiseVariation)
     assert second.label == "std_0.25"
-    assert second.standard_deviation == 0.25
     assert second.random_state == 42
+    pd.testing.assert_frame_equal(second.dataset, second.generated)
 
 def test_default_standard_deviations_generate_expected_labels(dataset):
-    generated = NoiseGenerator(dataset).generate(random_state=42)
+    generator = NoiseGenerator()
+    generator.base_dataset = dataset
+
+    generated = {
+        variation.label: variation
+        for variation in generator.generate(random_state=42)
+    }
 
     assert set(generated) == {
         "std_0.1",
@@ -53,10 +75,8 @@ def test_default_standard_deviations_generate_expected_labels(dataset):
     }
 
 def test_generation_is_reproducible_for_same_seed(dataset):
-    generator = NoiseGenerator(dataset, [0.1, 0.2])
-
-    first = generator.generate(random_state=42)
-    second = generator.generate(random_state=42)
+    first = _generate_by_label(dataset, (0.1, 0.2), random_state=42)
+    second = _generate_by_label(dataset, (0.1, 0.2), random_state=42)
 
     assert set(first) == set(second)
 
@@ -67,17 +87,25 @@ def test_generation_is_reproducible_for_same_seed(dataset):
         )
 
 def test_different_seeds_generate_different_noise(dataset):
-    generator = NoiseGenerator(dataset, [0.1])
-
-    first = generator.generate(random_state=42)["std_0.1"].dataset
-    second = generator.generate(random_state=43)["std_0.1"].dataset
+    first = _generate_by_label(
+        dataset,
+        (0.1,),
+        random_state=42,
+    )["std_0.1"].dataset
+    second = _generate_by_label(
+        dataset,
+        (0.1,),
+        random_state=43,
+    )["std_0.1"].dataset
 
     assert not first.equals(second)
 
 def test_generate_applies_expected_multiplicative_noise(dataset):
-    generator = NoiseGenerator(dataset, [0.1])
-
-    generated = generator.generate(random_state=42)["std_0.1"].dataset
+    generated = _generate_by_label(
+        dataset,
+        (0.1,),
+        random_state=42,
+    )["std_0.1"].dataset
 
     rng = np.random.default_rng(42)
     scale_factors = rng.normal(
@@ -90,9 +118,11 @@ def test_generate_applies_expected_multiplicative_noise(dataset):
     pd.testing.assert_frame_equal(generated, expected)
 
 def test_each_standard_deviation_uses_next_rng_values(dataset):
-    generator = NoiseGenerator(dataset, [0.1, 0.2])
-
-    generated = generator.generate(random_state=42)
+    generated = _generate_by_label(
+        dataset,
+        (0.1, 0.2),
+        random_state=42,
+    )
 
     rng = np.random.default_rng(42)
 
@@ -115,8 +145,10 @@ def test_each_standard_deviation_uses_next_rng_values(dataset):
     )
 
 def test_generate_preserves_dataframe_metadata(dataset):
-    generated = NoiseGenerator(dataset, [0.1]).generate(
-        random_state=42
+    generated = _generate_by_label(
+        dataset,
+        (0.1,),
+        random_state=42,
     )["std_0.1"].dataset
 
     assert generated.shape == dataset.shape
@@ -125,27 +157,25 @@ def test_generate_preserves_dataframe_metadata(dataset):
 
 def test_generate_does_not_modify_source_dataset(dataset):
     original = dataset.copy(deep=True)
-    generator = NoiseGenerator(dataset, [0.1])
 
-    generator.generate(random_state=42)
+    _generate_by_label(
+        dataset,
+        (0.1,),
+        random_state=42,
+    )
 
     pd.testing.assert_frame_equal(dataset, original)
 
-def test_constructor_copies_source_dataset(dataset):
-    original = dataset.copy(deep=True)
-    generator = NoiseGenerator(dataset, [0.1])
+def test_dataset_property_returns_copy(dataset):
+    generator = NoiseGenerator(
+        NoiseGeneratorConfig((0.1,))
+    )
+    generator.base_dataset = dataset
 
-    dataset.loc[:, :] = -999.0
+    copied_dataset = generator.dataset
+    copied_dataset.loc[:, :] = -999.0
 
-    actual = generator.generate(
-        random_state=42
-    )["std_0.1"].dataset
-
-    expected = NoiseGenerator(original, [0.1]).generate(
-        random_state=42
-    )["std_0.1"].dataset
-
-    pd.testing.assert_frame_equal(actual, expected)
+    pd.testing.assert_frame_equal(generator.base_dataset, dataset)
 
 def test_non_numeric_columns_are_rejected():
     dataset = pd.DataFrame(
@@ -155,11 +185,13 @@ def test_non_numeric_columns_are_rejected():
         }
     )
 
+    generator = NoiseGenerator()
+
     with pytest.raises(
         TypeError,
-        match="Noise can only be applied to numeric columns",
+        match="Noise can only be applied to real numeric columns",
     ):
-        NoiseGenerator(dataset)
+        generator.base_dataset = dataset
 
 def test_non_numeric_error_identifies_columns():
     dataset = pd.DataFrame(
@@ -170,49 +202,52 @@ def test_non_numeric_error_identifies_columns():
         }
     )
 
+    generator = NoiseGenerator()
+
     with pytest.raises(TypeError) as error:
-        NoiseGenerator(dataset)
+        generator.base_dataset = dataset
 
     message = str(error.value)
     assert "category" in message
     assert "enabled" in message
 
+
 @pytest.mark.parametrize(
     "standard_deviations",
     [
-        [0.0],
-        [-0.1],
-        [0.1, -0.2],
+        (0.0,),
+        (-0.1,),
+        (0.1, -0.2),
     ],
 )
 def test_non_positive_standard_deviations_are_rejected(
-    dataset,
     standard_deviations,
 ):
     with pytest.raises(
         ValueError,
         match="greater than zero",
     ):
-        NoiseGenerator(dataset, standard_deviations)
+        NoiseGeneratorConfig(standard_deviations)
 
-def test_empty_standard_deviations_are_rejected(dataset):
+def test_empty_standard_deviations_are_rejected():
     with pytest.raises(
         ValueError,
         match="At least one standard deviation",
     ):
-        NoiseGenerator(dataset, [])
+        NoiseGeneratorConfig(())
 
-def test_duplicate_standard_deviations_are_rejected(dataset):
+def test_duplicate_standard_deviations_are_rejected():
     with pytest.raises(
         ValueError,
         match="must be unique",
     ):
-        NoiseGenerator(dataset, [0.1, 0.2, 0.1])
+        NoiseGeneratorConfig((0.1, 0.2, 0.1))
+
 
 @pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
-def test_non_finite_standard_deviations_are_rejected(dataset, value):
+def test_non_finite_standard_deviations_are_rejected(value):
     with pytest.raises(
         ValueError,
         match="must be finite",
     ):
-        NoiseGenerator(dataset, [value])
+        NoiseGeneratorConfig((value,))
