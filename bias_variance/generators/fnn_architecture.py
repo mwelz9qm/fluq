@@ -1,3 +1,9 @@
+'''FNN architecture generator for bias-variance studies.
+
+This module defines configuration, variation, and generator objects for
+creating feedforward neural network architecture variations.
+'''
+
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -409,7 +415,14 @@ class FnnArchitectureGeneratorConfig(VariationGeneratorConfig):
             )
 
     @property
-    def variation_labels(self) -> tuple[str]:
+    def variation_labels(self) -> tuple[str, ...]:
+        '''Return labels for all configured architecture variations.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Labels for each configured random-range and taper architecture.
+        '''
         labels = [
             architecture.value
             for architecture
@@ -487,7 +500,7 @@ class FnnArchitectureGenerator(VariationGenerator[FnnArchitecture]):
     ...     },
     ... )
     >>> generator = FnnArchitectureGenerator(settings)
-    >>> variation = generator.generate(random_state=42)[0]
+    >>> variation = next(generator.generate(random_state=42))
     >>> variation.label
     'wide'
     '''
@@ -502,7 +515,14 @@ class FnnArchitectureGenerator(VariationGenerator[FnnArchitecture]):
         )
 
     @property
-    def variation_labels(self):
+    def variation_labels(self) -> tuple[str, ...]:
+        '''Return labels for the configured architecture variations.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Labels from the generator settings.
+        '''
         return self.settings.variation_labels
 
     @staticmethod
