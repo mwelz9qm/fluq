@@ -82,7 +82,7 @@ class ModelRecord(Record, table=ModelTable):
 class ScoreRecord(Record, table=ScoreTable):
     model_id: int
     metric: str
-    score: float
+    score: tuple[float, ...]
 
 
 @dataclass(frozen=True, slots=True)
