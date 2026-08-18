@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from dataclasses import asdict, fields
 from datetime import UTC, datetime
 from os import PathLike
 from pathlib import Path
@@ -38,7 +39,7 @@ from bias_variance.persistence.records import (
     TestPointRecord,
     TrainPointRecord,
 )
-from bias_variance.persistence.store import ResultStore
+from bias_variance.persistence.store import ResultStore, StoredRun
 from bias_variance.plotting import (
     plot_bias_variance,
     plot_prediction_comparison,
@@ -448,9 +449,15 @@ class BiasAnalyzer:
         return results
 
     def get_run_history(self) -> pd.DataFrame:
+        """Return all persisted runs as a newest-first DataFrame."""
         with ResultStore(self.db_path, timeout=self.db_timeout) as store:
-            runs = store.get_runs() #TODO: implement get_runs() method in store.py. The method should return a tuple of dataclasses of the row data, then in get_run_history(), convert the data into a pandas dataframe for the user to view.
-            return runs
+            store.create_tables()
+            runs = store.get_runs()
+
+        return pd.DataFrame.from_records(
+            (asdict(run) for run in runs),
+            columns=tuple(field.name for field in fields(StoredRun)),
+        )
 
     @staticmethod
     def _select_plot_value(value, index: int, *, name: str) -> float:
