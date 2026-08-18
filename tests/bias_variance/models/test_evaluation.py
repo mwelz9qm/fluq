@@ -8,19 +8,20 @@ from bias_variance.models.evaluation import (
     MetricName,
     get_model_scores,
 )
+from bias_variance.persistence.store import StoredTestPointPrediction
 
 
 class FakeResultStore:
-    def __init__(self, positions=(), pointwise_results=None, averaging_data=None):
-        self.positions = positions
-        self.pointwise_results = pointwise_results or {}
+    def __init__(self, pointwise_rows=(), model_ids=(), averaging_data=None):
+        self.pointwise_rows = pointwise_rows
+        self.model_ids = model_ids
         self.averaging_data = averaging_data
 
-    def get_test_set_positions(self, group_id):
-        return self.positions
+    def get_pointwise_evaluation_data(self, group_id):
+        return self.pointwise_rows
 
-    def get_actual_and_predictions(self, group_id, position):
-        return self.pointwise_results[position]
+    def get_models(self, group_id):
+        return self.model_ids
 
     def get_averaging_evaluation_data(self, group_id):
         return self.averaging_data
@@ -57,17 +58,13 @@ def test_averaging_rejects_mismatched_model_output_shapes() -> None:
 
 def test_pointwise_preserves_one_result_per_output() -> None:
     store = FakeResultStore(
-        positions=(0, 1),
-        pointwise_results={
-            0: (
-                (1.0, 10.0),
-                ((2.0, 12.0), (0.0, 9.0)),
-            ),
-            1: (
-                (3.0, 20.0),
-                ((3.0, 18.0), (5.0, 22.0)),
-            ),
-        },
+        model_ids=(1, 2),
+        pointwise_rows=(
+            StoredTestPointPrediction(1, 0, (0.0,), (1.0, 10.0), (2.0, 12.0)),
+            StoredTestPointPrediction(2, 0, (0.0,), (1.0, 10.0), (0.0, 9.0)),
+            StoredTestPointPrediction(1, 1, (1.0,), (3.0, 20.0), (3.0, 18.0)),
+            StoredTestPointPrediction(2, 1, (1.0,), (3.0, 20.0), (5.0, 22.0)),
+        ),
     )
 
     update, records = Evaluator(store)._evaluate_pointwise(7)
@@ -85,13 +82,11 @@ def test_pointwise_preserves_one_result_per_output() -> None:
 
 def test_pointwise_rejects_mismatched_output_shapes() -> None:
     store = FakeResultStore(
-        positions=(0,),
-        pointwise_results={
-            0: (
-                (1.0, 10.0),
-                ((2.0,), (4.0,)),
-            ),
-        },
+        model_ids=(1, 2),
+        pointwise_rows=(
+            StoredTestPointPrediction(1, 0, (0.0,), (1.0, 10.0), (2.0,)),
+            StoredTestPointPrediction(2, 0, (0.0,), (1.0, 10.0), (4.0,)),
+        ),
     )
 
     with pytest.raises(ValueError, match='matching shapes'):

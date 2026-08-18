@@ -15,14 +15,18 @@ from bias_variance.persistence.records import (
 from bias_variance.persistence.records import (
     TestPointRecord as StoredTestPointRecord,
 )
-from bias_variance.persistence.store import ResultStore
+from bias_variance.persistence.store import ResultStore, StoredRun
 
 
-def _add_run(store: ResultStore, run_id: str = 'run-1') -> str:
+def _add_run(
+    store: ResultStore,
+    run_id: str = 'run-1',
+    created_at: datetime | None = None,
+) -> str:
     result = store.add(
         RunRecord(
             run_id=run_id,
-            created_at=datetime.now(UTC),
+            created_at=created_at or datetime.now(UTC),
             n_iter=2,
             test_size=0.2,
             test_metrics=('mse',),
@@ -50,6 +54,36 @@ def store() -> Iterator[ResultStore]:
 
 def test_empty_store_has_no_recent_run(store: ResultStore) -> None:
     assert store.get_recent_run() is None
+    assert store.get_runs() == ()
+
+
+def test_get_runs_returns_all_decoded_fields_newest_first(
+    store: ResultStore,
+) -> None:
+    older = datetime(2026, 1, 1, tzinfo=UTC)
+    newer = datetime(2026, 1, 2, tzinfo=UTC)
+    _add_run(store, 'older-run', older)
+    _add_run(store, 'newer-run', newer)
+
+    runs = store.get_runs()
+
+    assert tuple(run.run_id for run in runs) == ('newer-run', 'older-run')
+    assert runs[0] == StoredRun(
+        run_id='newer-run',
+        created_at=newer,
+        n_iter=2,
+        test_size=0.2,
+        test_metrics=('mse',),
+        optimizer='adam',
+        learning_rate=0.001,
+        loss='mse',
+        epochs=5,
+        batch_size=16,
+        device='cpu',
+        input_columns=('x',),
+        output_columns=('y',),
+        base_architecture=(8,),
+    )
 
 
 def test_add_and_query_complete_record_hierarchy(store: ResultStore) -> None:
@@ -97,6 +131,9 @@ def test_add_and_query_complete_record_hierarchy(store: ResultStore) -> None:
     assert store.get_bias_variance_results(run_id) == (
         ('model', 'small', 'averaging', (0.25,), (0.5,)),
     )
+
+    with pytest.raises(ValueError, match='Group already evaluated'):
+        store.update_group(group_id, (1.0,), (2.0,))
 
 
 def test_group_position_query_orders_predictions_by_model_id(

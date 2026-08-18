@@ -1,28 +1,11 @@
-from dataclasses import dataclass
-
 import pandas as pd
 import pytest
 
+from bias_variance.config import RunBaseline
 from bias_variance.models.evaluation import MetricName
 from bias_variance.models.fnn import FnnArchitecture
 from bias_variance.models.training import TrainingConfig
 from bias_variance.models.tuner import Tuner, TunerConfig
-
-
-@dataclass(frozen=True, slots=True)
-class FakeDatasetSplit:
-    x_train: pd.DataFrame
-    x_test: pd.DataFrame
-    y_train: pd.DataFrame
-    y_test: pd.DataFrame
-
-
-@dataclass(frozen=True, slots=True)
-class FakeRunBaseline:
-    inputs: pd.DataFrame
-    outputs: pd.DataFrame
-    split: FakeDatasetSplit
-    architecture: FnnArchitecture
 
 
 @pytest.fixture
@@ -38,18 +21,14 @@ def small_run_baseline():
             "y": [1.0, 3.0, 5.0, 7.0, 9.0, 11.0],
         }
     )
-    split = FakeDatasetSplit(
-        x_train=inputs.iloc[:4],
-        x_test=inputs.iloc[4:],
-        y_train=outputs.iloc[:4],
-        y_test=outputs.iloc[4:],
-    )
-
-    return FakeRunBaseline(
-        inputs=inputs,
-        outputs=outputs,
-        split=split,
+    return RunBaseline(
         architecture=FnnArchitecture(hidden_layers=(2,)),
+        X=inputs,
+        Y=outputs,
+        X_train=inputs.iloc[:4],
+        X_test=inputs.iloc[4:],
+        Y_train=outputs.iloc[:4],
+        Y_test=outputs.iloc[4:],
     )
 
 
@@ -265,7 +244,6 @@ def test_tune_returns_training_config_for_small_baseline(small_run_baseline):
 
     config = tuner.tune(
         baseline=small_run_baseline,
-        test_metrics=frozenset({MetricName.RMSE}),
         random_state=42,
     )
 
@@ -296,7 +274,6 @@ def test_tune_supports_each_test_metric(metric, small_run_baseline):
 
     config = tuner.tune(
         baseline=small_run_baseline,
-        test_metrics=frozenset({metric}),
         random_state=42,
     )
 
@@ -316,12 +293,10 @@ def test_tune_is_reproducible_with_same_random_state(small_run_baseline):
 
     first_config = Tuner(tuner_config).tune(
         baseline=small_run_baseline,
-        test_metrics=frozenset({MetricName.RMSE}),
         random_state=42,
     )
     second_config = Tuner(tuner_config).tune(
         baseline=small_run_baseline,
-        test_metrics=frozenset({MetricName.RMSE}),
         random_state=42,
     )
     assert first_config == second_config

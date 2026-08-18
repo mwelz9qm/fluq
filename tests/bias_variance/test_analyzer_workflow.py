@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 
 import pandas as pd
@@ -59,6 +60,19 @@ def test_workflows_share_file_database_and_return_multioutput_results(
     )
     results = analyzer.decompose_bias_and_variance()
 
+    with sqlite3.connect(analyzer.db_path) as connection:
+        first_evaluation_count = connection.execute(
+            'SELECT COUNT(*) FROM evaluations'
+        ).fetchone()[0]
+
+    repeated_results = analyzer.decompose_bias_and_variance()
+    run_history = analyzer.get_run_history()
+
+    with sqlite3.connect(analyzer.db_path) as connection:
+        repeated_evaluation_count = connection.execute(
+            'SELECT COUNT(*) FROM evaluations'
+        ).fetchone()[0]
+
     assert tuple(results.columns) == (
         'study_name',
         'group_name',
@@ -71,6 +85,52 @@ def test_workflows_share_file_database_and_return_multioutput_results(
     assert results.loc[0, 'evaluation_method'] == 'pointwise'
     assert len(results.loc[0, 'bias']) == 2
     assert len(results.loc[0, 'variance']) == 2
+    pd.testing.assert_frame_equal(repeated_results, results)
+    assert repeated_evaluation_count == first_evaluation_count
+    assert len(run_history) == 1
+    assert tuple(run_history.columns) == (
+        'run_id',
+        'created_at',
+        'n_iter',
+        'test_size',
+        'test_metrics',
+        'optimizer',
+        'learning_rate',
+        'loss',
+        'epochs',
+        'batch_size',
+        'device',
+        'input_columns',
+        'output_columns',
+        'base_architecture',
+    )
+    assert run_history.loc[0, 'n_iter'] == 2
+    assert run_history.loc[0, 'test_size'] == 0.5
+    assert run_history.loc[0, 'test_metrics'] == ('mse',)
+    assert run_history.loc[0, 'input_columns'] == ('x',)
+    assert run_history.loc[0, 'output_columns'] == ('y', 'z')
+
+
+def test_get_run_history_returns_typed_empty_frame(tmp_path: Path) -> None:
+    history = BiasAnalyzer(tmp_path / 'empty-results.sqlite3').get_run_history()
+
+    assert history.empty
+    assert tuple(history.columns) == (
+        'run_id',
+        'created_at',
+        'n_iter',
+        'test_size',
+        'test_metrics',
+        'optimizer',
+        'learning_rate',
+        'loss',
+        'epochs',
+        'batch_size',
+        'device',
+        'input_columns',
+        'output_columns',
+        'base_architecture',
+    )
 
 
 def test_run_studies_accepts_mapped_run_settings(tmp_path: Path) -> None:
