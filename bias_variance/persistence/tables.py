@@ -178,7 +178,10 @@ class EvaluationTable(Table):
                 cls.BIAS,
                 cls.VARIANCE
             ),
-            ('FOREIGN KEY (group_id) REFERENCES groups (group_id)',)
+            (
+                'FOREIGN KEY (group_id) REFERENCES groups (group_id)',
+                'UNIQUE (group_id, test_set_position)'
+            )
         )
 
     @classmethod
@@ -249,7 +252,10 @@ class ScoreTable(Table):
                 cls.METRIC,
                 cls.SCORE
             ),
-            ('FOREIGN KEY (model_id) REFERENCES models (model_id)',)
+            (
+                'FOREIGN KEY (model_id) REFERENCES models (model_id)',
+                'UNIQUE (model_id, metric)'
+            )
         )
 
     @classmethod
