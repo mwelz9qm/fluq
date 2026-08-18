@@ -284,7 +284,6 @@ class BiasAnalyzer:
             tuner = Tuner()
             training_config = tuner.tune(
                 baseline=run_config.baseline,
-                test_metrics=run_config.test_metrics,
                 random_state=run_config.random_state,
             )
 
@@ -388,8 +387,51 @@ class BiasAnalyzer:
                     'No runs performed. Call run_studies() to get run.'
                 )
 
+            result_rows = store.get_bias_variance_results(run_id)
+            if not result_rows:
+                raise ValueError(
+                    f'Run contains no evaluation groups: {run_id}.'
+                )
+
+            completion = tuple(
+                (row[3] is not None, row[4] is not None)
+                for row in result_rows
+            )
+            if all(
+                has_bias and has_variance
+                for has_bias, has_variance in completion
+            ):
+                results = pd.DataFrame(
+                    result_rows,
+                    columns=(
+                        'study_name',
+                        'group_name',
+                        'evaluation_method',
+                        'bias',
+                        'variance',
+                    ),
+                )
+                return results
+
+            if any(
+                has_bias or has_variance
+                for has_bias, has_variance in completion
+            ):
+                raise RuntimeError(
+                    f'Run contains partially evaluated results: {run_id}.'
+                )
+
             evaluator = Evaluator(store)
-            evaluator.evaluate(run_id)
+            result = evaluator.evaluate(run_id)
+            for evaluation in result.evaluations:
+                store.add(evaluation)
+
+            for group_update in result.update_groups:
+                store.update_group(
+                    group_update.group_id,
+                    group_update.bias,
+                    group_update.variance
+                )
 
             result_rows = store.get_bias_variance_results(run_id)
             results = pd.DataFrame(
@@ -404,6 +446,11 @@ class BiasAnalyzer:
             )
 
         return results
+
+    def get_run_history(self) -> pd.DataFrame:
+        with ResultStore(self.db_path, timeout=self.db_timeout) as store:
+            runs = store.get_runs() #TODO: implement get_runs() method in store.py. The method should return a tuple of dataclasses of the row data, then in get_run_history(), convert the data into a pandas dataframe for the user to view.
+            return runs
 
     @staticmethod
     def _select_plot_value(value, index: int, *, name: str) -> float:
