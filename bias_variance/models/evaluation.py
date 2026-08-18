@@ -14,7 +14,7 @@ from sklearn.metrics import (
 from torch import nn
 
 from bias_variance.persistence.records import EvaluationRecord
-from bias_variance.persistence.store import ResultStore
+from bias_variance.persistence.store import ResultStore, StoredTestPointPrediction
 
 
 class MetricName(StrEnum):
@@ -110,39 +110,68 @@ class Evaluator:
     ) -> tuple[GroupUpdateData, tuple[EvaluationRecord, ...]]:
         """Evaluate predictions from all models at each shared test position."""
         records: list[EvaluationRecord] = []
-        for position in self.result_store.get_test_set_positions(group_id):
-            actual, predictions = self.result_store.get_actual_and_predictions(
-                group_id, position
+        rows_by_position: dict[int, dict[int, StoredTestPointPrediction]] = {}
+
+        for row in self.result_store.get_pointwise_evaluation_data(group_id):
+            position_rows = rows_by_position.setdefault(row.set_position, {})
+
+            if row.model_id in position_rows:
+                raise ValueError(
+                    f'Duplicate results for model {row.model_id}, '
+                    f'position {row.set_position}.'
+                )
+
+            position_rows[row.model_id] = row
+
+        expected_model_ids = set(self.result_store.get_models(group_id))
+
+        for position, model_rows in rows_by_position.items():
+            if set(model_rows) != expected_model_ids:
+                missing = expected_model_ids - set(model_rows)
+                raise ValueError(
+                    f'Position {position} is missing models: {sorted(missing)}.'
+                )
+
+            ordered_rows = [model_rows[mid] for mid in sorted(expected_model_ids)]
+            reference = ordered_rows[0]
+
+            for row in ordered_rows[1:]:
+                if row.input != reference.input:
+                    raise ValueError(
+                        f'Models use different test inputs at position {position}.'
+                    )
+                if row.output != reference.output:
+                    raise ValueError(
+                        f'Models use different actual outputs at position {position}.'
+                    )
+
+            actual = np.asarray(reference.output, dtype=float)
+            predictions = np.asarray(
+                [row.prediction for row in ordered_rows],
+                dtype=float,
             )
 
-            actual_array = np.asarray(actual, dtype=float)
-            predictions_array = np.asarray(predictions, dtype=float)
+            if actual.ndim != 1:
+                raise ValueError('Actual output must be one-dimensional.')
 
-            if actual_array.ndim != 1:
-                raise ValueError(
-                    'actual must be one-dimensional'
-                )
+            if predictions.ndim != 2:
+                raise ValueError('Predictions must be two-dimensional.')
 
-            if predictions_array.ndim != 2:
-                raise ValueError(
-                    'predictions must be two dimensional'
-                )
-
-            if actual_array.shape != predictions_array.shape[1:]:
+            if actual.shape != predictions.shape[1:]:
                 raise ValueError(
                     'Actuals and predictions must have matching shapes; '
-                    f'got {actual_array.shape} and '
-                    f'{predictions_array.shape[1:]}.'
+                    f'got {actual.shape} and {predictions.shape[1:]}.'
                 )
 
-            point_mean = np.mean(predictions_array, axis=0)
-            squared_bias = (point_mean - actual_array) ** 2.0
-            variance = np.var(predictions_array, axis=0)
+            point_mean = predictions.mean(axis=0)
+            squared_bias = (point_mean - actual) ** 2
+            variance = predictions.var(axis=0)
+
             records.append(
                 EvaluationRecord(
                     group_id=group_id,
                     test_set_position=position,
-                    y_true=tuple(float(value) for value in actual_array),
+                    y_true=tuple(float(value) for value in actual),
                     point_mean_prediction=tuple(
                         float(value) for value in point_mean
                     ),
@@ -177,9 +206,8 @@ class Evaluator:
     ) -> EvaluationData:
         """Evaluate every study and variation group belonging to a run.
 
-        Group-level bias and variance values are updated in the store.
-        Pointwise evaluation records are also inserted for groups configured
-        with the ``pointwise`` evaluation method.
+        This method only calculates and returns evaluation data. The caller owns
+        persistence of group updates and pointwise evaluation records.
 
         Parameters
         -----------
@@ -206,9 +234,6 @@ class Evaluator:
                     case method:
                         raise ValueError(f'Unknown method: {method!r}.')
 
-                self.result_store.update_group(*group.data_row)
-                for record in records:
-                    self.result_store.add(record)
                 update_groups.append(group)
                 evaluation_records.extend(records)
 
