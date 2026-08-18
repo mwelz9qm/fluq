@@ -8,7 +8,7 @@ particular serialization format for array-valued record fields.
 """
 
 import sqlite3
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from os import PathLike
 from typing import Self
 
@@ -32,6 +32,14 @@ type BiasVarianceResult = tuple[
     tuple[float, ...] | None,
     tuple[float, ...] | None,
 ]
+
+@dataclass(frozen=True, slots=True)
+class StoredTestPointPrediction:
+    model_id: int
+    set_position: int
+    input: tuple[float, ...]
+    output: tuple[float, ...]
+    prediction: tuple[float, ...]
 
 
 class ResultStore:
@@ -176,12 +184,24 @@ class ResultStore:
             UPDATE {GroupTable.TABLE_NAME}
             SET ({GroupTable.STRATEGY_BIAS.name}, {GroupTable.STRATEGY_VARIANCE.name}) = (?, ?)
             WHERE {GroupTable.GROUP_ID.name} = ?
+            AND {GroupTable.STRATEGY_BIAS.name} IS NULL
+            AND {GroupTable.STRATEGY_VARIANCE.name} IS NULL
             ''',
             (serialized_bias, serialized_variance, group_id)
         )
 
         if cur.rowcount == 0:
-            raise KeyError(f'Unknown group_id: {group_id}')
+            cur.execute(
+                f'''
+                SELECT {GroupTable.GROUP_ID.name}
+                FROM {GroupTable.TABLE_NAME}
+                WHERE {GroupTable.GROUP_ID.name} = ?
+                ''',
+                (group_id,),
+            )
+            if cur.fetchone() is None:
+                raise KeyError(f'Unknown group_id: {group_id}')
+            raise ValueError(f'Group already evaluated: {group_id}')
 
     def commit(self) -> None:
         """Commit all staged inserts and updates to SQLite.
@@ -588,3 +608,56 @@ class ResultStore:
                 for row in rows
             ),
         )
+
+    def get_pointwise_evaluation_data(
+        self,
+        group_id: int,
+    ) -> tuple[StoredTestPointPrediction, ...]:
+        cur = self._connection.cursor()
+
+        cur.execute(
+            '''
+            SELECT
+                m.model_id,
+                tp.set_position,
+                tp.input,
+                tp.output,
+                tp.prediction
+            FROM models AS m
+            JOIN test_points AS tp ON tp.model_id = m.model_id
+            WHERE m.group_id = ?
+            ORDER BY tp.set_position, m.model_id;
+            ''',
+            (group_id,)
+        )
+
+        rows = cur.fetchall()
+        points: list[StoredTestPointPrediction] = []
+
+        for row in rows:
+            points.append(
+                StoredTestPointPrediction(
+                    model_id=int(row[ModelTable.MODEL_ID.name]),
+                    set_position=int(row[TestPointTable.SET_POSITION.name]),
+                    input=tuple(
+                        float(value)
+                        for value in decode_json_array(
+                            row[TestPointTable.INPUT.name]
+                        )
+                    ),
+                    output=tuple(
+                        float(value)
+                        for value in decode_json_array(
+                            row[TestPointTable.OUTPUT.name]
+                        )
+                    ),
+                    prediction=tuple(
+                        float(value)
+                        for value in decode_json_array(
+                            row[TestPointTable.PREDICTION.name]
+                        )
+                    ),
+                )
+            )
+
+        return tuple(points)
