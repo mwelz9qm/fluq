@@ -16,16 +16,21 @@ from bias_variance.models.evaluation import (
     get_model_predictions,
     get_model_scores,
 )
-
 from bias_variance.models.training import Trainer, TrainingConfig
 from bias_variance.models.utils import _to_tensor
 
 if TYPE_CHECKING:
-    from bias_variance.analyzer import RunBaseline
+    from bias_variance.config import RunBaseline
 
 @dataclass(frozen=True, slots=True)
 class TunerConfig:
     """Configuration for the hyperparameter tuning step.
+
+    TODO: combine metric and direction in tuple pairs (metric, direction):
+    - (rmse, minimize)
+    - (mse, minimize)
+    - (r2, maximize)
+    - etc.
 
     Attributes
     ----------
@@ -230,8 +235,7 @@ class Tuner:
 
     def tune(
             self,
-            baseline: "RunBaseline",
-            test_metrics: frozenset[MetricName],
+            baseline: RunBaseline,
             random_state: int | None = None,
     ) -> TrainingConfig:
         """Run tuning and return the best TrainingConfig.
@@ -240,8 +244,6 @@ class Tuner:
         ----------
         baseline : RunBaseline
             Baseline data and architecture used during tuning.
-        test_metrics : frozenset[MetricName]
-            Metrics used to score each tuning trial.
         random_state : int | None, default = None
             Random seed used during training and tuner trial selection,
             if provided.
@@ -261,7 +263,6 @@ class Tuner:
             lambda trial: self._objective(
                 trial,
                 baseline,
-                test_metrics,
                 random_state,
             ),
             n_trials=self.config.n_trials,
@@ -272,8 +273,7 @@ class Tuner:
     def _objective(
             self,
             trial,
-            baseline: "RunBaseline",
-            test_metrics: frozenset[MetricName],
+            baseline: RunBaseline,
             random_state: int | None,
     ) -> float:
         """Evaluate one tuning trial.
@@ -290,8 +290,6 @@ class Tuner:
             Optuna trial object containing suggested hyperparameter values.
         baseline : RunBaseline
             Baseline data split and architecture used for tuning.
-        test_metrics : frozenset[MetricName]
-            Metrics used to score the candidate model.
         random_state : int | None
             Random seed used during training, if provided.
 
@@ -304,15 +302,15 @@ class Tuner:
 
         trainer = Trainer(candidate_config)
         trainer.set_fnn_model_builder(
-            baseline.inputs.shape[1],
-            baseline.outputs.shape[1],
+            baseline.X.shape[1],
+            baseline.Y.shape[1],
         )
 
-        x_train = _to_tensor(baseline.split.x_train)
-        y_train = _to_tensor(baseline.split.y_train)
+        x_train = _to_tensor(baseline.X_train)
+        y_train = _to_tensor(baseline.Y_train)
 
-        x_test = baseline.split.x_test
-        y_test = baseline.split.y_test
+        x_test = baseline.X_test
+        y_test = baseline.Y_test
 
         trained_model = trainer.train(
             architecture=baseline.architecture,
@@ -327,13 +325,14 @@ class Tuner:
             resolved_device=candidate_config.resolved_device,
         )
 
+        tuning_metric = MetricName(self.config.metric)
         scores = get_model_scores(
             predictions=predictions,
             y_test=y_test,
-            metrics=test_metrics,
+            metrics=frozenset({tuning_metric}),
         )
 
-        return scores[self.config.metric]
+        return scores[tuning_metric.value]
 
     def _build_training_config_from_params(
         self,
