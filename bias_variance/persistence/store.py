@@ -9,11 +9,16 @@ particular serialization format for array-valued record fields.
 
 import sqlite3
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from os import PathLike
 from typing import Self
 
 from bias_variance.persistence.records import Record, RunRecord
-from bias_variance.persistence.serialize import decode_json_array, encode_tuple
+from bias_variance.persistence.serialize import (
+    decode_datetime_string,
+    decode_json_array,
+    encode_tuple,
+)
 from bias_variance.persistence.tables import (
     EvaluationTable,
     GroupTable,
@@ -32,6 +37,27 @@ type BiasVarianceResult = tuple[
     tuple[float, ...] | None,
     tuple[float, ...] | None,
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class StoredRun:
+    """A fully decoded run row returned from the result store."""
+
+    run_id: str
+    created_at: datetime
+    n_iter: int
+    test_size: float
+    test_metrics: tuple[str, ...]
+    optimizer: str
+    learning_rate: float
+    loss: str
+    epochs: int
+    batch_size: int
+    device: str
+    input_columns: tuple[str, ...]
+    output_columns: tuple[str, ...]
+    base_architecture: tuple[int, ...]
+
 
 @dataclass(frozen=True, slots=True)
 class StoredTestPointPrediction:
@@ -269,6 +295,78 @@ class ResultStore:
         row = cur.fetchone()
 
         return None if row is None else str(row[RunTable.RUN_ID.name])
+
+    def get_runs(self) -> tuple[StoredRun, ...]:
+        """Return every persisted run with all serialized fields decoded.
+
+        Runs are ordered from newest to oldest. The run ID provides a stable
+        tiebreaker when multiple rows have the same creation timestamp.
+        """
+        cur = self._connection.cursor()
+        cur.execute(
+            f'''
+            SELECT
+                {RunTable.RUN_ID.name},
+                {RunTable.CREATED_AT.name},
+                {RunTable.N_ITER.name},
+                {RunTable.TEST_SIZE.name},
+                {RunTable.TEST_METRICS.name},
+                {RunTable.OPTIMIZER.name},
+                {RunTable.LEARNING_RATE.name},
+                {RunTable.LOSS.name},
+                {RunTable.EPOCHS.name},
+                {RunTable.BATCH_SIZE.name},
+                {RunTable.DEVICE.name},
+                {RunTable.INPUT_COLUMNS.name},
+                {RunTable.OUTPUT_COLUMNS.name},
+                {RunTable.BASE_ARCHITECTURE.name}
+            FROM {RunTable.TABLE_NAME}
+            ORDER BY {RunTable.CREATED_AT.name} DESC,
+                     {RunTable.RUN_ID.name} DESC
+            '''
+        )
+
+        return tuple(
+            StoredRun(
+                run_id=str(row[RunTable.RUN_ID.name]),
+                created_at=decode_datetime_string(
+                    row[RunTable.CREATED_AT.name]
+                ),
+                n_iter=int(row[RunTable.N_ITER.name]),
+                test_size=float(row[RunTable.TEST_SIZE.name]),
+                test_metrics=tuple(
+                    str(value)
+                    for value in decode_json_array(
+                        row[RunTable.TEST_METRICS.name]
+                    )
+                ),
+                optimizer=str(row[RunTable.OPTIMIZER.name]),
+                learning_rate=float(row[RunTable.LEARNING_RATE.name]),
+                loss=str(row[RunTable.LOSS.name]),
+                epochs=int(row[RunTable.EPOCHS.name]),
+                batch_size=int(row[RunTable.BATCH_SIZE.name]),
+                device=str(row[RunTable.DEVICE.name]),
+                input_columns=tuple(
+                    str(value)
+                    for value in decode_json_array(
+                        row[RunTable.INPUT_COLUMNS.name]
+                    )
+                ),
+                output_columns=tuple(
+                    str(value)
+                    for value in decode_json_array(
+                        row[RunTable.OUTPUT_COLUMNS.name]
+                    )
+                ),
+                base_architecture=tuple(
+                    int(value)
+                    for value in decode_json_array(
+                        row[RunTable.BASE_ARCHITECTURE.name]
+                    )
+                ),
+            )
+            for row in cur.fetchall()
+        )
 
     def get_studies(self, run_id: str) -> tuple[int, ...]:
         """Return all study IDs belonging to a run.
