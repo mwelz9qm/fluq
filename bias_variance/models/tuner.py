@@ -26,20 +26,14 @@ if TYPE_CHECKING:
 class TunerConfig:
     """Configuration for the hyperparameter tuning step.
 
-    TODO: combine metric and direction in tuple pairs (metric, direction):
-    - (rmse, minimize)
-    - (mse, minimize)
-    - (r2, maximize)
-    - etc.
-
     Attributes
     ----------
     n_trials : int
         Number of Optuna trials to run.
-    direction : str
-        Optimization direction. Usually "minimize" for loss, RMSE, MSE, or MAE.
     metric : str
-        Metric used to choose the best trial.
+        Metric used to choose the best trial. Supported values are "rmse",
+        "mse", "mae", and "r2". RMSE, MSE, and MAE are minimized; R2 is
+        maximized.
     optimizer_choices : tuple[str, ...]
         Optimizers that Optuna can choose from.
     learning_rate_range : tuple[float, float]
@@ -52,7 +46,6 @@ class TunerConfig:
         Batch size values that Optuna can choose from.
     """
     n_trials: int = 10
-    direction: str = "minimize"
     metric: str = "rmse"
 
     optimizer_choices: tuple[str, ...] = ("adam",)
@@ -64,7 +57,6 @@ class TunerConfig:
     def __post_init__(self) -> None:
         """Validate tuner configuration values."""
         self._validate_n_trials()
-        self._validate_direction()
         self._validate_metric()
         self._validate_optimizer_choices()
         self._validate_learning_rate_range()
@@ -83,16 +75,6 @@ class TunerConfig:
         if self.n_trials <= 0:
             raise ValueError("n_trials must be greater than 0.")
 
-    def _validate_direction(self) -> None:
-        """Validate the Optuna optimization direction."""
-        if not isinstance(self.direction, str):
-            raise TypeError("direction must be a string.")
-
-        if self.direction not in ("minimize", "maximize"):
-            raise ValueError(
-                "direction must be either 'minimize' or 'maximize'."
-            )
-
     def _validate_metric(self) -> None:
         """Validate the metric used to select the best trial."""
         if not isinstance(self.metric, str):
@@ -104,6 +86,14 @@ class TunerConfig:
             raise ValueError(
                 f"metric must be one of {sorted(supported_metrics)}."
             )
+
+    @property
+    def direction(self) -> str:
+        """Return the Optuna direction implied by the selected metric."""
+        if self.metric == "r2":
+            return "maximize"
+
+        return "minimize"
 
     def _validate_optimizer_choices(self) -> None:
         """Validate optimizer choices."""

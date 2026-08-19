@@ -49,7 +49,6 @@ def test_tuner_uses_provided_config():
 def test_tuner_config_accepts_valid_values():
     config = TunerConfig(
         n_trials=1,
-        direction="minimize",
         metric="rmse",
         optimizer_choices=("adam",),
         learning_rate_range=(1e-4, 1e-3),
@@ -68,28 +67,22 @@ def test_tuner_config_accepts_valid_values():
     assert config.batch_size_choices == (2,)
 
 
-@pytest.mark.parametrize("value", (0, -1))
-def test_tuner_config_rejects_non_positive_n_trials(value):
-    with pytest.raises(ValueError, match="n_trials must be greater than 0"):
-        TunerConfig(n_trials=value)
+@pytest.mark.parametrize(
+    ("metric", "expected_direction"),
+    (
+        ("rmse", "minimize"),
+        ("mse", "minimize"),
+        ("mae", "minimize"),
+        ("r2", "maximize"),
+    ),
+)
+def test_tuner_config_direction_is_implied_by_metric(
+    metric,
+    expected_direction,
+):
+    config = TunerConfig(metric=metric)
 
-
-@pytest.mark.parametrize("value", (True, 1.5, "10"))
-def test_tuner_config_rejects_non_integer_n_trials(value):
-    with pytest.raises(TypeError, match="n_trials must be an integer"):
-        TunerConfig(n_trials=value)
-
-
-@pytest.mark.parametrize("value", ("wrong", "MINIMIZE"))
-def test_tuner_config_rejects_invalid_direction_value(value):
-    with pytest.raises(ValueError, match="direction must be either"):
-        TunerConfig(direction=value)
-
-
-@pytest.mark.parametrize("value", (1, None))
-def test_tuner_config_rejects_non_string_direction(value):
-    with pytest.raises(TypeError, match="direction must be a string"):
-        TunerConfig(direction=value)
+    assert config.direction == expected_direction
 
 
 @pytest.mark.parametrize("value", ("accuracy", "loss"))
