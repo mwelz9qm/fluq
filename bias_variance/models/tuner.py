@@ -24,26 +24,38 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class TunerConfig:
-    """Configuration for the hyperparameter tuning step.
+    """Configuration for the hyperparameter tuning search space.
+
+    TunerConfig controls the optional tuning step before a bias-variance study.
+    It does not configure the Trainer directly. Instead, Tuner uses this config
+    to define the Optuna search space. Each Optuna trial chooses candidate
+    hyperparameter values from these options and ranges, then Tuner converts
+    those trial values into a TrainingConfig.
 
     Attributes
     ----------
     n_trials : int
-        Number of Optuna trials to run.
+        Number of Optuna trials to run. This controls the tuning process and
+        does not become part of TrainingConfig.
     metric : str
         Metric used to choose the best trial. Supported values are "rmse",
         "mse", "mae", and "r2". RMSE, MSE, and MAE are minimized; R2 is
-        maximized.
+        maximized. This metric is used for tuner scoring and is separate from
+        run_config.test_metrics, which are used for evaluation/reporting.
     optimizer_choices : tuple[str, ...]
-        Optimizers that Optuna can choose from.
+        Optimizer options that Optuna can choose from for
+        TrainingConfig.optimizer. Supported values are "adam" and "sgd".
     learning_rate_range : tuple[float, float]
-        Minimum and maximum learning rate values.
+        Minimum and maximum learning rate values that Optuna can search
+        between for TrainingConfig.learning_rate.
     loss_choices : tuple[str, ...]
-        Loss functions that Optuna can choose from.
+        Loss function options that Optuna can choose from for
+        TrainingConfig.loss. Supported values are "mse" and "mae".
     epoch_choices : tuple[int, ...]
-        Epoch values that Optuna can choose from.
+        Epoch values that Optuna can choose from for TrainingConfig.epochs.
     batch_size_choices : tuple[int, ...]
-        Batch size values that Optuna can choose from.
+        Batch size values that Optuna can choose from for
+        TrainingConfig.batch_size.
     """
     n_trials: int = 10
     metric: str = "rmse"
