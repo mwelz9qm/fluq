@@ -68,6 +68,23 @@ class StoredTestPointPrediction:
     prediction: tuple[float, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ModelResult:
+    model_id: int
+    mse: tuple[float, ...]
+    variance: tuple[float, ...]
+    mean: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TestPointResult:
+    test_point_position: int
+    actual: tuple[float, ...]
+    squared_bias: tuple[float, ...]
+    variance: tuple[float, ...]
+    mean: tuple[float, ...]
+
+
 class ResultStore:
     """Provide the SQLite operations required by an analysis run.
 
@@ -759,3 +776,101 @@ class ResultStore:
             )
 
         return tuple(points)
+
+    def get_model_results(self, group_id: int) -> tuple[ModelResult, ...]:
+        """Return per-model MSE and prediction summaries for a group."""
+        cur = self._connection.cursor()
+        cur.execute(
+            f'''
+            SELECT
+                m.{ModelTable.MODEL_ID.name},
+                s.{ScoreTable.SCORE.name},
+                m.{ModelTable.MODEL_VARIANCE_PREDICTION.name},
+                m.{ModelTable.MODEL_MEAN_PREDICTION.name}
+            FROM {ModelTable.TABLE_NAME} AS m
+            INNER JOIN {ScoreTable.TABLE_NAME} AS s
+                ON s.{ScoreTable.MODEL_ID.name} = m.{ModelTable.MODEL_ID.name}
+            WHERE m.{ModelTable.GROUP_ID.name} = ?
+                AND s.{ScoreTable.METRIC.name} = ?
+            ORDER BY m.{ModelTable.MODEL_ID.name}
+            ''',
+            (group_id, 'mse'),
+        )
+
+        return tuple(
+            ModelResult(
+                model_id=int(row[ModelTable.MODEL_ID.name]),
+                mse=tuple(
+                    float(value)
+                    for value in decode_json_array(row[ScoreTable.SCORE.name])
+                ),
+                variance=tuple(
+                    float(value)
+                    for value in decode_json_array(
+                        row[ModelTable.MODEL_VARIANCE_PREDICTION.name]
+                    )
+                ),
+                mean=tuple(
+                    float(value)
+                    for value in decode_json_array(
+                        row[ModelTable.MODEL_MEAN_PREDICTION.name]
+                    )
+                ),
+            )
+            for row in cur.fetchall()
+        )
+
+    def get_test_point_results(
+        self,
+        group_id: int,
+    ) -> tuple[TestPointResult, ...]:
+        """Return pointwise evaluation summaries for a group."""
+        cur = self._connection.cursor()
+        cur.execute(
+            f'''
+            SELECT
+                {EvaluationTable.TEST_SET_POSITION.name},
+                {EvaluationTable.Y_TRUE.name},
+                {EvaluationTable.BIAS.name},
+                {EvaluationTable.VARIANCE.name},
+                {EvaluationTable.POINT_MEAN_PREDICTION.name}
+            FROM {EvaluationTable.TABLE_NAME}
+            WHERE {EvaluationTable.GROUP_ID.name} = ?
+            ORDER BY {EvaluationTable.TEST_SET_POSITION.name},
+                     {EvaluationTable.EVALUATION_ID.name}
+            ''',
+            (group_id,),
+        )
+
+        return tuple(
+            TestPointResult(
+                test_point_position=int(
+                    row[EvaluationTable.TEST_SET_POSITION.name]
+                ),
+                actual=tuple(
+                    float(value)
+                    for value in decode_json_array(
+                        row[EvaluationTable.Y_TRUE.name]
+                    )
+                ),
+                squared_bias=tuple(
+                    float(value)
+                    for value in decode_json_array(
+                        row[EvaluationTable.BIAS.name]
+                    )
+                ),
+                variance=tuple(
+                    float(value)
+                    for value in decode_json_array(
+                        row[EvaluationTable.VARIANCE.name]
+                    )
+                ),
+                mean=tuple(
+                    float(value)
+                    for value in decode_json_array(
+                        row[EvaluationTable.POINT_MEAN_PREDICTION.name]
+                    )
+                ),
+            )
+            for row in cur.fetchall()
+        )
