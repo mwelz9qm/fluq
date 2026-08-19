@@ -47,6 +47,20 @@ from bias_variance.plotting import (
 
 
 class BiasAnalyzer:
+    '''
+    The BiasAnalyzer constructs a series of studies for analyzing the bias
+    and variance across different model variations. The analyzer starts by
+    gathering results on the ran studies, evaluating the bias and variance,
+    and reviewing the evaluations with plots and tables.
+
+    Attributes
+    ----------------
+    db_path: str | PathLike[str]
+        Path to SQLite database for establishing a connection.
+    db_timeout: float, default = 5.0
+        Timeout in seconds
+
+    '''
     def __init__(
         self,
         db_path: str | PathLike[str] = 'bias_variance.sqlite3',
@@ -288,6 +302,13 @@ class BiasAnalyzer:
                 random_state=run_config.random_state,
             )
 
+        # build model trainer for every study
+        trainer = Trainer(training_config)
+        trainer.set_fnn_model_builder(
+            run_config.baseline.X.shape[1],
+            run_config.baseline.Y.shape[1]
+        )
+
         # maintain result store lifecyle within method call
         with ResultStore(self.db_path, timeout=self.db_timeout) as store:
             # create the database tables
@@ -325,13 +346,6 @@ class BiasAnalyzer:
                 )
             )
             run_id = store.add(run_record)
-
-            # build model trainer for every study
-            trainer = Trainer(training_config)
-            trainer.set_fnn_model_builder(
-                run_config.baseline.X.shape[1],
-                run_config.baseline.Y.shape[1]
-            )
 
             # Iterate through the methods and studies
             for method in run_config.evaluation_methods:
