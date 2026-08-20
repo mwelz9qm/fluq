@@ -5,6 +5,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Self
 from uuid import uuid4
+from warnings import warn
 
 import numpy as np
 import pandas as pd
@@ -43,6 +44,7 @@ from bias_variance.persistence.store import ResultStore, StoredRun
 from bias_variance.plotting import (
     plot_bias_variance,
     plot_prediction_comparison,
+    plot_summary as plot_summary_bars,
 )
 
 
@@ -473,6 +475,229 @@ class BiasAnalyzer:
             columns=tuple(field.name for field in fields(StoredRun)),
         )
 
+    def get_bias_variance_summary(
+        self,
+        run_id: str | None = None,
+    ) -> pd.DataFrame:
+        """Return group-level bias/variance results in normalized long form."""
+        history = self.get_run_history()
+        if run_id is None:
+            if history.empty:
+                raise ValueError(
+                    'No runs performed. Call run_studies() to get run.'
+                )
+            run_id = str(history.iloc[0]['run_id'])
+
+        run_rows = history.loc[history['run_id'] == run_id]
+        if run_rows.empty:
+            raise ValueError(f'Run does not exist: {run_id}.')
+
+        output_names = tuple(run_rows.iloc[0]['output_columns'])
+        results = self.decompose_bias_and_variance(run_id)
+        rows: list[dict[str, object]] = []
+
+        for result in results.itertuples(index=False):
+            try:
+                method = EvaluationMethod(result.evaluation_method)
+                StudyBias(result.study_name)
+            except ValueError as exc:
+                raise ValueError(
+                    'Stored summary contains an unknown study or evaluation '
+                    'method.'
+                ) from exc
+
+            bias = np.asarray(result.bias, dtype=float)
+            variance = np.asarray(result.variance, dtype=float)
+            if (
+                bias.ndim != 1
+                or variance.shape != bias.shape
+                or len(bias) != len(output_names)
+                or not np.isfinite(bias).all()
+                or not np.isfinite(variance).all()
+                or (bias < 0).any()
+                or (variance < 0).any()
+            ):
+                raise ValueError(
+                    'Stored bias and variance must be finite, non-negative '
+                    'vectors matching the run outputs.'
+                )
+
+            primary_metric = (
+                'squared_bias'
+                if method is EvaluationMethod.POINTWISE
+                else 'mse'
+            )
+            for output_index, output_name in enumerate(output_names):
+                common = {
+                    'run_id': run_id,
+                    'study_name': result.study_name,
+                    'evaluation_method': method.value,
+                    'group_name': result.group_name,
+                    'output_index': output_index,
+                    'output_name': output_name,
+                }
+                rows.extend(
+                    (
+                        {
+                            **common,
+                            'metric_name': primary_metric,
+                            'metric_value': float(bias[output_index]),
+                        },
+                        {
+                            **common,
+                            'metric_name': 'variance',
+                            'metric_value': float(variance[output_index]),
+                        },
+                    )
+                )
+
+        return pd.DataFrame.from_records(rows)
+
+    @staticmethod
+    def _select_summary_output(
+        summary: pd.DataFrame,
+        output: int | str | None,
+    ) -> pd.DataFrame:
+        required = {
+            'study_name',
+            'evaluation_method',
+            'group_name',
+            'output_index',
+            'output_name',
+            'metric_name',
+            'metric_value',
+        }
+        missing = required - set(summary.columns)
+        if missing:
+            raise ValueError(
+                f'Summary is missing required columns: {sorted(missing)}.'
+            )
+        if summary.empty:
+            raise ValueError('Summary must not be empty.')
+
+        outputs = summary[['output_index', 'output_name']].drop_duplicates()
+        if output is None:
+            if len(outputs) != 1:
+                raise ValueError(
+                    'This summary contains multiple outputs; select one with '
+                    'output=<index> or output=<name>.'
+                )
+            selected = summary['output_index'] == outputs.iloc[0]['output_index']
+        elif isinstance(output, int) and not isinstance(output, bool):
+            selected = summary['output_index'] == output
+            if not selected.any():
+                valid = sorted(outputs['output_index'].astype(int).tolist())
+                raise ValueError(
+                    f'Unknown output index {output}; valid indices are {valid}.'
+                )
+        elif isinstance(output, str):
+            matching = outputs.loc[outputs['output_name'] == output]
+            if matching.empty:
+                valid = sorted(outputs['output_name'].astype(str).tolist())
+                raise ValueError(
+                    f'Unknown output name {output!r}; valid names are {valid}.'
+                )
+            if len(matching) > 1:
+                raise ValueError(
+                    f'Output name {output!r} is ambiguous; select by index.'
+                )
+            selected = summary['output_index'] == matching.iloc[0]['output_index']
+        else:
+            raise TypeError('output must be an integer, string, or None.')
+
+        return summary.loc[selected].copy()
+
+    def plot_summary(
+        self,
+        summary: pd.DataFrame,
+        *,
+        output: int | str | None = None,
+        settings: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> dict[EvaluationMethod, Axes]:
+        """Plot equal-weighted group means for one selected output."""
+        if settings is not None and not isinstance(settings, Mapping):
+            raise TypeError('settings must be a mapping or None.')
+
+        selected = self._select_summary_output(summary, output)
+        unknown_methods = set(selected['evaluation_method']) - {
+            method.value for method in EvaluationMethod
+        }
+        if unknown_methods:
+            raise ValueError(
+                f'Summary contains unknown evaluation methods: '
+                f'{sorted(unknown_methods)}.'
+            )
+        selected['metric_value'] = pd.to_numeric(
+            selected['metric_value'], errors='raise'
+        )
+        if (
+            not np.isfinite(selected['metric_value']).all()
+            or (selected['metric_value'] < 0).any()
+        ):
+            raise ValueError('metric_value must be finite and non-negative.')
+
+        resolved_settings = settings or {}
+        axes: dict[EvaluationMethod, Axes] = {}
+        output_name = str(selected.iloc[0]['output_name'])
+        for method in EvaluationMethod:
+            method_rows = selected.loc[
+                selected['evaluation_method'] == method.value
+            ]
+            if method_rows.empty:
+                continue
+
+            primary_metric = (
+                'squared_bias'
+                if method is EvaluationMethod.POINTWISE
+                else 'mse'
+            )
+            unknown_metrics = set(method_rows['metric_name']) - {
+                primary_metric,
+                'variance',
+            }
+            if unknown_metrics:
+                raise ValueError(
+                    f'{method.value} summary contains unknown metrics: '
+                    f'{sorted(unknown_metrics)}.'
+                )
+            grouped = (
+                method_rows.groupby(
+                    ['study_name', 'metric_name'], sort=False
+                )['metric_value']
+                .mean()
+                .unstack()
+            )
+            missing_metrics = {primary_metric, 'variance'} - set(grouped.columns)
+            if missing_metrics:
+                raise ValueError(
+                    f'{method.value} summary is missing metrics: '
+                    f'{sorted(missing_metrics)}.'
+                )
+
+            labels = tuple(
+                f'{StudyBias(study).value.title()} — {method.name}'
+                for study in grouped.index
+            )
+            method_settings = dict(resolved_settings.get(method.value, {}))
+            method_settings.setdefault(
+                'title', f'{method.name} Summary — {output_name}'
+            )
+            axes[method] = plot_summary_bars(
+                labels,
+                grouped[primary_metric],
+                grouped['variance'],
+                primary_label=(
+                    'Squared Bias'
+                    if method is EvaluationMethod.POINTWISE
+                    else 'MSE'
+                ),
+                settings=method_settings,
+            )
+
+        if not axes:
+            raise ValueError('Summary contains no supported evaluation methods.')
+        return axes
+
     @staticmethod
     def _select_plot_value(value, index: int, *, name: str) -> float:
         """Select one output or input value from a scalar or vector cell."""
@@ -661,6 +886,9 @@ class BiasAnalyzer:
     ) -> tuple[Axes, ...]:
         """Plot prediction comparisons and bias/variance for a run's groups.
 
+        Deprecated: use get_bias_variance_summary() and plot_summary() for the
+        supported run-summary workflow.
+
         The forthcoming result table must be exposed through
         'ResultStore.get_group_plot_results(group_id)'. That query should
         resolve method-specific database values into plot-ready rows. For a
@@ -672,6 +900,12 @@ class BiasAnalyzer:
         'max_plots' limits plotted groups, with two Axes returned per group.
         Groups whose selected values exceed 'max_axis_range' are skipped.
         """
+        warn(
+            'plot_results() is deprecated; use get_bias_variance_summary() '
+            'and plot_summary().',
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if not isinstance(max_plots, int) or isinstance(max_plots, bool):
             raise TypeError('max_plots must be an integer.')
         if max_plots <= 0:
