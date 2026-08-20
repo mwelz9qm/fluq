@@ -119,19 +119,54 @@ def plot_bias_variance(
     settings: Mapping[str, object] | None = None,
 ) -> Axes:
     """Plot paired mean-squared-bias and prediction-variance bars."""
+    resolved_settings = dict(settings or {})
+    primary_label = str(
+        resolved_settings.pop('bias_label', 'Mean squared bias')
+    )
+    if 'bias_color' in resolved_settings:
+        resolved_settings['primary_color'] = resolved_settings.pop(
+            'bias_color'
+        )
+    resolved_settings.setdefault('title', 'Bias and Variance')
+    resolved_settings.setdefault('xlabel', 'Group')
+
+    return plot_summary(
+        labels,
+        bias,
+        variance,
+        primary_label=primary_label,
+        ax=ax,
+        settings=resolved_settings,
+    )
+
+
+def plot_summary(
+    labels: Sequence[object],
+    primary_metric,
+    variance,
+    *,
+    primary_label: str,
+    ax: Axes | None = None,
+    settings: Mapping[str, object] | None = None,
+) -> Axes:
+    """Plot a grouped summary of one primary metric and variance."""
     resolved_settings = settings or {}
     label_values = tuple(str(label) for label in labels)
     if not label_values:
         raise ValueError('labels must not be empty.')
 
-    bias_values = _numeric_1d(bias, name='bias')
+    primary_values = _numeric_1d(primary_metric, name='primary_metric')
     variance_values = _numeric_1d(variance, name='variance')
-    if len(label_values) != len(bias_values) or len(label_values) != len(
+    if len(label_values) != len(primary_values) or len(label_values) != len(
         variance_values
     ):
-        raise ValueError('labels, bias, and variance must have matching lengths.')
-    if (bias_values < 0).any() or (variance_values < 0).any():
-        raise ValueError('bias and variance must contain non-negative values.')
+        raise ValueError(
+            'labels, primary_metric, and variance must have matching lengths.'
+        )
+    if (primary_values < 0).any() or (variance_values < 0).any():
+        raise ValueError(
+            'primary_metric and variance must contain non-negative values.'
+        )
 
     resolved_ax = _resolve_axes(ax, resolved_settings)
     positions = np.arange(len(label_values))
@@ -141,10 +176,10 @@ def plot_bias_variance(
 
     resolved_ax.bar(
         positions - width / 2,
-        bias_values,
+        primary_values,
         width,
-        label=resolved_settings.get('bias_label', 'Mean squared bias'),
-        color=resolved_settings.get('bias_color', 'tab:orange'),
+        label=primary_label,
+        color=resolved_settings.get('primary_color', 'tab:orange'),
     )
     resolved_ax.bar(
         positions + width / 2,
@@ -158,9 +193,9 @@ def plot_bias_variance(
     )
     resolved_ax.set_xticks(positions, label_values)
     resolved_ax.set_title(
-        str(resolved_settings.get('title', 'Bias and Variance'))
+        str(resolved_settings.get('title', f'{primary_label} and Variance'))
     )
-    resolved_ax.set_xlabel(str(resolved_settings.get('xlabel', 'Group')))
+    resolved_ax.set_xlabel(str(resolved_settings.get('xlabel', 'Study')))
     resolved_ax.set_ylabel(str(resolved_settings.get('ylabel', 'Value')))
     resolved_ax.set_yscale(str(resolved_settings.get('yscale', 'linear')))
     resolved_ax.grid(
@@ -169,5 +204,10 @@ def plot_bias_variance(
         alpha=0.25,
     )
     resolved_ax.legend()
+    if 'tick_rotation' in resolved_settings:
+        resolved_ax.tick_params(
+            axis='x',
+            labelrotation=float(resolved_settings['tick_rotation']),
+        )
 
     return resolved_ax
