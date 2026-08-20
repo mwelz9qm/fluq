@@ -1,16 +1,17 @@
 from collections.abc import Mapping
-from dataclasses import asdict, fields
+from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 from os import PathLike
 from pathlib import Path
-from typing import Self
+from typing import Literal, Self
 from uuid import uuid4
-from warnings import warn
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
 from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 from sklearn.model_selection import train_test_split
 
 from bias_variance.config import (
@@ -42,12 +43,30 @@ from bias_variance.persistence.records import (
 )
 from bias_variance.persistence.store import ResultStore, StoredRun
 from bias_variance.plotting import (
-    plot_bias_variance,
-    plot_prediction_comparison,
+    plot_bias_and_variance as plot_prediction_distribution,
 )
 from bias_variance.plotting import (
-    plot_summary as plot_summary_bars,
+    plot_error_components,
 )
+
+type OutputSelector = int | str
+type PlotKind = Literal['components', 'error_relationship']
+
+
+@dataclass(frozen=True, slots=True)
+class GroupPlotResult:
+    """Matplotlib objects and metadata for one plotted result group."""
+
+    run_id: str
+    study_id: int
+    group_id: int
+    group_name: str
+    evaluation_method: str
+    output_index: int
+    output_name: str
+    figure: Figure
+    prediction_axes: Axes
+    metric_axes: Axes | None
 
 
 class BiasAnalyzer:
@@ -503,554 +522,542 @@ class BiasAnalyzer:
 
         return results
 
-    def get_bias_variance_summary(
-        self,
-        run_id: str | None = None,
-    ) -> pd.DataFrame:
-        """Return group-level bias/variance results in normalized long form."""
-        history = self.get_run_history()
-        if run_id is None:
-            if history.empty:
-                raise ValueError(
-                    'No runs performed. Call run_studies() to get run.'
-                )
-            run_id = str(history.iloc[0]['run_id'])
-
-        run_rows = history.loc[history['run_id'] == run_id]
-        if run_rows.empty:
-            raise ValueError(f'Run does not exist: {run_id}.')
-
-        output_names = tuple(run_rows.iloc[0]['output_columns'])
-        results = self.decompose_bias_and_variance(run_id)
-        rows: list[dict[str, object]] = []
-
-        for result in results.itertuples(index=False):
-            try:
-                method = EvaluationMethod(result.evaluation_method)
-                StudyBias(result.study_name)
-            except ValueError as exc:
-                raise ValueError(
-                    'Stored summary contains an unknown study or evaluation '
-                    'method.'
-                ) from exc
-
-            bias = np.asarray(result.bias, dtype=float)
-            variance = np.asarray(result.variance, dtype=float)
-            if (
-                bias.ndim != 1
-                or variance.shape != bias.shape
-                or len(bias) != len(output_names)
-                or not np.isfinite(bias).all()
-                or not np.isfinite(variance).all()
-                or (bias < 0).any()
-                or (variance < 0).any()
-            ):
-                raise ValueError(
-                    'Stored bias and variance must be finite, non-negative '
-                    'vectors matching the run outputs.'
-                )
-
-            primary_metric = (
-                'squared_bias'
-                if method is EvaluationMethod.POINTWISE
-                else 'mse'
-            )
-            for output_index, output_name in enumerate(output_names):
-                common = {
-                    'run_id': run_id,
-                    'study_name': result.study_name,
-                    'evaluation_method': method.value,
-                    'group_name': result.group_name,
-                    'output_index': output_index,
-                    'output_name': output_name,
-                }
-                rows.extend(
-                    (
-                        {
-                            **common,
-                            'metric_name': primary_metric,
-                            'metric_value': float(bias[output_index]),
-                        },
-                        {
-                            **common,
-                            'metric_name': 'variance',
-                            'metric_value': float(variance[output_index]),
-                        },
-                    )
-                )
-
-        return pd.DataFrame.from_records(rows)
+    _PLOT_DATA_COLUMNS = (
+        'run_id',
+        'study_id',
+        'study_name',
+        'evaluation_method',
+        'group_id',
+        'group_name',
+        'result_type',
+        'record_index',
+        'test_set_position',
+        'model_id',
+        'output_index',
+        'output_name',
+        'actual_value',
+        'mean_prediction',
+        'prediction_variance',
+        'prediction_std',
+        'squared_bias',
+        'mse',
+    )
 
     @staticmethod
-    def _select_summary_output(
-        summary: pd.DataFrame,
-        output: int | str | None,
+    def _validated_result_vector(
+        values: object,
+        *,
+        expected_size: int,
+        field_name: str,
+        group_id: int,
+        record_id: int,
+        non_negative: bool = False,
+    ) -> np.ndarray:
+        """Validate one persisted per-output result vector."""
+        try:
+            array = np.asarray(values, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f'{field_name} for group {group_id}, record {record_id} '
+                'must contain numeric values.'
+            ) from exc
+
+        if array.ndim != 1 or len(array) != expected_size:
+            raise ValueError(
+                f'{field_name} for group {group_id}, record {record_id} must '
+                f'contain {expected_size} output values; got shape '
+                f'{array.shape}.'
+            )
+        if not np.isfinite(array).all():
+            raise ValueError(
+                f'{field_name} for group {group_id}, record {record_id} '
+                'contains non-finite values.'
+            )
+        if non_negative:
+            scale = max(1.0, float(np.max(np.abs(array), initial=0.0)))
+            tolerance = np.finfo(float).eps * scale * 100
+            if (array < -tolerance).any():
+                raise ValueError(
+                    f'{field_name} for group {group_id}, record {record_id} '
+                    'contains negative values.'
+                )
+            array = np.maximum(array, 0.0)
+        return array
+
+    def get_bias_variance_plot_data(self) -> pd.DataFrame:
+        """Return tidy, multi-output plot data for the selected run.
+
+        The selected run must already have been successfully decomposed. Each
+        row represents one pointwise evaluation or model result for one output.
+        """
+        with ResultStore(self.db_path, timeout=self.db_timeout) as store:
+            store.create_tables()
+            run_id = self._require_selected_run(store)
+            run = store.get_run(run_id)
+            if run is None:
+                raise RuntimeError(f'Selected run no longer exists: {run_id}.')
+
+            groups = store.get_run_groups(run_id)
+            if not groups:
+                raise ValueError(
+                    f'Run contains no studies or result groups: {run_id}.'
+                )
+
+            completion_rows = store.get_bias_variance_results(run_id)
+            if len(completion_rows) != len(groups):
+                raise RuntimeError(
+                    f'Run has incomplete result metadata: {run_id}.'
+                )
+            if not all(
+                row[3] is not None and row[4] is not None
+                for row in completion_rows
+            ):
+                raise RuntimeError(
+                    f'Run has not been fully decomposed: {run_id}. Call '
+                    'decompose_bias_and_variance() first.'
+                )
+
+            output_names = run.output_columns
+            if not output_names:
+                raise ValueError(f'Run contains no output metadata: {run_id}.')
+
+            prepared_rows: list[dict[str, object]] = []
+            for group in groups:
+                try:
+                    method = EvaluationMethod(group.evaluation_method)
+                except ValueError as exc:
+                    raise ValueError(
+                        'Unsupported evaluation method '
+                        f'{group.evaluation_method!r} for group '
+                        f'{group.group_id}.'
+                    ) from exc
+
+                if method is EvaluationMethod.POINTWISE:
+                    records = store.get_test_point_results(group.group_id)
+                    result_type = 'test_point'
+                else:
+                    records = store.get_model_results(group.group_id)
+                    result_type = 'model'
+
+                if not records:
+                    raise ValueError(
+                        f'Group {group.group_id} ({method.value}) contains no '
+                        'detailed results.'
+                    )
+
+                for record_index, record in enumerate(records):
+                    if method is EvaluationMethod.POINTWISE:
+                        record_id = record.test_point_position
+                        mean = self._validated_result_vector(
+                            record.mean,
+                            expected_size=len(output_names),
+                            field_name='mean',
+                            group_id=group.group_id,
+                            record_id=record_id,
+                        )
+                        variance = self._validated_result_vector(
+                            record.variance,
+                            expected_size=len(output_names),
+                            field_name='variance',
+                            group_id=group.group_id,
+                            record_id=record_id,
+                            non_negative=True,
+                        )
+                        actual = self._validated_result_vector(
+                            record.actual,
+                            expected_size=len(output_names),
+                            field_name='actual',
+                            group_id=group.group_id,
+                            record_id=record_id,
+                        )
+                        squared_bias = self._validated_result_vector(
+                            record.squared_bias,
+                            expected_size=len(output_names),
+                            field_name='squared_bias',
+                            group_id=group.group_id,
+                            record_id=record_id,
+                            non_negative=True,
+                        )
+                        mse = np.full(len(output_names), np.nan)
+                        test_set_position: int | None = record_id
+                        model_id: int | None = None
+                    else:
+                        record_id = record.model_id
+                        mean = self._validated_result_vector(
+                            record.mean,
+                            expected_size=len(output_names),
+                            field_name='mean',
+                            group_id=group.group_id,
+                            record_id=record_id,
+                        )
+                        variance = self._validated_result_vector(
+                            record.variance,
+                            expected_size=len(output_names),
+                            field_name='variance',
+                            group_id=group.group_id,
+                            record_id=record_id,
+                            non_negative=True,
+                        )
+                        mse = self._validated_result_vector(
+                            record.mse,
+                            expected_size=len(output_names),
+                            field_name='mse',
+                            group_id=group.group_id,
+                            record_id=record_id,
+                            non_negative=True,
+                        )
+                        actual = np.full(len(output_names), np.nan)
+                        squared_bias = np.full(len(output_names), np.nan)
+                        test_set_position = None
+                        model_id = record_id
+
+                    for output_index, output_name in enumerate(output_names):
+                        prepared_rows.append(
+                            {
+                                'run_id': run_id,
+                                'study_id': group.study_id,
+                                'study_name': group.study_name,
+                                'evaluation_method': method.value,
+                                'group_id': group.group_id,
+                                'group_name': group.group_name,
+                                'result_type': result_type,
+                                'record_index': record_index,
+                                'test_set_position': test_set_position,
+                                'model_id': model_id,
+                                'output_index': output_index,
+                                'output_name': str(output_name),
+                                'actual_value': float(actual[output_index]),
+                                'mean_prediction': float(mean[output_index]),
+                                'prediction_variance': float(
+                                    variance[output_index]
+                                ),
+                                'prediction_std': float(
+                                    np.sqrt(variance[output_index])
+                                ),
+                                'squared_bias': float(
+                                    squared_bias[output_index]
+                                ),
+                                'mse': float(mse[output_index]),
+                            }
+                        )
+
+        return pd.DataFrame.from_records(
+            prepared_rows,
+            columns=self._PLOT_DATA_COLUMNS,
+        )
+
+    @classmethod
+    def _select_plot_output(
+        cls,
+        results: pd.DataFrame,
+        output: OutputSelector,
     ) -> pd.DataFrame:
-        required = {
-            'study_name',
-            'evaluation_method',
-            'group_name',
-            'output_index',
-            'output_name',
-            'metric_name',
-            'metric_value',
-        }
-        missing = required - set(summary.columns)
+        if not isinstance(results, pd.DataFrame):
+            raise TypeError('results must be a pandas DataFrame.')
+        missing = set(cls._PLOT_DATA_COLUMNS) - set(results.columns)
         if missing:
             raise ValueError(
-                f'Summary is missing required columns: {sorted(missing)}.'
+                f'Results are missing required columns: {sorted(missing)}.'
             )
-        if summary.empty:
-            raise ValueError('Summary must not be empty.')
+        if results.empty:
+            raise ValueError('Results must not be empty.')
 
-        outputs = summary[['output_index', 'output_name']].drop_duplicates()
-        if output is None:
-            if len(outputs) != 1:
-                raise ValueError(
-                    'This summary contains multiple outputs; select one with '
-                    'output=<index> or output=<name>.'
-                )
-            selected = summary['output_index'] == outputs.iloc[0]['output_index']
-        elif isinstance(output, int) and not isinstance(output, bool):
-            selected = summary['output_index'] == output
-            if not selected.any():
+        outputs = results[['output_index', 'output_name']].drop_duplicates()
+        names_per_index = outputs.groupby('output_index')['output_name'].nunique()
+        if (names_per_index != 1).any():
+            raise ValueError(
+                'Each output_index must identify exactly one output_name.'
+            )
+        if isinstance(output, int) and not isinstance(output, bool):
+            matching = outputs.loc[outputs['output_index'] == output]
+            if matching.empty:
                 valid = sorted(outputs['output_index'].astype(int).tolist())
-                raise ValueError(
+                raise IndexError(
                     f'Unknown output index {output}; valid indices are {valid}.'
                 )
         elif isinstance(output, str):
             matching = outputs.loc[outputs['output_name'] == output]
             if matching.empty:
                 valid = sorted(outputs['output_name'].astype(str).tolist())
-                raise ValueError(
+                raise KeyError(
                     f'Unknown output name {output!r}; valid names are {valid}.'
                 )
             if len(matching) > 1:
                 raise ValueError(
                     f'Output name {output!r} is ambiguous; select by index.'
                 )
-            selected = summary['output_index'] == matching.iloc[0]['output_index']
         else:
-            raise TypeError('output must be an integer, string, or None.')
+            raise TypeError('output must be an integer or string.')
 
-        return summary.loc[selected].copy()
+        output_index = int(matching.iloc[0]['output_index'])
+        return results.loc[results['output_index'] == output_index].copy()
 
-    def plot_summary(
-        self,
-        summary: pd.DataFrame,
-        *,
-        output: int | str | None = None,
-        settings: Mapping[str, Mapping[str, object]] | None = None,
-    ) -> dict[EvaluationMethod, Axes]:
-        """Plot equal-weighted group means for one selected output."""
-        if settings is not None and not isinstance(settings, Mapping):
-            raise TypeError('settings must be a mapping or None.')
-
-        selected = self._select_summary_output(summary, output)
-        unknown_methods = set(selected['evaluation_method']) - {
-            method.value for method in EvaluationMethod
-        }
-        if unknown_methods:
-            raise ValueError(
-                f'Summary contains unknown evaluation methods: '
-                f'{sorted(unknown_methods)}.'
-            )
-        selected['metric_value'] = pd.to_numeric(
-            selected['metric_value'], errors='raise'
-        )
-        if (
-            not np.isfinite(selected['metric_value']).all()
-            or (selected['metric_value'] < 0).any()
-        ):
-            raise ValueError('metric_value must be finite and non-negative.')
-
-        resolved_settings = settings or {}
-        axes: dict[EvaluationMethod, Axes] = {}
-        output_name = str(selected.iloc[0]['output_name'])
-        for method in EvaluationMethod:
-            method_rows = selected.loc[
-                selected['evaluation_method'] == method.value
-            ]
-            if method_rows.empty:
-                continue
-
-            primary_metric = (
-                'squared_bias'
-                if method is EvaluationMethod.POINTWISE
-                else 'mse'
-            )
-            unknown_metrics = set(method_rows['metric_name']) - {
-                primary_metric,
-                'variance',
+    @staticmethod
+    def _merged_plot_settings(
+        settings: Mapping[str, object],
+        overrides: Mapping[str, object],
+    ) -> dict[str, object]:
+        merged = dict(settings)
+        for section in ('prediction', 'metrics'):
+            base_section = merged.get(section, {})
+            override_section = overrides.get(section, {})
+            if not isinstance(base_section, Mapping) or not isinstance(
+                override_section, Mapping
+            ):
+                raise TypeError(f'{section} settings must be mappings.')
+            merged[section] = {**base_section, **override_section}
+        merged.update(
+            {
+                key: value
+                for key, value in overrides.items()
+                if key not in {'prediction', 'metrics'}
             }
-            if unknown_metrics:
-                raise ValueError(
-                    f'{method.value} summary contains unknown metrics: '
-                    f'{sorted(unknown_metrics)}.'
-                )
-            grouped = (
-                method_rows.groupby(
-                    ['study_name', 'metric_name'], sort=False
-                )['metric_value']
-                .mean()
-                .unstack()
-            )
-            missing_metrics = {primary_metric, 'variance'} - set(grouped.columns)
-            if missing_metrics:
-                raise ValueError(
-                    f'{method.value} summary is missing metrics: '
-                    f'{sorted(missing_metrics)}.'
-                )
-
-            labels = tuple(
-                f'{StudyBias(study).value.title()} — {method.name}'
-                for study in grouped.index
-            )
-            method_settings = dict(resolved_settings.get(method.value, {}))
-            method_settings.setdefault(
-                'title', f'{method.name} Summary — {output_name}'
-            )
-            axes[method] = plot_summary_bars(
-                labels,
-                grouped[primary_metric],
-                grouped['variance'],
-                primary_label=(
-                    'Squared Bias'
-                    if method is EvaluationMethod.POINTWISE
-                    else 'MSE'
-                ),
-                settings=method_settings,
-            )
-
-        if not axes:
-            raise ValueError('Summary contains no supported evaluation methods.')
-        return axes
-
-    @staticmethod
-    def _select_plot_value(value, index: int, *, name: str) -> float:
-        """Select one output or input value from a scalar or vector cell."""
-        try:
-            values = np.asarray(value, dtype=float)
-        except (TypeError, ValueError) as exc:
-            raise TypeError(f'{name} must contain numeric values.') from exc
-
-        if values.ndim == 0:
-            if index != 0:
-                raise IndexError(f'{name} has no value at index {index}.')
-            selected = float(values)
-        else:
-            flattened = values.reshape(-1)
-            if index >= len(flattened):
-                raise IndexError(f'{name} has no value at index {index}.')
-            selected = float(flattened[index])
-
-        if not np.isfinite(selected):
-            raise ValueError(f'{name} must contain only finite values.')
-        return selected
-
-    @classmethod
-    def _prepare_group_plot_data(
-        col,
-        rows,
-        *,
-        input_index: int,
-        output_index: int,
-    ) -> pd.DataFrame:
-        """Normalize result-store rows into scalar plotting columns.
-
-        The result-store query is expected to return either a DataFrame, a
-        column mapping, or records containing 'x', 'actual',
-        'prediction_mean', 'bias', and 'variance'.  For convenience,
-        pointwise rows may use 'input'/'actual_output' and averaging rows
-        may use 'r2'/'sample_mean' instead of 'x'/'actual'.  A
-        'test_points' or 'model_ids' cell may alternatively contain a
-        mapping with 'x' and 'actual' keys or an '(x, actual)' pair.
-        """
-        if isinstance(rows, pd.DataFrame):
-            frame = rows.copy()
-        elif isinstance(rows, Mapping):
-            try:
-                frame = pd.DataFrame(rows)
-            except ValueError:
-                frame = pd.DataFrame([rows])
-        else:
-            frame = pd.DataFrame.from_records(rows)
-
-        if frame.empty:
-            return frame
-
-        if 'x' not in frame:
-            if 'r2' in frame:
-                frame['x'] = frame['r2']
-            elif 'input' in frame:
-                frame['x'] = frame['input']
-        if 'actual' not in frame:
-            if 'sample_mean' in frame:
-                frame['actual'] = frame['sample_mean']
-            elif 'actual_output' in frame:
-                frame['actual'] = frame['actual_output']
-
-        if 'x' not in frame or 'actual' not in frame:
-            paired_column = next(
-                (
-                    column
-                    for column in ('test_points', 'model_ids')
-                    if column in frame
-                ),
-                None,
-            )
-            if paired_column is not None:
-                paired_values: list[tuple[object, object]] = []
-                for value in frame[paired_column]:
-                    if isinstance(value, Mapping):
-                        try:
-                            pair = (value['x'], value['actual'])
-                        except KeyError as exc:
-                            raise ValueError(
-                                f'{paired_column} mappings must contain x '
-                                'and actual values.'
-                            ) from exc
-                    else:
-                        try:
-                            pair = tuple(value)
-                        except TypeError as exc:
-                            raise ValueError(
-                                f'{paired_column} values must be (x, actual) '
-                                'pairs, not identifiers alone.'
-                            ) from exc
-                        if len(pair) != 2:
-                            raise ValueError(
-                                f'{paired_column} values must be (x, actual) '
-                                'pairs.'
-                            )
-                    paired_values.append(pair)
-
-                if 'x' not in frame:
-                    frame['x'] = [pair[0] for pair in paired_values]
-                if 'actual' not in frame:
-                    frame['actual'] = [pair[1] for pair in paired_values]
-
-        required = {'x', 'actual', 'prediction_mean', 'bias', 'variance'}
-        missing = required - set(frame.columns)
-        if missing:
-            raise ValueError(
-                'Group plot results are missing required columns: '
-                f'{sorted(missing)}.'
-            )
-
-        normalized = pd.DataFrame(index=frame.index)
-        normalized['x'] = [
-            col._select_plot_value(value, input_index, name='x')
-            for value in frame['x']
-        ]
-        for column in ('actual', 'prediction_mean', 'bias', 'variance'):
-            normalized[column] = [
-                col._select_plot_value(value, output_index, name=column)
-                for value in frame[column]
-            ]
-
-        for optional_column in ('group_name', 'evaluation_method'):
-            if optional_column in frame:
-                normalized[optional_column] = frame[optional_column].to_numpy()
-
-        if 'evaluation_method' not in normalized:
-            if 'test_points' in frame:
-                normalized['evaluation_method'] = (
-                    EvaluationMethod.POINTWISE.value
-                )
-            elif 'model_ids' in frame:
-                normalized['evaluation_method'] = (
-                    EvaluationMethod.AVERAGING.value
-                )
-
-        if (normalized['bias'] < 0).any():
-            raise ValueError('bias must contain non-negative squared errors.')
-        if (normalized['variance'] < 0).any():
-            raise ValueError('variance must contain non-negative values.')
-
-        return normalized.reset_index(drop=True)
-
-    @staticmethod
-    def _has_extreme_plot_range(
-        data: pd.DataFrame,
-        max_axis_range: float | None,
-    ) -> bool:
-        if max_axis_range is None:
-            return False
-
-        errors = np.sqrt(data['variance'].to_numpy(dtype=float))
-        x_values = data['x'].to_numpy(dtype=float)
-        lower = np.minimum(
-            data['actual'].to_numpy(dtype=float),
-            data['prediction_mean'].to_numpy(dtype=float) - errors,
         )
-        upper = np.maximum(
-            data['actual'].to_numpy(dtype=float),
-            data['prediction_mean'].to_numpy(dtype=float) + errors,
-        )
+        return merged
 
-        values = (
-            x_values,
-            lower,
-            upper,
-            data['bias'].to_numpy(dtype=float),
-            data['variance'].to_numpy(dtype=float),
-        )
-        return any(
-            np.ptp(axis_values) > max_axis_range
-            or np.max(np.abs(axis_values)) > max_axis_range
-            for axis_values in values
-        )
-
-    def plot_results(
+    def plot_bias_and_variance(
         self,
-        run_id: str | None = None,
+        results: pd.DataFrame,
         *,
-        max_plots: int = 12,
-        max_axis_range: float | None = 1000000.0,
-        input_index: int = 0,
-        output_index: int = 0,
-        settings: Mapping[str, Mapping[str, object]] | None = None,
-    ) -> tuple[Axes, ...]:
-        """Plot prediction comparisons and bias/variance for a run's groups.
+        output: OutputSelector,
+        plot_kind: PlotKind = 'components',
+        plot_settings: Mapping[str, object] | None = None,
+        group_settings: Mapping[int, Mapping[str, object]] | None = None,
+        max_plots: int | None = None,
+    ) -> tuple[GroupPlotResult, ...]:
+        """Plot one explicitly selected output for every result group.
 
-        Deprecated: use get_bias_variance_summary() and plot_summary() for the
-        supported run-summary workflow.
+        ``components`` preserves test-point or model order in two aligned
+        panels: prediction means with standard-deviation bars, followed by
+        squared bias/MSE and variance. ``error_relationship`` instead places
+        squared bias or MSE on the x-axis in one diagnostic panel. Pointwise
+        standard deviations describe variation across models at one point;
+        averaging standard deviations describe one model's predictions across
+        its test observations.
 
-        The forthcoming result table must be exposed through
-        'ResultStore.get_group_plot_results(group_id)'. That query should
-        resolve method-specific database values into plot-ready rows. For a
-        pointwise row, 'x' is a test input and 'actual' is its true output.
-        For an averaging row, 'x' is a model R2 score and 'actual' is that
-        model's test-set sample mean. Every row also supplies
-        'prediction_mean', squared 'bias', and prediction 'variance'.
-
-        'max_plots' limits plotted groups, with two Axes returned per group.
-        Groups whose selected values exceed 'max_axis_range' are skipped.
+        The supplied DataFrame is not cached or mutated. One independent
+        figure is returned per group, and Matplotlib display is left to the
+        caller.
         """
-        warn(
-            'plot_results() is deprecated; use get_bias_variance_summary() '
-            'and plot_summary().',
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if not isinstance(max_plots, int) or isinstance(max_plots, bool):
-            raise TypeError('max_plots must be an integer.')
-        if max_plots <= 0:
-            raise ValueError('max_plots must be positive.')
-        if max_axis_range is not None and max_axis_range <= 0:
-            raise ValueError('max_axis_range must be positive or None.')
-        for name, index in (
-            ('input_index', input_index),
-            ('output_index', output_index),
-        ):
-            if not isinstance(index, int) or isinstance(index, bool):
-                raise TypeError(f'{name} must be an integer.')
-            if index < 0:
-                raise ValueError(f'{name} must be non-negative.')
-        if settings is not None and not isinstance(settings, Mapping):
-            raise TypeError('settings must be a mapping or None.')
-
-        resolved_settings = settings or {}
-        axes: list[Axes] = []
-        plotted_groups = 0
-
-        # Maintain result store lifecyle within method call
-        with ResultStore(self.db_path, timeout=self.db_timeout) as store:
-            store.create_tables()
-
-            if run_id is None:
-                run_id = store.get_recent_run()
-
-            elif not store.does_run_exist(run_id):
-                raise ValueError(f'Run does not exist: {run_id}.')
-
-            if run_id is None:
-                raise ValueError(
-                    'No runs performed. Call run_studies() to get run.'
-                )
-
-            get_plot_results = getattr(
-                store,
-                'get_group_plot_results',
-                None,
+        if plot_kind not in {'components', 'error_relationship'}:
+            raise ValueError(
+                "plot_kind must be 'components' or 'error_relationship'."
             )
-            if get_plot_results is None:
-                raise NotImplementedError(
-                    'ResultStore.get_group_plot_results(group_id) must be '
-                    'implemented before run plots can be loaded.'
+        if plot_settings is not None and not isinstance(plot_settings, Mapping):
+            raise TypeError('plot_settings must be a mapping or None.')
+        if group_settings is not None and not isinstance(group_settings, Mapping):
+            raise TypeError('group_settings must be a mapping or None.')
+        if max_plots is not None:
+            if not isinstance(max_plots, int) or isinstance(max_plots, bool):
+                raise TypeError('max_plots must be an integer or None.')
+            if max_plots <= 0:
+                raise ValueError('max_plots must be positive.')
+
+        selected = self._select_plot_output(results, output)
+        run_ids = selected['run_id'].drop_duplicates()
+        if len(run_ids) != 1:
+            raise ValueError('Results must contain exactly one run_id.')
+
+        settings = dict(plot_settings or {})
+        overrides_by_group = group_settings or {}
+        plots: list[GroupPlotResult] = []
+        grouped = selected.groupby(
+            ['study_id', 'group_id'],
+            sort=False,
+            dropna=False,
+        )
+        for (_, group_id), group_data in grouped:
+            if max_plots is not None and len(plots) >= max_plots:
+                break
+            group_id = int(group_id)
+            overrides = overrides_by_group.get(group_id, {})
+            if not isinstance(overrides, Mapping):
+                raise TypeError(
+                    f'group_settings[{group_id}] must be a mapping.'
+                )
+            resolved = self._merged_plot_settings(settings, overrides)
+            group_data = group_data.copy()
+            group_data['record_index'] = pd.to_numeric(
+                group_data['record_index'], errors='raise'
+            )
+            if (
+                not np.isfinite(group_data['record_index']).all()
+                or (group_data['record_index'] < 0).any()
+                or (group_data['record_index'] % 1 != 0).any()
+            ):
+                raise ValueError(
+                    f'Group {group_id} has invalid record_index values.'
+                )
+            group_data = group_data.sort_values('record_index')
+
+            metadata_columns = (
+                'study_id',
+                'group_name',
+                'evaluation_method',
+                'output_index',
+                'output_name',
+            )
+            for column in metadata_columns:
+                if group_data[column].nunique(dropna=False) != 1:
+                    raise ValueError(
+                        f'Group {group_id} has inconsistent {column} values.'
+                    )
+            if group_data['record_index'].duplicated().any():
+                raise ValueError(
+                    f'Group {group_id} has duplicate record_index values.'
                 )
 
-            # Iterate through the studies and groups, plotting each group's results
-            for study_id in store.get_studies(run_id):
-                for group_id in store.get_groups(study_id):
-                    if plotted_groups >= max_plots:
-                        break
+            try:
+                method = EvaluationMethod(
+                    str(group_data.iloc[0]['evaluation_method'])
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    'Unsupported evaluation method for group '
+                    f'{group_id}: '
+                    f'{group_data.iloc[0]["evaluation_method"]!r}.'
+                ) from exc
 
-                    # Prepare the group plot data and skip if empty or extreme
-                    group_data = self._prepare_group_plot_data(
-                        get_plot_results(group_id),
-                        input_index=input_index,
-                        output_index=output_index,
-                    )
-                    if group_data.empty or self._has_extreme_plot_range(
-                        group_data,
-                        max_axis_range,
-                    ):
-                        continue
+            numeric_columns = (
+                'mean_prediction',
+                'prediction_variance',
+                'prediction_std',
+            )
+            for column in numeric_columns:
+                group_data[column] = pd.to_numeric(
+                    group_data[column], errors='raise'
+                )
+            if not np.isfinite(group_data[list(numeric_columns)]).all().all():
+                raise ValueError(
+                    f'Group {group_id} contains non-finite plot values.'
+                )
+            if (
+                (group_data['prediction_variance'] < 0).any()
+                or (group_data['prediction_std'] < 0).any()
+            ):
+                raise ValueError(
+                    f'Group {group_id} contains negative prediction spread.'
+                )
 
-                    # Resolve the group name and evaluation method for plot titles
-                    group_name = (
-                        str(group_data['group_name'].iloc[0])
-                        if 'group_name' in group_data
-                        else f'Group {group_id}'
-                    )
-                    evaluation_method = (
-                        str(group_data['evaluation_method'].iloc[0])
-                        if 'evaluation_method' in group_data
-                        else store.get_method(group_id)
-                    )
+            if method is EvaluationMethod.POINTWISE:
+                x_positions = pd.to_numeric(
+                    group_data['test_set_position'], errors='raise'
+                ).to_numpy(dtype=float)
+                actual_values = pd.to_numeric(
+                    group_data['actual_value'], errors='raise'
+                ).to_numpy(dtype=float)
+                primary_column = 'squared_bias'
+                primary_label = 'Squared bias'
+                variance_label = 'Pointwise model variance'
+                x_label = 'Test-set position'
+            else:
+                x_positions = (
+                    group_data['record_index'].to_numpy(dtype=float) + 1
+                )
+                actual_values = None
+                primary_column = 'mse'
+                primary_label = 'Model MSE'
+                variance_label = 'Within-model prediction variance'
+                x_label = 'Model number'
 
-                    # Set up scatter plot settings and plot the prediction comparison
-                    comparison_settings = dict(
-                        resolved_settings.get('comparison', {})
-                    )
-                    comparison_settings.setdefault(
-                        'title',
-                        f'{group_name} ({evaluation_method})',
-                    )
-                    comparison_settings.setdefault(
-                        'xlabel',
-                        'R2 score'
-                        if evaluation_method == EvaluationMethod.AVERAGING.value
-                        else 'Test input',
-                    )
-                    comparison_ax = plot_prediction_comparison(
-                        group_data['x'],
-                        group_data['actual'],
-                        group_data['prediction_mean'],
-                        np.sqrt(group_data['variance']),
-                        settings=comparison_settings,
-                    )
+            primary_values = pd.to_numeric(
+                group_data[primary_column], errors='raise'
+            ).to_numpy(dtype=float)
+            if (
+                not np.isfinite(primary_values).all()
+                or (primary_values < 0).any()
+            ):
+                raise ValueError(
+                    f'Group {group_id} contains invalid {primary_column} values.'
+                )
 
-                    # Set up bar plot settings and plot the bias/variance bar chart
-                    bar_settings = dict(
-                        resolved_settings.get('bias_variance', {})
-                    )
-                    bar_settings.setdefault(
-                        'title',
-                        f'{group_name}: Mean Bias and Variance',
-                    )
-                    bar_ax = plot_bias_variance(
-                        (group_name,),
-                        (float(group_data['bias'].mean()),),
-                        (float(group_data['variance'].mean()),),
-                        settings=bar_settings,
-                    )
-                    axes.extend((comparison_ax, bar_ax))
-                    plotted_groups += 1
+            method_name = method.value.upper()
+            group_name = str(group_data.iloc[0]['group_name'])
+            output_index = int(group_data.iloc[0]['output_index'])
+            output_name = str(group_data.iloc[0]['output_name'])
+            title = str(
+                resolved.get('title', f'{method_name}: {group_name}')
+            )
+            output_label = f'{output_name} [{output_index}]'
+            prediction_settings = dict(resolved['prediction'])
+            prediction_settings.setdefault('ylabel', output_label)
 
-                if plotted_groups >= max_plots:
-                    break
+            if plot_kind == 'components':
+                figure, axes = plt.subplots(
+                    2,
+                    1,
+                    figsize=resolved.get('figsize', (10, 8)),
+                    sharex=True,
+                    gridspec_kw={
+                        'height_ratios': resolved.get(
+                            'height_ratios', (2, 1)
+                        )
+                    },
+                )
+                prediction_axes, metric_axes = axes
+                prediction_settings.setdefault('title', 'Prediction summary')
+                prediction_settings.setdefault('xlabel', '')
+                plot_prediction_distribution(
+                    x_positions,
+                    group_data['mean_prediction'],
+                    group_data['prediction_std'],
+                    prediction_settings,
+                    actual_values=actual_values,
+                    ax=prediction_axes,
+                )
 
-        return tuple(axes)
+                metric_settings = dict(resolved['metrics'])
+                metric_settings.setdefault('title', 'Error components')
+                metric_settings.setdefault('xlabel', x_label)
+                metric_settings.setdefault(
+                    'ylabel', f'Squared {output_label}'
+                )
+                metric_settings.setdefault('primary_label', primary_label)
+                metric_settings.setdefault('variance_label', variance_label)
+                plot_error_components(
+                    x_positions,
+                    primary_values,
+                    group_data['prediction_variance'],
+                    metric_settings,
+                    ax=metric_axes,
+                )
+            else:
+                figure, prediction_axes = plt.subplots(
+                    figsize=resolved.get('figsize', (10, 6))
+                )
+                metric_axes = None
+                prediction_settings.setdefault('title', '')
+                prediction_settings.setdefault(
+                    'xlabel',
+                    'Squared bias' if method is EvaluationMethod.POINTWISE
+                    else 'Model MSE',
+                )
+                plot_prediction_distribution(
+                    primary_values,
+                    group_data['mean_prediction'],
+                    group_data['prediction_std'],
+                    prediction_settings,
+                    actual_values=actual_values,
+                    ax=prediction_axes,
+                )
+
+            figure.suptitle(title)
+            figure.tight_layout(rect=(0, 0, 1, 0.96))
+            plots.append(
+                GroupPlotResult(
+                    run_id=str(run_ids.iloc[0]),
+                    study_id=int(group_data.iloc[0]['study_id']),
+                    group_id=group_id,
+                    group_name=group_name,
+                    evaluation_method=method.value,
+                    output_index=output_index,
+                    output_name=output_name,
+                    figure=figure,
+                    prediction_axes=prediction_axes,
+                    metric_axes=metric_axes,
+                )
+            )
+
+        if not plots:
+            raise ValueError('Results contain no groups for the selected output.')
+        return tuple(plots)
