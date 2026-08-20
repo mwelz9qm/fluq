@@ -85,6 +85,15 @@ class TestPointResult:
     mean: tuple[float, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class StoredResultGroup:
+    study_id: int
+    study_name: str
+    evaluation_method: str
+    group_id: int
+    group_name: str
+
+
 class ResultStore:
     """Provide the SQLite operations required by an analysis run.
 
@@ -381,6 +390,47 @@ class ResultStore:
                         row[RunTable.BASE_ARCHITECTURE.name]
                     )
                 ),
+            )
+            for row in cur.fetchall()
+        )
+
+    def get_run(self, run_id: str) -> StoredRun | None:
+        """Return one fully decoded run, or ``None`` when it does not exist."""
+        return next(
+            (run for run in self.get_runs() if run.run_id == run_id),
+            None,
+        )
+
+    def get_run_groups(self, run_id: str) -> tuple[StoredResultGroup, ...]:
+        """Return the studies and groups belonging to a run in stable order."""
+        cur = self._connection.cursor()
+        cur.execute(
+            f'''
+            SELECT
+                s.{StudyTable.STUDY_ID.name},
+                s.{StudyTable.STUDY_NAME.name},
+                s.{StudyTable.EVALUATION_METHOD.name},
+                g.{GroupTable.GROUP_ID.name},
+                g.{GroupTable.GROUP_NAME.name}
+            FROM {StudyTable.TABLE_NAME} AS s
+            INNER JOIN {GroupTable.TABLE_NAME} AS g
+                ON g.{GroupTable.STUDY_ID.name} = s.{StudyTable.STUDY_ID.name}
+            WHERE s.{StudyTable.RUN_ID.name} = ?
+            ORDER BY s.{StudyTable.STUDY_ID.name},
+                     g.{GroupTable.GROUP_ID.name}
+            ''',
+            (run_id,),
+        )
+
+        return tuple(
+            StoredResultGroup(
+                study_id=int(row[StudyTable.STUDY_ID.name]),
+                study_name=str(row[StudyTable.STUDY_NAME.name]),
+                evaluation_method=str(
+                    row[StudyTable.EVALUATION_METHOD.name]
+                ),
+                group_id=int(row[GroupTable.GROUP_ID.name]),
+                group_name=str(row[GroupTable.GROUP_NAME.name]),
             )
             for row in cur.fetchall()
         )
