@@ -15,6 +15,7 @@ import pytest
 from matplotlib.axes import Axes
 
 from bias_variance.analyzer import BiasAnalyzer
+from bias_variance.models.evaluation import EvaluationMethod
 from bias_variance.persistence.records import (
     EvaluationRecord,
     GroupRecord,
@@ -27,6 +28,7 @@ from bias_variance.persistence.store import ResultStore
 from bias_variance.plotting import (
     plot_bias_and_variance,
     plot_error_components,
+    plot_summary,
 )
 
 
@@ -154,6 +156,23 @@ def test_error_component_helper_plots_metrics_and_their_means() -> None:
         'Squared bias',
         'Prediction variance',
     ]
+
+
+def test_summary_helper_plots_paired_aggregate_bars() -> None:
+    ax = plot_summary(
+        ('Model', 'Sampling'),
+        (0.25, 0.5),
+        (0.1, 0.2),
+        {'title': 'Summary', 'bar_width': 0.3},
+        primary_label='Mean squared bias',
+        variance_label='Mean pointwise model variance',
+    )
+
+    assert isinstance(ax, Axes)
+    assert ax.get_title() == 'Summary'
+    assert [patch.get_height() for patch in ax.patches] == pytest.approx(
+        [0.25, 0.5, 0.1, 0.2]
+    )
 
 
 def test_prepare_plot_data_expands_records_and_outputs(tmp_path: Path) -> None:
@@ -297,6 +316,54 @@ def test_error_relationship_uses_error_metric_on_x_axis(tmp_path: Path) -> None:
     np.testing.assert_allclose(
         plots[0].prediction_axes.lines[0].get_xdata(),
         (0.25, 1.0),
+    )
+
+
+def test_summary_aggregates_all_groups_and_outputs(tmp_path: Path) -> None:
+    _create_plot_database(tmp_path / 'results.sqlite3')
+    analyzer = BiasAnalyzer(tmp_path / 'results.sqlite3').select_run(RUN_ID)
+    results = analyzer.get_bias_variance_plot_data()
+
+    axes = analyzer.plot_summary(results)
+
+    pointwise = axes[EvaluationMethod.POINTWISE]
+    averaging = axes[EvaluationMethod.AVERAGING]
+    assert pointwise.get_title() == 'POINTWISE Summary — All outputs'
+    assert averaging.get_title() == 'AVERAGING Summary — All outputs'
+    assert [patch.get_height() for patch in pointwise.patches] == pytest.approx(
+        [0.625, 0.135]
+    )
+    assert [patch.get_height() for patch in averaging.patches] == pytest.approx(
+        [1.5625, 0.7625]
+    )
+    assert [text.get_text() for text in averaging.get_legend().texts] == [
+        'Mean model MSE (total-error proxy)',
+        'Mean within-model prediction variance',
+    ]
+
+
+def test_summary_can_select_one_output_and_override_settings(
+    tmp_path: Path,
+) -> None:
+    _create_plot_database(tmp_path / 'results.sqlite3')
+    analyzer = BiasAnalyzer(tmp_path / 'results.sqlite3').select_run(RUN_ID)
+    results = analyzer.get_bias_variance_plot_data()
+
+    axes = analyzer.plot_summary(
+        results,
+        output='z',
+        plot_settings={'pointwise': {'title': 'Selected output'}},
+    )
+
+    pointwise = axes[EvaluationMethod.POINTWISE]
+    averaging = axes[EvaluationMethod.AVERAGING]
+    assert pointwise.get_title() == 'Selected output'
+    assert averaging.get_title() == 'AVERAGING Summary — z [1]'
+    assert [patch.get_height() for patch in pointwise.patches] == pytest.approx(
+        [0.625, 0.17]
+    )
+    assert [patch.get_height() for patch in averaging.patches] == pytest.approx(
+        [2.5, 1.22]
     )
 
 
