@@ -48,6 +48,9 @@ from bias_variance.plotting import (
 from bias_variance.plotting import (
     plot_error_components,
 )
+from bias_variance.plotting import (
+    plot_summary as plot_summary_bars,
+)
 
 type OutputSelector = int | str
 type PlotKind = Literal['components', 'error_relationship']
@@ -1061,3 +1064,156 @@ class BiasAnalyzer:
         if not plots:
             raise ValueError('Results contain no groups for the selected output.')
         return tuple(plots)
+
+    def plot_summary(
+        self,
+        results: pd.DataFrame,
+        *,
+        output: OutputSelector | None = None,
+        plot_settings: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> dict[EvaluationMethod, Axes]:
+        """Plot equal-weighted study summaries from tidy prepared results.
+
+        With ``output=None``, every group/output combination receives equal
+        weight. Selecting an output by index or name instead aggregates that
+        output across the groups in each study. Pointwise and averaging
+        results use separate axes because MSE is a total-error proxy rather
+        than a direct squared-bias estimate.
+        """
+        if plot_settings is not None and not isinstance(plot_settings, Mapping):
+            raise TypeError('plot_settings must be a mapping or None.')
+
+        if output is None:
+            if not isinstance(results, pd.DataFrame):
+                raise TypeError('results must be a pandas DataFrame.')
+            missing = set(self._PLOT_DATA_COLUMNS) - set(results.columns)
+            if missing:
+                raise ValueError(
+                    f'Results are missing required columns: {sorted(missing)}.'
+                )
+            if results.empty:
+                raise ValueError('Results must not be empty.')
+            outputs = results[
+                ['output_index', 'output_name']
+            ].drop_duplicates()
+            names_per_index = outputs.groupby(
+                'output_index'
+            )['output_name'].nunique()
+            if (names_per_index != 1).any():
+                raise ValueError(
+                    'Each output_index must identify exactly one output_name.'
+                )
+            selected = results.copy()
+            output_description = 'All outputs'
+        else:
+            selected = self._select_plot_output(results, output)
+            output_index = int(selected.iloc[0]['output_index'])
+            output_name = str(selected.iloc[0]['output_name'])
+            output_description = f'{output_name} [{output_index}]'
+
+        run_ids = selected['run_id'].drop_duplicates()
+        if len(run_ids) != 1:
+            raise ValueError('Results must contain exactly one run_id.')
+
+        unknown_methods = set(selected['evaluation_method']) - {
+            method.value for method in EvaluationMethod
+        }
+        if unknown_methods:
+            raise ValueError(
+                'Results contain unsupported evaluation methods: '
+                f'{sorted(unknown_methods)}.'
+            )
+
+        resolved_settings = plot_settings or {}
+        axes: dict[EvaluationMethod, Axes] = {}
+        for method in EvaluationMethod:
+            method_rows = selected.loc[
+                selected['evaluation_method'] == method.value
+            ].copy()
+            if method_rows.empty:
+                continue
+
+            primary_column = (
+                'squared_bias'
+                if method is EvaluationMethod.POINTWISE
+                else 'mse'
+            )
+            for column in (primary_column, 'prediction_variance'):
+                method_rows[column] = pd.to_numeric(
+                    method_rows[column], errors='raise'
+                )
+            metric_values = method_rows[
+                [primary_column, 'prediction_variance']
+            ]
+            if (
+                not np.isfinite(metric_values).all().all()
+                or (metric_values < 0).any().any()
+            ):
+                raise ValueError(
+                    f'{method.value} summary values must be finite and '
+                    'non-negative.'
+                )
+
+            expected_outputs = method_rows['output_index'].nunique()
+            outputs_per_group = method_rows.groupby(
+                ['study_id', 'group_id'], sort=False
+            )['output_index'].nunique()
+            if (outputs_per_group != expected_outputs).any():
+                raise ValueError(
+                    f'{method.value} groups contain inconsistent outputs.'
+                )
+
+            group_output_means = (
+                method_rows.groupby(
+                    [
+                        'study_id',
+                        'study_name',
+                        'group_id',
+                        'output_index',
+                    ],
+                    sort=False,
+                )[[primary_column, 'prediction_variance']]
+                .mean()
+                .reset_index()
+            )
+            study_means = (
+                group_output_means.groupby(
+                    ['study_id', 'study_name'], sort=False
+                )[[primary_column, 'prediction_variance']]
+                .mean()
+            )
+
+            method_settings = resolved_settings.get(method.value, {})
+            if not isinstance(method_settings, Mapping):
+                raise TypeError(
+                    f'plot_settings[{method.value!r}] must be a mapping.'
+                )
+            method_settings = dict(method_settings)
+            method_settings.setdefault(
+                'title',
+                f'{method.value.upper()} Summary — {output_description}',
+            )
+            labels = tuple(
+                str(study_name).title()
+                for _, study_name in study_means.index
+            )
+            axes[method] = plot_summary_bars(
+                labels,
+                study_means[primary_column],
+                study_means['prediction_variance'],
+                method_settings,
+                primary_label=(
+                    'Mean squared bias'
+                    if method is EvaluationMethod.POINTWISE
+                    else 'Mean model MSE (total-error proxy)'
+                ),
+                variance_label=(
+                    'Mean pointwise model variance'
+                    if method is EvaluationMethod.POINTWISE
+                    else 'Mean within-model prediction variance'
+                ),
+            )
+
+        if not axes:
+            raise ValueError('Results contain no supported evaluation methods.')
+        return axes
