@@ -44,6 +44,8 @@ from bias_variance.persistence.store import ResultStore, StoredRun
 from bias_variance.plotting import (
     plot_bias_variance,
     plot_prediction_comparison,
+)
+from bias_variance.plotting import (
     plot_summary as plot_summary_bars,
 )
 
@@ -71,6 +73,56 @@ class BiasAnalyzer:
     ) -> None:
         self.db_path = Path(db_path).expanduser().resolve()
         self.db_timeout = db_timeout
+        self._selected_run_id: str | None = None
+
+    @property
+    def selected_run_id(self) -> str | None:
+        return self._selected_run_id
+
+    def _require_selected_run(self, store: ResultStore) -> str:
+        if self._selected_run_id is None:
+            raise RuntimeError(
+                'No run is selected. Call run_studies() or select_run(run_id).'
+            )
+
+        if not store.does_run_exist(self._selected_run_id):
+            raise RuntimeError(
+                f'Selected run no longer exists: {self._selected_run_id}.'
+            )
+
+        return self._selected_run_id
+
+    def select_run(self, run_id: str) -> Self:
+        if not isinstance(run_id, str):
+            raise TypeError(
+                'run_id must be a string.'
+            )
+        if not run_id:
+            raise ValueError(
+                'run_id must not be empty.'
+            )
+
+        with ResultStore(self.db_path, timeout=self.db_timeout) as store:
+            store.create_tables()
+            if not store.does_run_exist(run_id):
+                raise ValueError(
+                    f'Run does not exist: {run_id}. '
+                    'Call get_run_history() to view available runs.'
+                )
+
+        self._selected_run_id = run_id
+        return self
+
+    def get_run_history(self) -> pd.DataFrame:
+        """Return all persisted runs as a newest-first DataFrame."""
+        with ResultStore(self.db_path, timeout=self.db_timeout) as store:
+            store.create_tables()
+            runs = store.get_runs()
+
+        return pd.DataFrame.from_records(
+            (asdict(run) for run in runs),
+            columns=tuple(field.name for field in fields(StoredRun)),
+        )
 
     @staticmethod
     def _create_split_and_architecture(
@@ -382,27 +434,14 @@ class BiasAnalyzer:
                         store
                     )
 
+        self._selected_run_id = run_id
+
         return self
 
-    def decompose_bias_and_variance(
-        self,
-        run_id: str | None = None
-    ) -> pd.DataFrame:
+    def decompose_bias_and_variance(self) -> pd.DataFrame:
         with ResultStore(self.db_path, timeout=self.db_timeout) as store:
             store.create_tables()
-
-            if run_id is None:
-                run_id = store.get_recent_run()
-            
-            elif not store.does_run_exist(run_id):
-                raise ValueError(
-                    f'Run does not exist: {run_id}.'
-                )
-
-            if run_id is None:
-                raise ValueError(
-                    'No runs performed. Call run_studies() to get run.'
-                )
+            run_id = self._require_selected_run(store)
 
             result_rows = store.get_bias_variance_results(run_id)
             if not result_rows:
@@ -463,17 +502,6 @@ class BiasAnalyzer:
             )
 
         return results
-
-    def get_run_history(self) -> pd.DataFrame:
-        """Return all persisted runs as a newest-first DataFrame."""
-        with ResultStore(self.db_path, timeout=self.db_timeout) as store:
-            store.create_tables()
-            runs = store.get_runs()
-
-        return pd.DataFrame.from_records(
-            (asdict(run) for run in runs),
-            columns=tuple(field.name for field in fields(StoredRun)),
-        )
 
     def get_bias_variance_summary(
         self,
