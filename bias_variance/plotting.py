@@ -1,6 +1,6 @@
 """Matplotlib helpers for prepared bias/variance result data."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -200,4 +200,82 @@ def plot_error_components(
     )
     if bool(settings.get('legend', True)):
         resolved_ax.legend()
+    return resolved_ax
+
+
+def plot_summary(
+    labels: Sequence[object],
+    primary_metric_values: ArrayLike,
+    variance_values: ArrayLike,
+    plot_settings: Mapping[str, object] | None = None,
+    *,
+    primary_label: str,
+    variance_label: str,
+    ax: Axes | None = None,
+) -> Axes:
+    """Plot paired aggregate error and variance bars for named studies."""
+    if plot_settings is not None and not isinstance(plot_settings, Mapping):
+        raise TypeError('plot_settings must be a mapping or None.')
+    settings = plot_settings or {}
+    label_values = tuple(str(label) for label in labels)
+    if not label_values:
+        raise ValueError('labels must not be empty.')
+
+    arrays = _matching_numeric_arrays(
+        {
+            'primary_metric_values': primary_metric_values,
+            'variance_values': variance_values,
+        }
+    )
+    primary = arrays['primary_metric_values']
+    variance = arrays['variance_values']
+    if len(label_values) != len(primary):
+        raise ValueError(
+            'labels, primary_metric_values, and variance_values must have '
+            'matching lengths.'
+        )
+    if (primary < 0).any() or (variance < 0).any():
+        raise ValueError(
+            'primary_metric_values and variance_values must be non-negative.'
+        )
+
+    resolved_ax = _resolve_axes(ax, settings)
+    positions = np.arange(len(label_values))
+    width = float(settings.get('bar_width', 0.4))
+    if not 0 < width <= 1:
+        raise ValueError('bar_width must be greater than zero and at most one.')
+
+    resolved_ax.bar(
+        positions - width / 2,
+        primary,
+        width,
+        color=settings.get('primary_color', 'tab:orange'),
+        label=primary_label,
+    )
+    resolved_ax.bar(
+        positions + width / 2,
+        variance,
+        width,
+        color=settings.get('variance_color', 'tab:blue'),
+        label=variance_label,
+    )
+    resolved_ax.set_xticks(positions, label_values)
+    resolved_ax.set_title(str(settings.get('title', 'Bias/Variance Summary')))
+    resolved_ax.set_xlabel(str(settings.get('xlabel', 'Study')))
+    resolved_ax.set_ylabel(
+        str(settings.get('ylabel', 'Mean squared output value'))
+    )
+    resolved_ax.set_yscale(str(settings.get('yscale', 'linear')))
+    resolved_ax.grid(
+        bool(settings.get('grid', True)),
+        axis='y',
+        alpha=float(settings.get('grid_alpha', 0.25)),
+    )
+    if bool(settings.get('legend', True)):
+        resolved_ax.legend()
+    if 'tick_rotation' in settings:
+        resolved_ax.tick_params(
+            axis='x',
+            labelrotation=float(settings['tick_rotation']),
+        )
     return resolved_ax
