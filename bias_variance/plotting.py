@@ -1,14 +1,15 @@
-"""Generic plotting utilities for bias and variance results."""
+"""Matplotlib helpers for prepared bias/variance result data."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.axes import Axes
+from numpy.typing import ArrayLike
 
 
-def _numeric_1d(values, *, name: str) -> np.ndarray:
-    # Return finite numeric values as a non-empty one-dimensional array.
+def _numeric_1d(values: ArrayLike, *, name: str) -> np.ndarray:
+    """Return a nonempty, finite, one-dimensional float array."""
     try:
         array = np.asarray(values, dtype=float)
     except (TypeError, ValueError) as exc:
@@ -20,13 +21,25 @@ def _numeric_1d(values, *, name: str) -> np.ndarray:
         raise ValueError(f'{name} must not be empty.')
     if not np.isfinite(array).all():
         raise ValueError(f'{name} must contain only finite values.')
-
     return array
+
+
+def _matching_numeric_arrays(
+    values: Mapping[str, ArrayLike],
+) -> dict[str, np.ndarray]:
+    arrays = {
+        name: _numeric_1d(value, name=name)
+        for name, value in values.items()
+    }
+    if len({len(array) for array in arrays.values()}) != 1:
+        names = ', '.join(values)
+        raise ValueError(f'{names} must have matching lengths.')
+    return arrays
 
 
 def _resolve_axes(
     ax: Axes | None,
-    settings: Mapping[str, object],
+    plot_settings: Mapping[str, object],
 ) -> Axes:
     if ax is not None:
         if not isinstance(ax, Axes):
@@ -34,180 +47,157 @@ def _resolve_axes(
         return ax
 
     _, resolved_ax = plt.subplots(
-        figsize=settings.get('figsize', (10, 6)),
+        figsize=plot_settings.get('figsize', (10, 6)),
     )
     return resolved_ax
 
 
-def plot_prediction_comparison(
-    x,
-    actual,
-    prediction_mean,
-    prediction_error,
+def plot_bias_and_variance(
+    x_values: ArrayLike,
+    y_values: ArrayLike,
+    y_error_bar_values: ArrayLike,
+    plot_settings: Mapping[str, object] | None = None,
     *,
+    actual_values: ArrayLike | None = None,
     ax: Axes | None = None,
-    settings: Mapping[str, object] | None = None,
 ) -> Axes:
-    """
-    Plot paired actual and mean-prediction values with error bars.
+    """Plot mean predictions with standard-deviation error bars.
 
-    'prediction_error' contains magnitudes, such as prediction standard
-    deviations.  This function deliberately does not calculate them so it can
-    visualize either standard deviations or standard errors.
+    ``actual_values`` is optional because pointwise results have a shared
+    actual value at each position, while averaging results summarize models
+    evaluated over sets of observations.
     """
-    resolved_settings = settings or {}
-    x_values = _numeric_1d(x, name='x')
-    actual_values = _numeric_1d(actual, name='actual')
-    mean_values = _numeric_1d(prediction_mean, name='prediction_mean')
-    error_values = _numeric_1d(prediction_error, name='prediction_error')
-
-    lengths = {
-        len(x_values),
-        len(actual_values),
-        len(mean_values),
-        len(error_values),
+    if plot_settings is not None and not isinstance(plot_settings, Mapping):
+        raise TypeError('plot_settings must be a mapping or None.')
+    settings = plot_settings or {}
+    inputs: dict[str, ArrayLike] = {
+        'x_values': x_values,
+        'y_values': y_values,
+        'y_error_bar_values': y_error_bar_values,
     }
-    if len(lengths) != 1:
+    if actual_values is not None:
+        inputs['actual_values'] = actual_values
+    arrays = _matching_numeric_arrays(inputs)
+
+    errors = arrays['y_error_bar_values']
+    if (errors < 0).any():
         raise ValueError(
-            'x, actual, prediction_mean, and prediction_error must have '
-            'matching lengths.'
+            'y_error_bar_values must contain non-negative values.'
         )
-    if (error_values < 0).any():
-        raise ValueError('prediction_error must contain non-negative values.')
 
-    resolved_ax = _resolve_axes(ax, resolved_settings)
-    resolved_ax.scatter(
-        x_values,
-        actual_values,
-        label=resolved_settings.get('actual_label', 'Actual'),
-        marker=resolved_settings.get('actual_marker', 'x'),
-        color=resolved_settings.get('actual_color', 'black'),
-        alpha=resolved_settings.get('alpha', 0.8),
-    )
+    resolved_ax = _resolve_axes(ax, settings)
+    if actual_values is not None:
+        resolved_ax.plot(
+            arrays['x_values'],
+            arrays['actual_values'],
+            marker=settings.get('actual_marker', 'x'),
+            linestyle=settings.get('actual_linestyle', '-'),
+            color=settings.get('actual_color', 'black'),
+            alpha=float(settings.get('actual_alpha', 0.8)),
+            label=str(settings.get('actual_label', 'Actual')),
+        )
+
     resolved_ax.errorbar(
-        x_values,
-        mean_values,
-        yerr=error_values,
-        fmt=resolved_settings.get('prediction_marker', 'o'),
-        color=resolved_settings.get('prediction_color', 'tab:blue'),
-        ecolor=resolved_settings.get('error_color', 'tab:gray'),
-        capsize=resolved_settings.get('capsize', 4),
-        markersize=resolved_settings.get('markersize', 4.75),
-        alpha=resolved_settings.get('alpha', 0.5),
-        label=resolved_settings.get('prediction_label', 'Mean prediction'),
+        arrays['x_values'],
+        arrays['y_values'],
+        yerr=errors,
+        fmt=str(settings.get('marker', 'o')),
+        linestyle=str(settings.get('linestyle', 'none')),
+        color=settings.get('color', 'tab:blue'),
+        ecolor=settings.get('error_color', 'tab:gray'),
+        capsize=float(settings.get('capsize', 4)),
+        markersize=float(settings.get('markersize', 5)),
+        alpha=float(settings.get('alpha', 0.75)),
+        label=str(
+            settings.get(
+                'label',
+                'Mean prediction ± prediction SD',
+            )
+        ),
     )
-    resolved_ax.set_title(
-        str(resolved_settings.get('title', 'Actual and Mean Predictions'))
-    )
-    resolved_ax.set_xlabel(str(resolved_settings.get('xlabel', 'Input')))
-    resolved_ax.set_ylabel(str(resolved_settings.get('ylabel', 'Output')))
+    resolved_ax.set_title(str(settings.get('title', 'Prediction Summary')))
+    resolved_ax.set_xlabel(str(settings.get('xlabel', 'Record')))
+    resolved_ax.set_ylabel(str(settings.get('ylabel', 'Output value')))
+    resolved_ax.set_xscale(str(settings.get('xscale', 'linear')))
+    resolved_ax.set_yscale(str(settings.get('yscale', 'linear')))
     resolved_ax.grid(
-        bool(resolved_settings.get('grid', True)),
-        alpha=0.25,
+        bool(settings.get('grid', True)),
+        alpha=float(settings.get('grid_alpha', 0.25)),
     )
-    resolved_ax.legend()
-
+    if bool(settings.get('legend', True)):
+        resolved_ax.legend()
     return resolved_ax
 
 
-def plot_bias_variance(
-    labels: Sequence[object],
-    bias,
-    variance,
+def plot_error_components(
+    x_values: ArrayLike,
+    primary_error_values: ArrayLike,
+    variance_values: ArrayLike,
+    plot_settings: Mapping[str, object] | None = None,
     *,
     ax: Axes | None = None,
-    settings: Mapping[str, object] | None = None,
 ) -> Axes:
-    """Plot paired mean-squared-bias and prediction-variance bars."""
-    resolved_settings = dict(settings or {})
-    primary_label = str(
-        resolved_settings.pop('bias_label', 'Mean squared bias')
+    """Plot a primary error metric and variance against record position."""
+    if plot_settings is not None and not isinstance(plot_settings, Mapping):
+        raise TypeError('plot_settings must be a mapping or None.')
+    settings = plot_settings or {}
+    arrays = _matching_numeric_arrays(
+        {
+            'x_values': x_values,
+            'primary_error_values': primary_error_values,
+            'variance_values': variance_values,
+        }
     )
-    if 'bias_color' in resolved_settings:
-        resolved_settings['primary_color'] = resolved_settings.pop(
-            'bias_color'
+    primary = arrays['primary_error_values']
+    variance = arrays['variance_values']
+    if (primary < 0).any() or (variance < 0).any():
+        raise ValueError(
+            'primary_error_values and variance_values must be non-negative.'
         )
-    resolved_settings.setdefault('title', 'Bias and Variance')
-    resolved_settings.setdefault('xlabel', 'Group')
 
-    return plot_summary(
-        labels,
-        bias,
+    resolved_ax = _resolve_axes(ax, settings)
+    resolved_ax.plot(
+        arrays['x_values'],
+        primary,
+        marker=settings.get('primary_marker', 'o'),
+        linestyle=settings.get('primary_linestyle', '-'),
+        color=settings.get('primary_color', 'tab:orange'),
+        alpha=float(settings.get('alpha', 0.8)),
+        label=str(settings.get('primary_label', 'Squared bias')),
+    )
+    resolved_ax.plot(
+        arrays['x_values'],
         variance,
-        primary_label=primary_label,
-        ax=ax,
-        settings=resolved_settings,
+        marker=settings.get('variance_marker', 's'),
+        linestyle=settings.get('variance_linestyle', '-'),
+        color=settings.get('variance_color', 'tab:blue'),
+        alpha=float(settings.get('alpha', 0.8)),
+        label=str(settings.get('variance_label', 'Prediction variance')),
     )
 
-
-def plot_summary(
-    labels: Sequence[object],
-    primary_metric,
-    variance,
-    *,
-    primary_label: str,
-    ax: Axes | None = None,
-    settings: Mapping[str, object] | None = None,
-) -> Axes:
-    """Plot a grouped summary of one primary metric and variance."""
-    resolved_settings = settings or {}
-    label_values = tuple(str(label) for label in labels)
-    if not label_values:
-        raise ValueError('labels must not be empty.')
-
-    primary_values = _numeric_1d(primary_metric, name='primary_metric')
-    variance_values = _numeric_1d(variance, name='variance')
-    if len(label_values) != len(primary_values) or len(label_values) != len(
-        variance_values
-    ):
-        raise ValueError(
-            'labels, primary_metric, and variance must have matching lengths.'
+    if bool(settings.get('show_means', True)):
+        resolved_ax.axhline(
+            float(primary.mean()),
+            color=settings.get('primary_color', 'tab:orange'),
+            linestyle='--',
+            alpha=0.5,
         )
-    if (primary_values < 0).any() or (variance_values < 0).any():
-        raise ValueError(
-            'primary_metric and variance must contain non-negative values.'
+        resolved_ax.axhline(
+            float(variance.mean()),
+            color=settings.get('variance_color', 'tab:blue'),
+            linestyle='--',
+            alpha=0.5,
         )
 
-    resolved_ax = _resolve_axes(ax, resolved_settings)
-    positions = np.arange(len(label_values))
-    width = float(resolved_settings.get('bar_width', 0.4))
-    if width <= 0:
-        raise ValueError('bar_width must be positive.')
-
-    resolved_ax.bar(
-        positions - width / 2,
-        primary_values,
-        width,
-        label=primary_label,
-        color=resolved_settings.get('primary_color', 'tab:orange'),
-    )
-    resolved_ax.bar(
-        positions + width / 2,
-        variance_values,
-        width,
-        label=resolved_settings.get(
-            'variance_label',
-            'Mean prediction variance',
-        ),
-        color=resolved_settings.get('variance_color', 'tab:blue'),
-    )
-    resolved_ax.set_xticks(positions, label_values)
-    resolved_ax.set_title(
-        str(resolved_settings.get('title', f'{primary_label} and Variance'))
-    )
-    resolved_ax.set_xlabel(str(resolved_settings.get('xlabel', 'Study')))
-    resolved_ax.set_ylabel(str(resolved_settings.get('ylabel', 'Value')))
-    resolved_ax.set_yscale(str(resolved_settings.get('yscale', 'linear')))
+    resolved_ax.set_title(str(settings.get('title', 'Error Components')))
+    resolved_ax.set_xlabel(str(settings.get('xlabel', 'Record')))
+    resolved_ax.set_ylabel(str(settings.get('ylabel', 'Squared output value')))
+    resolved_ax.set_xscale(str(settings.get('xscale', 'linear')))
+    resolved_ax.set_yscale(str(settings.get('yscale', 'linear')))
     resolved_ax.grid(
-        bool(resolved_settings.get('grid', True)),
-        axis='y',
-        alpha=0.25,
+        bool(settings.get('grid', True)),
+        alpha=float(settings.get('grid_alpha', 0.25)),
     )
-    resolved_ax.legend()
-    if 'tick_rotation' in resolved_settings:
-        resolved_ax.tick_params(
-            axis='x',
-            labelrotation=float(resolved_settings['tick_rotation']),
-        )
-
+    if bool(settings.get('legend', True)):
+        resolved_ax.legend()
     return resolved_ax
