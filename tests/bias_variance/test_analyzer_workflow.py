@@ -67,7 +67,7 @@ def test_workflows_share_file_database_and_return_multioutput_results(
 
     repeated_results = analyzer.decompose_bias_and_variance()
     run_history = analyzer.get_run_history()
-    summary = analyzer.get_bias_variance_summary()
+    plot_data = analyzer.get_bias_variance_plot_data()
 
     with sqlite3.connect(analyzer.db_path) as connection:
         repeated_evaluation_count = connection.execute(
@@ -110,9 +110,9 @@ def test_workflows_share_file_database_and_return_multioutput_results(
     assert run_history.loc[0, 'test_metrics'] == ('mse',)
     assert run_history.loc[0, 'input_columns'] == ('x',)
     assert run_history.loc[0, 'output_columns'] == ('y', 'z')
-    assert set(summary['output_name']) == {'y', 'z'}
-    assert set(summary['metric_name']) == {'squared_bias', 'variance'}
-    assert len(summary) == 4
+    assert set(plot_data['output_name']) == {'y', 'z'}
+    assert set(plot_data['result_type']) == {'test_point'}
+    assert len(plot_data) == 4
 
 
 def test_get_run_history_returns_typed_empty_frame(tmp_path: Path) -> None:

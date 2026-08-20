@@ -1,5 +1,7 @@
-"""Tests for the current bias/variance plotting workflow."""
+"""Tests for tidy bias/variance plot preparation and rendering."""
 
+import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import matplotlib
@@ -12,507 +14,327 @@ import pandas as pd
 import pytest
 from matplotlib.axes import Axes
 
-import bias_variance.analyzer as analyzer_module
 from bias_variance.analyzer import BiasAnalyzer
-from bias_variance.models.evaluation import EvaluationMethod
+from bias_variance.persistence.records import (
+    EvaluationRecord,
+    GroupRecord,
+    ModelRecord,
+    RunRecord,
+    ScoreRecord,
+    StudyRecord,
+)
+from bias_variance.persistence.store import ResultStore
 from bias_variance.plotting import (
-    plot_bias_variance,
-    plot_prediction_comparison,
-    plot_summary,
+    plot_bias_and_variance,
+    plot_error_components,
 )
 
-POINTWISE_GROUP_ID = 11
-EXTREME_GROUP_ID = 12
-AVERAGING_GROUP_ID = 21
-RUN_ID = 'synthetic-run'
 
-def _pointwise_results(n_points: int = 60) -> pd.DataFrame:
-    """Build smooth, multi-output pointwise results."""
-    x = np.linspace(-3.0, 3.0, n_points)
-    second_input = x**2
-    actual = 0.45 * x**3 - 1.2 * x + 2.0
-    second_actual = 0.5 * actual + 1.0
-    mean_error = 0.18 * np.sin(2.0 * x)
-    prediction_mean = actual + mean_error
-    second_prediction_mean = second_actual - 0.5 * mean_error
-    variance = 0.04 + 0.025 * np.cos(x) ** 2
-    second_variance = 0.02 + 0.5 * variance
-
-    return pd.DataFrame(
-        {
-            'group_id': POINTWISE_GROUP_ID,
-            'group_name': 'shared test set',
-            # Each packed point contains (input vector, actual-output vector).
-            'test_points': list(
-                zip(
-                    zip(x, second_input, strict=True),
-                    zip(actual, second_actual, strict=True),
-                    strict=True,
-                )
-            ),
-            'prediction_mean': list(
-                zip(
-                    prediction_mean,
-                    second_prediction_mean,
-                    strict=True,
-                )
-            ),
-            'bias': list(
-                zip(
-                    mean_error**2,
-                    (-0.5 * mean_error) ** 2,
-                    strict=True,
-                )
-            ),
-            'variance': list(
-                zip(variance, second_variance, strict=True)
-            ),
-        }
-    )
-
-
-def _averaging_results(n_models: int = 36) -> pd.DataFrame:
-    """Build averaging results spanning a useful range of model R2 scores."""
-    r2 = np.linspace(0.55, 0.98, n_models)
-    sample_mean = 8.0 + 1.5 * np.sin(np.linspace(0.0, 2.5, n_models))
-    mean_error = 0.35 * (1.0 - r2) * np.cos(np.arange(n_models) / 3.0)
-    prediction_mean = sample_mean + mean_error
-    variance = 0.08 + 0.35 * (1.0 - r2) ** 2
-
-    return pd.DataFrame(
-        {
-            'group_id': AVERAGING_GROUP_ID,
-            'group_name': 'architecture sweep',
-            'model_ids': np.arange(1000, 1000 + n_models),
-            'r2': r2,
-            'sample_mean': sample_mean,
-            'prediction_mean': prediction_mean,
-            'bias': mean_error**2,
-            'variance': variance,
-        }
-    )
-
-
-def _extreme_results(n_points: int = 24) -> pd.DataFrame:
-    """Build a group that should be excluded by the axis-range guard."""
-    values = np.linspace(1.0e9, 1.1e9, n_points)
-    return pd.DataFrame(
-        {
-            'group_id': EXTREME_GROUP_ID,
-            'group_name': 'unstable model',
-            'test_points': [((value,), (value,)) for value in values],
-            'prediction_mean': values + 1.0e7,
-            'bias': np.full(n_points, 1.0e14),
-            'variance': np.full(n_points, 1.0e16),
-        }
-    )
-
-
-class SyntheticResultStore:
-    """ResultStore test double exposing deterministic plot-ready rows."""
-
-    entered = 0
-    exited = 0
-    requested_groups: list[int] = []
-
-    def __init__(self, database, *, timeout=5.0) -> None:
-        self.database = database
-        self.timeout = timeout
-
-    def __enter__(self):
-        type(self).entered += 1
-        return self
-
-    def __exit__(self, exc_type, exc, traceback) -> None:
-        type(self).exited += 1
-
-    def create_tables(self) -> None:
-        pass
-
-    def get_recent_run(self) -> str:
-        return RUN_ID
-
-    def does_run_exist(self, run_id: str) -> bool:
-        return run_id == RUN_ID
-
-    def get_studies(self, run_id: str) -> tuple[int, ...]:
-        assert run_id == RUN_ID
-        return (101, 102)
-
-    def get_groups(self, study_id: int) -> tuple[int, ...]:
-        return {
-            101: (POINTWISE_GROUP_ID, EXTREME_GROUP_ID),
-            102: (AVERAGING_GROUP_ID,),
-        }[study_id]
-
-    def get_group_plot_results(self, group_id: int) -> pd.DataFrame:
-        type(self).requested_groups.append(group_id)
-        return {
-            POINTWISE_GROUP_ID: _pointwise_results(),
-            EXTREME_GROUP_ID: _extreme_results(),
-            AVERAGING_GROUP_ID: _averaging_results(),
-        }[group_id].copy()
-
-    def get_method(self, group_id: int) -> str:
-        return (
-            'averaging'
-            if group_id == AVERAGING_GROUP_ID
-            else 'pointwise'
-        )
+RUN_ID = 'plot-run'
 
 
 @pytest.fixture(autouse=True)
-def plotting_environment(monkeypatch):
-    SyntheticResultStore.entered = 0
-    SyntheticResultStore.exited = 0
-    SyntheticResultStore.requested_groups = []
-    monkeypatch.setattr(analyzer_module, 'ResultStore', SyntheticResultStore)
+def close_figures():
     yield
     plt.close('all')
 
 
-def test_plot_prediction_comparison_draws_all_points_and_deviations():
-    results = _pointwise_results()
-    prepared = BiasAnalyzer._prepare_group_plot_data(
-        results,
-        input_index=0,
-        output_index=0,
-    )
-
-    ax = plot_prediction_comparison(
-        prepared['x'],
-        prepared['actual'],
-        prepared['prediction_mean'],
-        np.sqrt(prepared['variance']),
-    )
-
-    assert isinstance(ax, Axes)
-    assert len(ax.collections[0].get_offsets()) == len(results)
-    np.testing.assert_allclose(
-        ax.collections[0].get_offsets()[:, 0],
-        prepared['x'],
-    )
-    np.testing.assert_allclose(
-        ax.collections[0].get_offsets()[:, 1],
-        prepared['actual'],
-    )
-    np.testing.assert_allclose(ax.lines[0].get_xdata(), prepared['x'])
-    np.testing.assert_allclose(
-        ax.lines[0].get_ydata(),
-        prepared['prediction_mean'],
-    )
-
-    error_segments = ax.collections[1].get_segments()
-    standard_deviation = np.sqrt(prepared['variance'].to_numpy())
-    for index in (0, len(results) // 2, len(results) - 1):
-        np.testing.assert_allclose(
-            error_segments[index],
-            [
-                [prepared.loc[index, 'x'],
-                 prepared.loc[index, 'prediction_mean']
-                 - standard_deviation[index]],
-                [prepared.loc[index, 'x'],
-                 prepared.loc[index, 'prediction_mean']
-                 + standard_deviation[index]],
-            ],
+def _create_plot_database(path: Path) -> tuple[int, int]:
+    with ResultStore(path) as store:
+        store.create_tables()
+        store.add(
+            RunRecord(
+                run_id=RUN_ID,
+                created_at=datetime.now(UTC),
+                n_iter=2,
+                test_size=0.25,
+                test_metrics=('mse',),
+                optimizer='adam',
+                learning_rate=0.001,
+                loss='mse',
+                epochs=1,
+                batch_size=4,
+                device='cpu',
+                input_columns=('x',),
+                output_columns=('y', 'z'),
+                base_architecture=(4,),
+            )
         )
 
+        pointwise_study = store.add(
+            StudyRecord(RUN_ID, 'model', 'pointwise')
+        )
+        pointwise_group = store.add(GroupRecord(pointwise_study, 'wide'))
+        store.add(
+            EvaluationRecord(
+                pointwise_group,
+                0,
+                (1.0, 10.0),
+                (1.5, 11.0),
+                (0.25, 1.0),
+                (0.04, 0.09),
+            )
+        )
+        store.add(
+            EvaluationRecord(
+                pointwise_group,
+                2,
+                (3.0, 20.0),
+                (2.0, 19.5),
+                (1.0, 0.25),
+                (0.16, 0.25),
+            )
+        )
+        store.update_group(pointwise_group, (0.625, 0.625), (0.1, 0.17))
 
-def test_plot_bias_variance_draws_paired_bars_for_each_group():
-    labels = ('pointwise', 'averaging', 'sampling')
-    bias = np.array([0.025, 0.010, 0.040])
-    variance = np.array([0.080, 0.120, 0.060])
+        averaging_study = store.add(
+            StudyRecord(RUN_ID, 'sampling', 'averaging')
+        )
+        averaging_group = store.add(GroupRecord(averaging_study, 'small'))
+        first_model = store.add(
+            ModelRecord(averaging_group, (4,), (2.0, 12.0), (0.25, 1.0))
+        )
+        second_model = store.add(
+            ModelRecord(averaging_group, (8,), (3.0, 18.0), (0.36, 1.44))
+        )
+        store.add(ScoreRecord(first_model, 'mse', (0.5, 2.0)))
+        store.add(ScoreRecord(second_model, 'mse', (0.75, 3.0)))
+        store.update_group(
+            averaging_group,
+            (0.625, 2.5),
+            (0.305, 1.22),
+        )
 
-    ax = plot_bias_variance(labels, bias, variance)
+    return pointwise_group, averaging_group
+
+
+def test_low_level_prediction_helper_accepts_array_like_and_actuals() -> None:
+    ax = plot_bias_and_variance(
+        [0, 1],
+        pd.Series([1.5, 2.0]),
+        np.array([0.2, 0.4]),
+        {'title': 'Predictions', 'color': 'purple'},
+        actual_values=(1.0, 3.0),
+    )
 
     assert isinstance(ax, Axes)
-    assert len(ax.patches) == 2 * len(labels)
-    np.testing.assert_allclose(
-        [patch.get_height() for patch in ax.patches[:len(labels)]],
-        bias,
-    )
-    np.testing.assert_allclose(
-        [patch.get_height() for patch in ax.patches[len(labels):]],
-        variance,
-    )
-    assert tuple(label.get_text() for label in ax.get_xticklabels()) == labels
-
-
-def test_plot_summary_uses_the_supplied_primary_metric_label():
-    ax = plot_summary(
-        ('Model — AVERAGING',),
-        (0.25,),
-        (0.5,),
-        primary_label='MSE',
-    )
-
-    assert isinstance(ax, Axes)
+    assert ax.get_title() == 'Predictions'
+    assert ax.lines[0].get_label() == 'Actual'
     assert [text.get_text() for text in ax.get_legend().get_texts()] == [
-        'MSE',
-        'Mean prediction variance',
+        'Actual',
+        'Mean prediction ± prediction SD',
     ]
-
-
-def test_bias_variance_summary_normalizes_outputs_and_metric_names(
-    tmp_path: Path,
-    monkeypatch,
-):
-    analyzer = BiasAnalyzer(tmp_path / 'synthetic.sqlite3')
-    monkeypatch.setattr(
-        analyzer,
-        'get_run_history',
-        lambda: pd.DataFrame(
-            {'run_id': [RUN_ID], 'output_columns': [('y', 'z')]}
-        ),
-    )
-    monkeypatch.setattr(
-        analyzer,
-        'decompose_bias_and_variance',
-        lambda run_id: pd.DataFrame(
-            {
-                'study_name': ['model', 'model'],
-                'group_name': ['wide', 'narrow'],
-                'evaluation_method': ['pointwise', 'averaging'],
-                'bias': [(1.0, 2.0), (3.0, 4.0)],
-                'variance': [(5.0, 6.0), (7.0, 8.0)],
-            }
-        ),
-    )
-
-    summary = analyzer.get_bias_variance_summary(RUN_ID)
-
-    assert tuple(summary.columns) == (
-        'run_id',
-        'study_name',
-        'evaluation_method',
-        'group_name',
-        'output_index',
-        'output_name',
-        'metric_name',
-        'metric_value',
-    )
-    assert set(summary['metric_name']) == {'squared_bias', 'mse', 'variance'}
-    assert set(summary['output_name']) == {'y', 'z'}
-    assert len(summary) == 8
-
-
-def test_analyzer_plot_summary_aggregates_groups_and_separates_methods(
-    tmp_path: Path,
-):
-    analyzer = BiasAnalyzer(tmp_path / 'synthetic.sqlite3')
-    summary = pd.DataFrame(
-        {
-            'study_name': ['model'] * 4 + ['sampling'] * 2 + ['model'] * 2,
-            'evaluation_method': (
-                ['pointwise'] * 6 + ['averaging'] * 2
-            ),
-            'group_name': [
-                'wide', 'wide', 'narrow', 'narrow', 'lhs', 'lhs', 'wide', 'wide'
-            ],
-            'output_index': [0] * 8,
-            'output_name': ['y'] * 8,
-            'metric_name': [
-                'squared_bias', 'variance',
-                'squared_bias', 'variance',
-                'squared_bias', 'variance',
-                'mse', 'variance',
-            ],
-            'metric_value': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-        }
-    )
-
-    axes = analyzer.plot_summary(summary)
-
-    pointwise = axes[EvaluationMethod.POINTWISE]
-    averaging = axes[EvaluationMethod.AVERAGING]
-    assert [patch.get_height() for patch in pointwise.patches] == pytest.approx(
-        [2.0, 5.0, 3.0, 6.0]
-    )
-    assert [text.get_text() for text in pointwise.get_legend().get_texts()] == [
-        'Squared Bias',
-        'Mean prediction variance',
-    ]
-    assert [text.get_text() for text in averaging.get_legend().get_texts()] == [
-        'MSE',
-        'Mean prediction variance',
-    ]
-
-
-def test_analyzer_plot_summary_requires_selection_for_multiple_outputs(
-    tmp_path: Path,
-):
-    analyzer = BiasAnalyzer(tmp_path / 'synthetic.sqlite3')
-    summary = pd.DataFrame(
-        {
-            'study_name': ['model'] * 4,
-            'evaluation_method': ['pointwise'] * 4,
-            'group_name': ['wide'] * 4,
-            'output_index': [0, 0, 1, 1],
-            'output_name': ['y', 'y', 'z', 'z'],
-            'metric_name': ['squared_bias', 'variance'] * 2,
-            'metric_value': [1.0, 2.0, 3.0, 4.0],
-        }
-    )
-
-    with pytest.raises(ValueError, match='select one with output'):
-        analyzer.plot_summary(summary)
-    with pytest.raises(ValueError, match='Unknown output index'):
-        analyzer.plot_summary(summary, output=2)
-    with pytest.raises(ValueError, match='Unknown output name'):
-        analyzer.plot_summary(summary, output='missing')
-
-    axes = analyzer.plot_summary(summary, output='z')
-    assert [patch.get_height() for patch in axes[
-        EvaluationMethod.POINTWISE
-    ].patches] == pytest.approx([3.0, 4.0])
-
-
-def test_plot_results_plots_pointwise_and_averaging_groups(
-    tmp_path: Path,
-):
-    analyzer = BiasAnalyzer(tmp_path / 'synthetic.sqlite3')
-
-    axes = analyzer.plot_results(
-        RUN_ID,
-        max_plots=10,
-        max_axis_range=100.0,
-    )
-
-    project_root = Path(__file__).resolve().parents[2]
-    plot_directory = project_root / 'plot_artifacts'
-    plot_directory.mkdir(parents=True, exist_ok=True)
-
-    names = (
-        'pointwise_predictions',
-        'pointwise_bias_variance',
-        'averaging_predictions',
-        'averaging_bias_variance',
-    )
-
-    for name, ax in zip(names, axes, strict=True):
-        ax.figure.savefig(
-            plot_directory / f'{name}.png',
-            dpi=150,
-            bbox_inches='tight',
-        )
-
-    # The extreme group is queried but excluded. Each accepted group returns
-    # one comparison Axes and one bias/variance Axes.
-    assert len(axes) == 4
-    assert all(isinstance(ax, Axes) for ax in axes)
-    assert SyntheticResultStore.requested_groups == [
-        POINTWISE_GROUP_ID,
-        EXTREME_GROUP_ID,
-        AVERAGING_GROUP_ID,
-    ]
-    assert SyntheticResultStore.entered == 1
-    assert SyntheticResultStore.exited == 1
-
-    pointwise_ax, pointwise_bar_ax, averaging_ax, averaging_bar_ax = axes
-    assert pointwise_ax.get_title() == 'shared test set (pointwise)'
-    assert pointwise_ax.get_xlabel() == 'Test input'
-    assert averaging_ax.get_title() == 'architecture sweep (averaging)'
-    assert averaging_ax.get_xlabel() == 'R2 score'
-
-    pointwise = _pointwise_results()
-    averaging = _averaging_results()
-    np.testing.assert_allclose(
-        pointwise_ax.lines[0].get_ydata(),
-        np.asarray(pointwise['prediction_mean'].tolist())[:, 0],
-    )
-    np.testing.assert_allclose(
-        averaging_ax.lines[0].get_xdata(),
-        averaging['r2'],
-    )
-    assert [patch.get_height() for patch in pointwise_bar_ax.patches] == (
-        pytest.approx(
-            [
-                np.asarray(pointwise['bias'].tolist())[:, 0].mean(),
-                np.asarray(pointwise['variance'].tolist())[:, 0].mean(),
-            ]
-        )
-    )
-    assert [patch.get_height() for patch in averaging_bar_ax.patches] == (
-        pytest.approx(
-            [averaging['bias'].mean(), averaging['variance'].mean()]
-        )
-    )
-
-
-def test_plot_results_honors_plot_limit_and_can_save_figure(tmp_path: Path):
-    analyzer = BiasAnalyzer(tmp_path / 'synthetic.sqlite3')
-
-    axes = analyzer.plot_results(
-        max_plots=1,
-        max_axis_range=100.0,
-        settings={
-            'comparison': {
-                'title': 'Synthetic pointwise predictions',
-                'figsize': (9, 5),
-            },
-        },
-    )
-
-    assert len(axes) == 2
-    assert axes[0].get_title() == 'Synthetic pointwise predictions'
-    assert tuple(axes[0].figure.get_size_inches()) == pytest.approx((9.0, 5.0))
-    assert SyntheticResultStore.requested_groups == [POINTWISE_GROUP_ID]
-
-    output = tmp_path / 'pointwise-example.png'
-    axes[0].figure.savefig(output)
-    assert output.stat().st_size > 0
-
-
-def test_plot_results_selects_requested_input_and_output(tmp_path: Path):
-    analyzer = BiasAnalyzer(tmp_path / 'synthetic.sqlite3')
-
-    axes = analyzer.plot_results(
-        RUN_ID,
-        max_plots=1,
-        max_axis_range=100.0,
-        input_index=1,
-        output_index=1,
-    )
-
-    results = _pointwise_results()
-    packed_points = results['test_points'].tolist()
-    expected_x = np.array([point[0][1] for point in packed_points])
-    expected_actual = np.array([point[1][1] for point in packed_points])
-    expected_prediction = np.asarray(
-        results['prediction_mean'].tolist()
-    )[:, 1]
-
-    np.testing.assert_allclose(
-        axes[0].collections[0].get_offsets()[:, 0],
-        expected_x,
-    )
-    np.testing.assert_allclose(
-        axes[0].collections[0].get_offsets()[:, 1],
-        expected_actual,
-    )
-    np.testing.assert_allclose(axes[0].lines[0].get_ydata(), expected_prediction)
 
 
 @pytest.mark.parametrize(
-    ('kwargs', 'exception', 'message'),
+    ('args', 'message'),
     [
-        ({'max_plots': 0}, ValueError, 'max_plots must be positive'),
-        (
-            {'max_axis_range': 0.0},
-            ValueError,
-            'max_axis_range must be positive',
-        ),
-        ({'input_index': -1}, ValueError, 'input_index must be non-negative'),
-        ({'output_index': 1.5}, TypeError, 'output_index must be an integer'),
+        (([0], [1, 2], [0.1, 0.2]), 'matching lengths'),
+        (([[0]], [1], [0.1]), 'one-dimensional'),
+        (([0], [1], [-0.1]), 'non-negative'),
+        (([0], [np.nan], [0.1]), 'finite'),
     ],
 )
-def test_plot_results_rejects_invalid_limits_and_selections(
-    tmp_path: Path,
-    kwargs,
-    exception,
-    message,
-):
-    analyzer = BiasAnalyzer(tmp_path / 'synthetic.sqlite3')
+def test_low_level_prediction_helper_rejects_invalid_values(args, message) -> None:
+    with pytest.raises((TypeError, ValueError), match=message):
+        plot_bias_and_variance(*args)
 
-    with pytest.raises(exception, match=message):
-        analyzer.plot_results(RUN_ID, **kwargs)
+
+def test_error_component_helper_plots_metrics_and_their_means() -> None:
+    ax = plot_error_components(
+        (0, 1),
+        (0.25, 1.0),
+        (0.04, 0.16),
+        {'primary_label': 'Squared bias'},
+    )
+
+    assert isinstance(ax, Axes)
+    assert len(ax.lines) == 4
+    assert [text.get_text() for text in ax.get_legend().get_texts()] == [
+        'Squared bias',
+        'Prediction variance',
+    ]
+
+
+def test_prepare_plot_data_expands_records_and_outputs(tmp_path: Path) -> None:
+    pointwise_group, averaging_group = _create_plot_database(
+        tmp_path / 'results.sqlite3'
+    )
+    analyzer = BiasAnalyzer(tmp_path / 'results.sqlite3').select_run(RUN_ID)
+
+    results = analyzer.get_bias_variance_plot_data()
+
+    assert tuple(results.columns) == analyzer._PLOT_DATA_COLUMNS
+    assert len(results) == 8
+    assert set(results['output_name']) == {'y', 'z'}
+    assert set(results['result_type']) == {'test_point', 'model'}
+
+    point = results.loc[
+        (results['group_id'] == pointwise_group)
+        & (results['test_set_position'] == 0)
+        & (results['output_name'] == 'z')
+    ].iloc[0]
+    assert point['actual_value'] == pytest.approx(10.0)
+    assert point['mean_prediction'] == pytest.approx(11.0)
+    assert point['squared_bias'] == pytest.approx(1.0)
+    assert point['prediction_std'] == pytest.approx(0.3)
+    assert np.isnan(point['mse'])
+
+    model = results.loc[
+        (results['group_id'] == averaging_group)
+        & (results['record_index'] == 1)
+        & (results['output_name'] == 'z')
+    ].iloc[0]
+    assert model['mean_prediction'] == pytest.approx(18.0)
+    assert model['mse'] == pytest.approx(3.0)
+    assert model['prediction_std'] == pytest.approx(1.2)
+    assert np.isnan(model['actual_value'])
+
+
+def test_prepare_plot_data_requires_selection_and_decomposition(
+    tmp_path: Path,
+) -> None:
+    analyzer = BiasAnalyzer(tmp_path / 'results.sqlite3')
+    with pytest.raises(RuntimeError, match='No run is selected'):
+        analyzer.get_bias_variance_plot_data()
+
+    with ResultStore(analyzer.db_path) as store:
+        store.create_tables()
+        store.add(
+            RunRecord(
+                RUN_ID,
+                datetime.now(UTC),
+                1,
+                0.2,
+                ('mse',),
+                'adam',
+                0.001,
+                'mse',
+                1,
+                4,
+                'cpu',
+                ('x',),
+                ('y',),
+                (4,),
+            )
+        )
+        study_id = store.add(StudyRecord(RUN_ID, 'model', 'averaging'))
+        store.add(GroupRecord(study_id, 'wide'))
+
+    analyzer.select_run(RUN_ID)
+    with pytest.raises(RuntimeError, match='not been fully decomposed'):
+        analyzer.get_bias_variance_plot_data()
+
+
+@pytest.mark.parametrize(
+    ('column', 'serialized_value', 'message'),
+    [
+        ('model_mean_prediction', '[1.0]', 'contain 2 output values'),
+        ('model_variance_prediction', '[-1.0, 1.0]', 'negative values'),
+    ],
+)
+def test_prepare_plot_data_rejects_invalid_persisted_vectors(
+    tmp_path: Path,
+    column: str,
+    serialized_value: str,
+    message: str,
+) -> None:
+    _create_plot_database(tmp_path / 'results.sqlite3')
+    with sqlite3.connect(tmp_path / 'results.sqlite3') as connection:
+        connection.execute(
+            f'UPDATE models SET {column} = ? WHERE model_id = '
+            '(SELECT MIN(model_id) FROM models)',
+            (serialized_value,),
+        )
+
+    analyzer = BiasAnalyzer(tmp_path / 'results.sqlite3').select_run(RUN_ID)
+    with pytest.raises(ValueError, match=message):
+        analyzer.get_bias_variance_plot_data()
+
+
+def test_components_layout_creates_two_panels_per_group(tmp_path: Path) -> None:
+    pointwise_group, averaging_group = _create_plot_database(
+        tmp_path / 'results.sqlite3'
+    )
+    analyzer = BiasAnalyzer(tmp_path / 'results.sqlite3').select_run(RUN_ID)
+    results = analyzer.get_bias_variance_plot_data()
+
+    plots = analyzer.plot_bias_and_variance(results, output='z')
+
+    assert [plot.group_id for plot in plots] == [
+        pointwise_group,
+        averaging_group,
+    ]
+    assert all(plot.metric_axes is not None for plot in plots)
+    assert plots[0].figure._suptitle.get_text() == 'POINTWISE: wide'
+    assert plots[1].figure._suptitle.get_text() == 'AVERAGING: small'
+    assert plots[0].prediction_axes.get_ylabel() == 'z [1]'
+    assert plots[0].metric_axes.get_xlabel() == 'Test-set position'
+    assert plots[1].metric_axes.get_xlabel() == 'Model number'
+    assert [text.get_text() for text in plots[1].metric_axes.get_legend().texts] == [
+        'Model MSE',
+        'Within-model prediction variance',
+    ]
+
+
+def test_error_relationship_uses_error_metric_on_x_axis(tmp_path: Path) -> None:
+    _create_plot_database(tmp_path / 'results.sqlite3')
+    analyzer = BiasAnalyzer(tmp_path / 'results.sqlite3').select_run(RUN_ID)
+    results = analyzer.get_bias_variance_plot_data()
+
+    plots = analyzer.plot_bias_and_variance(
+        results,
+        output=0,
+        plot_kind='error_relationship',
+        max_plots=1,
+        plot_settings={'figsize': (8, 5)},
+    )
+
+    assert len(plots) == 1
+    assert plots[0].metric_axes is None
+    assert plots[0].prediction_axes.get_xlabel() == 'Squared bias'
+    assert tuple(plots[0].figure.get_size_inches()) == pytest.approx((8, 5))
+    np.testing.assert_allclose(
+        plots[0].prediction_axes.lines[0].get_xdata(),
+        (0.25, 1.0),
+    )
+
+
+def test_plot_output_selection_is_explicit_and_validated(tmp_path: Path) -> None:
+    _create_plot_database(tmp_path / 'results.sqlite3')
+    analyzer = BiasAnalyzer(tmp_path / 'results.sqlite3').select_run(RUN_ID)
+    results = analyzer.get_bias_variance_plot_data()
+
+    with pytest.raises(TypeError, match='integer or string'):
+        analyzer.plot_bias_and_variance(results, output=True)
+    with pytest.raises(IndexError, match='Unknown output index'):
+        analyzer.plot_bias_and_variance(results, output=2)
+    with pytest.raises(KeyError, match='Unknown output name'):
+        analyzer.plot_bias_and_variance(results, output='missing')
+    with pytest.raises(ValueError, match='plot_kind'):
+        analyzer.plot_bias_and_variance(results, output=0, plot_kind='unknown')
+
+    ambiguous = results.copy()
+    ambiguous['output_name'] = 'duplicate'
+    with pytest.raises(ValueError, match='ambiguous'):
+        analyzer.plot_bias_and_variance(ambiguous, output='duplicate')
+
+    inconsistent = results.copy()
+    inconsistent.loc[inconsistent.index[0], 'output_name'] = 'changed'
+    with pytest.raises(ValueError, match='exactly one output_name'):
+        analyzer.plot_bias_and_variance(inconsistent, output=0)
+
+
+def test_plotting_does_not_mutate_explicit_results(tmp_path: Path) -> None:
+    _create_plot_database(tmp_path / 'results.sqlite3')
+    analyzer = BiasAnalyzer(tmp_path / 'results.sqlite3').select_run(RUN_ID)
+    results = analyzer.get_bias_variance_plot_data()
+    original = results.copy(deep=True)
+
+    analyzer.plot_bias_and_variance(
+        results,
+        output='y',
+        group_settings={1: {'prediction': {'color': 'purple'}}},
+    )
+
+    pd.testing.assert_frame_equal(results, original)
