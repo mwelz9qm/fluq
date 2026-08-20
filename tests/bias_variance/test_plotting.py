@@ -14,9 +14,11 @@ from matplotlib.axes import Axes
 
 import bias_variance.analyzer as analyzer_module
 from bias_variance.analyzer import BiasAnalyzer
+from bias_variance.models.evaluation import EvaluationMethod
 from bias_variance.plotting import (
     plot_bias_variance,
     plot_prediction_comparison,
+    plot_summary,
 )
 
 POINTWISE_GROUP_ID = 11
@@ -234,6 +236,135 @@ def test_plot_bias_variance_draws_paired_bars_for_each_group():
         variance,
     )
     assert tuple(label.get_text() for label in ax.get_xticklabels()) == labels
+
+
+def test_plot_summary_uses_the_supplied_primary_metric_label():
+    ax = plot_summary(
+        ('Model — AVERAGING',),
+        (0.25,),
+        (0.5,),
+        primary_label='MSE',
+    )
+
+    assert isinstance(ax, Axes)
+    assert [text.get_text() for text in ax.get_legend().get_texts()] == [
+        'MSE',
+        'Mean prediction variance',
+    ]
+
+
+def test_bias_variance_summary_normalizes_outputs_and_metric_names(
+    tmp_path: Path,
+    monkeypatch,
+):
+    analyzer = BiasAnalyzer(tmp_path / 'synthetic.sqlite3')
+    monkeypatch.setattr(
+        analyzer,
+        'get_run_history',
+        lambda: pd.DataFrame(
+            {'run_id': [RUN_ID], 'output_columns': [('y', 'z')]}
+        ),
+    )
+    monkeypatch.setattr(
+        analyzer,
+        'decompose_bias_and_variance',
+        lambda run_id: pd.DataFrame(
+            {
+                'study_name': ['model', 'model'],
+                'group_name': ['wide', 'narrow'],
+                'evaluation_method': ['pointwise', 'averaging'],
+                'bias': [(1.0, 2.0), (3.0, 4.0)],
+                'variance': [(5.0, 6.0), (7.0, 8.0)],
+            }
+        ),
+    )
+
+    summary = analyzer.get_bias_variance_summary(RUN_ID)
+
+    assert tuple(summary.columns) == (
+        'run_id',
+        'study_name',
+        'evaluation_method',
+        'group_name',
+        'output_index',
+        'output_name',
+        'metric_name',
+        'metric_value',
+    )
+    assert set(summary['metric_name']) == {'squared_bias', 'mse', 'variance'}
+    assert set(summary['output_name']) == {'y', 'z'}
+    assert len(summary) == 8
+
+
+def test_analyzer_plot_summary_aggregates_groups_and_separates_methods(
+    tmp_path: Path,
+):
+    analyzer = BiasAnalyzer(tmp_path / 'synthetic.sqlite3')
+    summary = pd.DataFrame(
+        {
+            'study_name': ['model'] * 4 + ['sampling'] * 2 + ['model'] * 2,
+            'evaluation_method': (
+                ['pointwise'] * 6 + ['averaging'] * 2
+            ),
+            'group_name': [
+                'wide', 'wide', 'narrow', 'narrow', 'lhs', 'lhs', 'wide', 'wide'
+            ],
+            'output_index': [0] * 8,
+            'output_name': ['y'] * 8,
+            'metric_name': [
+                'squared_bias', 'variance',
+                'squared_bias', 'variance',
+                'squared_bias', 'variance',
+                'mse', 'variance',
+            ],
+            'metric_value': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        }
+    )
+
+    axes = analyzer.plot_summary(summary)
+
+    pointwise = axes[EvaluationMethod.POINTWISE]
+    averaging = axes[EvaluationMethod.AVERAGING]
+    assert [patch.get_height() for patch in pointwise.patches] == pytest.approx(
+        [2.0, 5.0, 3.0, 6.0]
+    )
+    assert [text.get_text() for text in pointwise.get_legend().get_texts()] == [
+        'Squared Bias',
+        'Mean prediction variance',
+    ]
+    assert [text.get_text() for text in averaging.get_legend().get_texts()] == [
+        'MSE',
+        'Mean prediction variance',
+    ]
+
+
+def test_analyzer_plot_summary_requires_selection_for_multiple_outputs(
+    tmp_path: Path,
+):
+    analyzer = BiasAnalyzer(tmp_path / 'synthetic.sqlite3')
+    summary = pd.DataFrame(
+        {
+            'study_name': ['model'] * 4,
+            'evaluation_method': ['pointwise'] * 4,
+            'group_name': ['wide'] * 4,
+            'output_index': [0, 0, 1, 1],
+            'output_name': ['y', 'y', 'z', 'z'],
+            'metric_name': ['squared_bias', 'variance'] * 2,
+            'metric_value': [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match='select one with output'):
+        analyzer.plot_summary(summary)
+    with pytest.raises(ValueError, match='Unknown output index'):
+        analyzer.plot_summary(summary, output=2)
+    with pytest.raises(ValueError, match='Unknown output name'):
+        analyzer.plot_summary(summary, output='missing')
+
+    axes = analyzer.plot_summary(summary, output='z')
+    assert [patch.get_height() for patch in axes[
+        EvaluationMethod.POINTWISE
+    ].patches] == pytest.approx([3.0, 4.0])
 
 
 def test_plot_results_plots_pointwise_and_averaging_groups(
