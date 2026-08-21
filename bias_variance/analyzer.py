@@ -353,12 +353,10 @@ class BiasAnalyzer:
                 #------END RECORD BUILDING------
 
     def run_studies(
-        self,
-        X: pd.DataFrame,
-        Y: pd.DataFrame,
-        run_settings: Mapping[str, object] | None = None,
-        *,
-        training_config: TrainingConfig | None = None,
+            self,
+            X: pd.DataFrame,
+            Y: pd.DataFrame,
+            run_settings: Mapping[str, object] | None = None,
     ) -> Self:
         # Build the run config from the run_settings, and
         # inputs (X) and outputs(Y)
@@ -370,13 +368,12 @@ class BiasAnalyzer:
             .build()
         )
 
-        # Tune training hyperparameters when the user does not provide them.
-        if training_config is None:
-            tuner = Tuner()
-            training_config = tuner.tune(
-                baseline=run_config.baseline,
-                random_state=run_config.random_state,
-            )
+        # Tune training hyperparameters for the run.
+        tuner = Tuner()
+        training_config = tuner.tune(
+            baseline=run_config.baseline,
+            random_state=run_config.random_state,
+        )
 
         # build model trainer for every study
         trainer = Trainer(training_config)

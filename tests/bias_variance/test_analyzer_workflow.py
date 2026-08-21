@@ -1,5 +1,6 @@
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -44,20 +45,23 @@ def test_workflows_share_file_database_and_return_multioutput_results(
     )
     analyzer = BiasAnalyzer(tmp_path / 'results.sqlite3')
 
-    analyzer.run_studies(
-        inputs,
-        outputs,
-        run_settings={
-            'variation_generator_configs': (generator_config,),
-            'evaluation_methods': (EvaluationMethod.POINTWISE,),
-            'n_iter': 2,
-            'test_size': 0.5,
-            'test_metrics': (MetricName.MSE,),
-            'random_state': 7,
-            'base_architecture': (2,),
-        },
-        training_config=TrainingConfig(epochs=0, device='cpu'),
-    )
+    with patch(
+            "bias_variance.analyzer.Tuner.tune",
+            return_value=TrainingConfig(epochs=0, device="cpu"),
+    ):
+        analyzer.run_studies(
+            inputs,
+            outputs,
+            run_settings={
+                'variation_generator_configs': (generator_config,),
+                'evaluation_methods': (EvaluationMethod.POINTWISE,),
+                'n_iter': 2,
+                'test_size': 0.5,
+                'test_metrics': (MetricName.MSE,),
+                'random_state': 7,
+                'base_architecture': (2,),
+            },
+        )
     results = analyzer.decompose_bias_and_variance()
 
     with sqlite3.connect(analyzer.db_path) as connection:
@@ -142,29 +146,32 @@ def test_run_studies_accepts_mapped_run_settings(tmp_path: Path) -> None:
     outputs = pd.DataFrame({'y': [0.0, 2.0, 4.0, 6.0]})
     analyzer = BiasAnalyzer(tmp_path / 'raw-results.sqlite3')
 
-    analyzer.run_studies(
-        inputs,
-        outputs,
-        {
-            'variation_generator_configs': {
-                StudyBias.MODEL.value: {
-                    'range_architectures': {
-                        ArchitectureName.WIDE: FnnRandomArchitectureConfig(
-                            layer_range=(1, 2),
-                            size_range=(2, 3),
-                        ),
+    with patch(
+            "bias_variance.analyzer.Tuner.tune",
+            return_value=TrainingConfig(epochs=0, device="cpu"),
+    ):
+        analyzer.run_studies(
+            inputs,
+            outputs,
+            {
+                'variation_generator_configs': {
+                    StudyBias.MODEL.value: {
+                        'range_architectures': {
+                            ArchitectureName.WIDE: FnnRandomArchitectureConfig(
+                                layer_range=(1, 2),
+                                size_range=(2, 3),
+                            ),
+                        },
+                        'taper_architectures': {},
                     },
-                    'taper_architectures': {},
                 },
+                'n_iter': 1,
+                'test_size': 0.5,
+                'test_metrics': ['mse'],
+                'evaluation_methods': ['pointwise'],
+                'random_state': 7,
             },
-            'n_iter': 1,
-            'test_size': 0.5,
-            'test_metrics': ['mse'],
-            'evaluation_methods': ['pointwise'],
-            'random_state': 7,
-        },
-        training_config=TrainingConfig(epochs=0, device='cpu'),
-    )
+        )
 
 
 def test_run_studies_rejects_unknown_run_setting(
