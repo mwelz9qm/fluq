@@ -31,7 +31,7 @@ from bias_variance.models.evaluation import (
 )
 from bias_variance.models.fnn import FnnArchitecture
 from bias_variance.models.training import Trainer, TrainingConfig
-from bias_variance.models.tuner import Tuner
+from bias_variance.models.tuner import Tuner, TunerConfig
 from bias_variance.persistence.records import (
     GroupRecord,
     ModelRecord,
@@ -353,10 +353,13 @@ class BiasAnalyzer:
                 #------END RECORD BUILDING------
 
     def run_studies(
-            self,
-            X: pd.DataFrame,
-            Y: pd.DataFrame,
-            run_settings: Mapping[str, object] | None = None,
+        self,
+        X: pd.DataFrame,
+        Y: pd.DataFrame,
+        run_settings: Mapping[str, object] | None = None,
+        *,
+        training_config: TrainingConfig | None = None,
+        tuner_config: TunerConfig | None = None,
     ) -> Self:
         # Build the run config from the run_settings, and
         # inputs (X) and outputs(Y)
@@ -368,12 +371,18 @@ class BiasAnalyzer:
             .build()
         )
 
-        # Tune training hyperparameters for the run.
-        tuner = Tuner()
-        training_config = tuner.tune(
-            baseline=run_config.baseline,
-            random_state=run_config.random_state,
-        )
+        if training_config is not None and tuner_config is not None:
+            raise ValueError(
+                "training_config and tuner_config are mutually exclusive."
+            )
+
+        # Tune training hyperparameters when a TrainingConfig is not provided.
+        if training_config is None:
+            tuner = Tuner(tuner_config)
+            training_config = tuner.tune(
+                baseline=run_config.baseline,
+                random_state=run_config.random_state,
+            )
 
         # build model trainer for every study
         trainer = Trainer(training_config)

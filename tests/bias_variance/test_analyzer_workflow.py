@@ -22,6 +22,7 @@ from bias_variance.generators.sampling import (
 )
 from bias_variance.models.evaluation import EvaluationMethod, MetricName
 from bias_variance.models.training import TrainingConfig
+from bias_variance.models.tuner import TunerConfig
 
 
 def test_workflows_share_file_database_and_return_multioutput_results(
@@ -171,6 +172,20 @@ def test_run_studies_accepts_mapped_run_settings(tmp_path: Path) -> None:
                 'evaluation_methods': ['pointwise'],
                 'random_state': 7,
             },
+        )
+
+def test_run_studies_rejects_training_and_tuner_config(
+    tmp_path: Path,
+) -> None:
+    inputs = pd.DataFrame({'x': [0.0, 1.0, 2.0, 3.0]})
+    outputs = pd.DataFrame({'y': [0.0, 2.0, 4.0, 6.0]})
+
+    with pytest.raises(ValueError, match='mutually exclusive'):
+        BiasAnalyzer(tmp_path / 'exclusive.sqlite3').run_studies(
+            inputs,
+            outputs,
+            training_config=TrainingConfig(epochs=0, device='cpu'),
+            tuner_config=TunerConfig(n_trials=1),
         )
 
 
