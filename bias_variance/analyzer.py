@@ -1041,6 +1041,7 @@ class BiasAnalyzer:
                     'Squared bias' if method is EvaluationMethod.POINTWISE
                     else 'Model MSE',
                 )
+                prediction_settings.setdefault('actual_linestyle', 'none')
                 plot_prediction_distribution(
                     primary_values,
                     group_data['mean_prediction'],
