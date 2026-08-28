@@ -51,6 +51,7 @@ from bias_variance.plotting import (
 from bias_variance.plotting import (
     plot_summary as plot_summary_bars,
 )
+from common.utils import ProgressBar
 
 type OutputSelector = int | str
 type PlotKind = Literal['components', 'error_relationship']
@@ -219,7 +220,8 @@ class BiasAnalyzer:
         random_state: int | None,
         baseline: RunBaseline,
         trainer: Trainer,
-        store: ResultStore
+        store: ResultStore,
+        progress_bar: ProgressBar,
     ) -> None:
         # Map variation labels to their persisted group IDs.
         group_ids: dict[str, int] = {}
@@ -352,6 +354,8 @@ class BiasAnalyzer:
 
                 #------END RECORD BUILDING------
 
+                progress_bar.advance()
+
     def run_studies(
         self,
         X: pd.DataFrame,
@@ -430,8 +434,19 @@ class BiasAnalyzer:
             run_id = store.add(run_record)
 
             # Iterate through the methods and studies
+            total_studies = (
+                len(run_config.evaluation_methods) * len(run_config.studies)
+            )
+            progress_bar = ProgressBar(total_studies)
+            study_number = 0
             for method in run_config.evaluation_methods:
                 for study in run_config.studies:
+                    study_number += 1
+                    progress_bar.start_study(
+                        study_number,
+                        run_config.n_iter
+                        * len(study.variation_generator.variation_labels),
+                    )
                     study_record = StudyRecord(
                         run_id=run_id,
                         study_name=study.study_bias.value,
@@ -459,7 +474,8 @@ class BiasAnalyzer:
                         run_config.random_state,
                         run_config.baseline,
                         trainer,
-                        store
+                        store,
+                        progress_bar,
                     )
 
         self._selected_run_id = run_id
