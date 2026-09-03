@@ -306,6 +306,10 @@ def get_model_scores(
         if is_uniform:
             scores[metric.value] = float(score)
         else:
-            scores[metric.value] = tuple(float(value) for value in score)
+            raw_score = np.asarray(score, dtype=float).reshape(-1)
+            scores[metric.value] = tuple(
+                float(value)
+                for value in raw_score
+            )
 
     return scores
