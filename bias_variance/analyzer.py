@@ -47,6 +47,7 @@ from bias_variance.plotting import (
     plot_prediction_distribution,
     plot_summary_bars,
 )
+from bias_variance.seeding import derive_keyed_seed, seed_from_sequence
 from common.utils import ProgressBar
 
 type OutputSelector = int | str
@@ -128,12 +129,25 @@ class BiasAnalyzer:
         )
 
     @staticmethod
+    def _iteration_action_seeds(
+        seed_sequence: np.random.SeedSequence,
+        n_iter: int,
+    ) -> tuple[tuple[int, int, int], ...]:
+        action_seeds = []
+        for iteration_sequence in seed_sequence.spawn(n_iter):
+            action_seeds.append(tuple(
+                seed_from_sequence(action_sequence)
+                for action_sequence in iteration_sequence.spawn(3)
+            ))
+        return tuple(action_seeds)
+
+    @staticmethod
     def _create_split_and_architecture(
         study_description: tuple[StudyBias, EvaluationMethod],
         baseline: RunBaseline,
         generated_variation: pd.DataFrame | FnnArchitecture,
         test_size: float,
-        random_state: int | None,
+        random_state: int,
     ) -> tuple[
         tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame],
         FnnArchitecture,
@@ -197,7 +211,7 @@ class BiasAnalyzer:
         test_size: float,
         test_metrics: frozenset[MetricName],
         resolved_device: torch.device,
-        random_state: int | None,
+        seed_sequence: np.random.SeedSequence,
         baseline: RunBaseline,
         trainer: Trainer,
         store: ResultStore,
@@ -215,20 +229,30 @@ class BiasAnalyzer:
 
             group_ids[variation_label] = group_id
 
-        # build the seed sequence for each model
-        seed_sequence = np.random.SeedSequence(random_state)
-        model_seeds = seed_sequence.generate_state(n_iter)
-
         # run model training loop
-        for model_seed in model_seeds:
-            resolved_seed = int(model_seed)
+        action_seeds = self._iteration_action_seeds(seed_sequence, n_iter)
+        for generation_seed, split_parent_seed, training_parent_seed in (
+            action_seeds
+        ):
 
             # generate the study variations
-            variations = study.variation_generator.generate(random_state=resolved_seed)
+            variations = study.variation_generator.generate(
+                random_state=generation_seed
+            )
 
             # run variation loop
             for variation in variations:
                 study_description = (study.study_bias, method)
+                split_seed = derive_keyed_seed(
+                    split_parent_seed,
+                    'split',
+                    variation.label,
+                )
+                training_seed = derive_keyed_seed(
+                    training_parent_seed,
+                    'training',
+                    variation.label,
+                )
 
                 # create the model's train-test split and architecture
                 (X_train, X_test, Y_train, Y_test), architecture = self._create_split_and_architecture(
@@ -236,7 +260,7 @@ class BiasAnalyzer:
                     baseline,
                     variation.generated,
                     test_size,
-                    resolved_seed
+                    split_seed
                 )
 
                 #------START MODEL BUILD, TRAIN, PREDICT, TEST------
@@ -246,7 +270,7 @@ class BiasAnalyzer:
                     architecture=architecture,
                     x_train=X_train,
                     y_train=Y_train,
-                    random_state=resolved_seed
+                    random_state=training_seed
                 )
 
                 # get the model's predictions
@@ -359,6 +383,9 @@ class BiasAnalyzer:
             .apply_run_settings(run_settings)
             .build()
         )
+        seed_plan = run_config.seed_plan
+        if seed_plan is None:
+            raise RuntimeError('RunConfig did not create a seed plan.')
 
         if training_config is not None and tuner_config is not None:
             raise ValueError(
@@ -370,7 +397,7 @@ class BiasAnalyzer:
             tuner = Tuner(tuner_config)
             training_config = tuner.tune(
                 baseline=run_config.baseline,
-                random_state=run_config.random_state,
+                random_state=seed_plan.tuning_seed,
             )
 
         # build model trainer for every study
@@ -414,7 +441,8 @@ class BiasAnalyzer:
                     str(column)
                     for column
                     in run_config.baseline.Y.columns
-                )
+                ),
+                seed_entropy=seed_plan.entropy,
             )
             run_id = store.add(run_record)
 
@@ -424,8 +452,20 @@ class BiasAnalyzer:
             )
             progress_bar = ProgressBar(total_studies)
             study_number = 0
-            for method in run_config.evaluation_methods:
-                for study in run_config.studies:
+            method_sequences = np.random.SeedSequence(
+                seed_plan.workflow_seed
+            ).spawn(len(run_config.evaluation_methods))
+            for method, method_sequence in zip(
+                run_config.evaluation_methods,
+                method_sequences,
+                strict=True,
+            ):
+                study_sequences = method_sequence.spawn(len(run_config.studies))
+                for study, study_sequence in zip(
+                    run_config.studies,
+                    study_sequences,
+                    strict=True,
+                ):
                     study_number += 1
                     progress_bar.start_study(
                         study_number,
@@ -456,7 +496,7 @@ class BiasAnalyzer:
                         run_config.test_size,
                         run_config.test_metrics,
                         training_config.resolved_device,
-                        run_config.random_state,
+                        study_sequence,
                         run_config.baseline,
                         trainer,
                         store,
