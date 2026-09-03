@@ -342,6 +342,10 @@ class BiasAnalyzer:
         Y: pd.DataFrame,
         run_settings: Mapping[str, object] | None = None,
         *,
+        X_train: pd.DataFrame | None = None,
+        X_test: pd.DataFrame | None = None,
+        Y_train: pd.DataFrame | None = None,
+        Y_test: pd.DataFrame | None = None,
         training_config: TrainingConfig | None = None,
         tuner_config: TunerConfig | None = None,
     ) -> Self:
@@ -351,6 +355,7 @@ class BiasAnalyzer:
             RunConfigBuilder()
             .set_X(X)
             .set_Y(Y)
+            .set_split(X_train, X_test, Y_train, Y_test)
             .apply_run_settings(run_settings)
             .build()
         )

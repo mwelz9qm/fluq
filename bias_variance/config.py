@@ -137,6 +137,46 @@ class RunConfigBuilder:
     def set_Y(self, Y: pd.DataFrame) -> Self:
         return self._set('Y', Y)
 
+    def set_split(
+        self,
+        X_train: pd.DataFrame | None = None,
+        X_test: pd.DataFrame | None = None,
+        Y_train: pd.DataFrame | None = None,
+        Y_test: pd.DataFrame | None = None,
+    ) -> Self:
+        split = (X_train, X_test, Y_train, Y_test)
+        if all(frame is None for frame in split):
+            self._config_data.pop('split', None)
+            return self
+        if any(frame is None for frame in split):
+            raise ValueError(
+                'X_train, X_test, Y_train, and Y_test must either all be '
+                'provided or all be None.'
+            )
+        if not all(isinstance(frame, pd.DataFrame) for frame in split):
+            raise TypeError(
+                'X_train, X_test, Y_train, and Y_test must be pandas '
+                'DataFrames.'
+            )
+
+        X_train, X_test, Y_train, Y_test = split
+        if any(frame.empty for frame in split):
+            raise ValueError('Train and test DataFrames must not be empty.')
+        if len(X_train) != len(Y_train):
+            raise ValueError(
+                'X_train and Y_train must contain the same number of rows.'
+            )
+        if len(X_test) != len(Y_test):
+            raise ValueError(
+                'X_test and Y_test must contain the same number of rows.'
+            )
+        if not X_train.index.equals(Y_train.index):
+            raise ValueError('X_train and Y_train indexes must match.')
+        if not X_test.index.equals(Y_test.index):
+            raise ValueError('X_test and Y_test indexes must match.')
+
+        return self._set('split', split)
+
     def set_variation_generator_configs(
         self,
         variation_generator_configs: Iterable[VariationGeneratorConfig] | Mapping[str, Mapping[str, Any]]
@@ -309,12 +349,32 @@ class RunConfigBuilder:
         if not 0 < test_size < 1:
             raise ValueError('test_size must be between zero and one.')
 
-        split = train_test_split(
-            X,
-            Y,
-            test_size=test_size,
-            random_state=random_state
-        )
+        split = self._config_data.get('split')
+        if split is None:
+            split = train_test_split(
+                X,
+                Y,
+                test_size=test_size,
+                random_state=random_state
+            )
+        else:
+            X_train, X_test, Y_train, Y_test = split
+            if not X_train.columns.equals(X.columns):
+                raise ValueError('X_train columns must match X columns.')
+            if not X_test.columns.equals(X.columns):
+                raise ValueError('X_test columns must match X columns.')
+            if not Y_train.columns.equals(Y.columns):
+                raise ValueError('Y_train columns must match Y columns.')
+            if not Y_test.columns.equals(Y.columns):
+                raise ValueError('Y_test columns must match Y columns.')
+            if len(X_train) + len(X_test) != len(X):
+                raise ValueError(
+                    'X_train and X_test row counts must add up to X.'
+                )
+            if len(Y_train) + len(Y_test) != len(Y):
+                raise ValueError(
+                    'Y_train and Y_test row counts must add up to Y.'
+                )
 
         base_architecture = self._config_data.get('base_architecture', None)
         
