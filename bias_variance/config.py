@@ -10,9 +10,18 @@ from bias_variance.generators.base import VariationGenerator, VariationGenerator
 from bias_variance.generators.fnn_architecture import (
     FnnArchitectureGenerator,
     FnnArchitectureGeneratorConfig,
+    FnnArchitectureGeneratorConfigBuilder,
 )
-from bias_variance.generators.noise import NoiseGenerator, NoiseGeneratorConfig
-from bias_variance.generators.sampling import SamplingGenerator, SamplingGeneratorConfig
+from bias_variance.generators.noise import (
+    NoiseGenerator,
+    NoiseGeneratorConfig,
+    NoiseGeneratorConfigBuilder,
+)
+from bias_variance.generators.sampling import (
+    SamplingGenerator,
+    SamplingGeneratorConfig,
+    SamplingGeneratorConfigBuilder,
+)
 from bias_variance.models.evaluation import EvaluationMethod, MetricName
 from bias_variance.models.fnn import FnnArchitecture
 
@@ -147,18 +156,32 @@ class RunConfigBuilder:
                     )
                 match key:
                     case StudyBias.MODEL.value:
-                        converted_configs.append(FnnArchitectureGeneratorConfig(**kwargs))
+                        config = (
+                            FnnArchitectureGeneratorConfigBuilder()
+                            .apply_settings(kwargs)
+                            .build()
+                        )
 
                     case StudyBias.SAMPLING.value:
-                        converted_configs.append(SamplingGeneratorConfig(**kwargs))
+                        config = (
+                            SamplingGeneratorConfigBuilder()
+                            .apply_settings(kwargs)
+                            .build()
+                        )
 
                     case StudyBias.DATA.value:
-                        converted_configs.append(NoiseGeneratorConfig(**kwargs))
+                        config = (
+                            NoiseGeneratorConfigBuilder()
+                            .apply_settings(kwargs)
+                            .build()
+                        )
 
                     case _:
                         raise ValueError(
                             f'Unknown variation generator config: {key!r}.'
                         )
+
+                converted_configs.append(config)
 
             return self._set('variation_generator_configs', converted_configs)
 
