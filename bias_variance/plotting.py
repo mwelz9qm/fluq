@@ -1,5 +1,3 @@
-"""Matplotlib helpers for prepared bias/variance result data."""
-
 from collections.abc import Mapping, Sequence
 
 import matplotlib.pyplot as plt
@@ -9,7 +7,6 @@ from numpy.typing import ArrayLike
 
 
 def _numeric_1d(values: ArrayLike, *, name: str) -> np.ndarray:
-    """Return a nonempty, finite, one-dimensional float array."""
     try:
         array = np.asarray(values, dtype=float)
     except (TypeError, ValueError) as exc:
@@ -61,12 +58,6 @@ def plot_prediction_distribution(
     actual_values: ArrayLike | None = None,
     ax: Axes | None = None,
 ) -> Axes:
-    """Plot mean predictions with standard-deviation error bars.
-
-    ``actual_values`` is optional because pointwise results have a shared
-    actual value at each position, while averaging results summarize models
-    evaluated over sets of observations.
-    """
     if plot_settings is not None and not isinstance(plot_settings, Mapping):
         raise TypeError('plot_settings must be a mapping or None.')
     settings = plot_settings or {}
@@ -137,7 +128,6 @@ def plot_error_components(
     *,
     ax: Axes | None = None,
 ) -> Axes:
-    """Plot a primary error metric and variance against record position."""
     if plot_settings is not None and not isinstance(plot_settings, Mapping):
         raise TypeError('plot_settings must be a mapping or None.')
     settings = plot_settings or {}
@@ -213,7 +203,6 @@ def plot_summary_bars(
     variance_label: str,
     ax: Axes | None = None,
 ) -> Axes:
-    """Plot paired aggregate error and variance bars for named studies."""
     if plot_settings is not None and not isinstance(plot_settings, Mapping):
         raise TypeError('plot_settings must be a mapping or None.')
     settings = plot_settings or {}

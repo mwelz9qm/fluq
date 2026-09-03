@@ -18,7 +18,6 @@ from bias_variance.persistence.store import ResultStore, StoredTestPointPredicti
 
 
 class MetricName(StrEnum):
-    """Supported model evaluation metrics."""
 
     RMSE = "rmse"
     MSE = "mse"
@@ -58,18 +57,6 @@ class EvaluationData:
 
 
 class Evaluator:
-    """Evaluate stored model results for every variation group in a run.
-
-    Averaging evaluation combines the per-output MSE score and prediction
-    variance stored for each model. Pointwise evaluation combines predictions
-    from all models that share a test-set position and stores a detailed
-    :class:`EvaluationRecord` for that position.
-
-    Attributes
-    ----------
-    result_store : ResultStore
-        The interface for inserting and accessing data from the cache tables.
-    """
     def __init__(
         self,
         result_store: ResultStore,
@@ -80,7 +67,6 @@ class Evaluator:
         self,
         group_id: int,
     ) -> GroupUpdateData:
-        """Average per-model MSE and prediction variance for every output."""
 
         mse_scores, model_variances = self.result_store.get_averaging_evaluation_data(group_id)
         mse_array = np.asarray(mse_scores, dtype=float)
@@ -108,7 +94,6 @@ class Evaluator:
         self,
         group_id: int,
     ) -> tuple[GroupUpdateData, tuple[EvaluationRecord, ...]]:
-        """Evaluate predictions from all models at each shared test position."""
         records: list[EvaluationRecord] = []
         rows_by_position: dict[int, dict[int, StoredTestPointPrediction]] = {}
 
@@ -204,21 +189,6 @@ class Evaluator:
         self,
         run_id: str,
     ) -> EvaluationData:
-        """Evaluate every study and variation group belonging to a run.
-
-        This method only calculates and returns evaluation data. The caller owns
-        persistence of group updates and pointwise evaluation records.
-
-        Parameters
-        -----------
-        run_id : str
-            The run identifier used to query results in the cache tables.
-
-        Returns
-        ------------
-        EvaluationData
-            Updated group values and any pointwise evaluation records created.
-        """
         studies = self.result_store.get_studies(run_id)
         update_groups: list[GroupUpdateData] = []
         evaluation_records: list[EvaluationRecord] = []
@@ -250,26 +220,6 @@ def get_model_predictions(
     x_test: torch.Tensor | pd.DataFrame,
     resolved_device: torch.device,
 ) -> np.ndarray:
-    """Generate model predictions for a test input set.
-
-    This helper prepares the test inputs as a torch tensor when needed, places
-    the inputs on the resolved device, runs the model in evaluation mode without
-    tracking gradients, and returns the predictions as a NumPy array.
-
-    Parameters
-    ----------
-    model : nn.Module
-        Trained model used to generate predictions.
-    x_test : torch.Tensor | pd.DataFrame
-        Test inputs used for prediction.
-    resolved_device : torch.device
-        Device where the test inputs should be placed for prediction.
-
-    Returns
-    -------
-    np.ndarray
-        Model predictions returned as a NumPy array.
-    """
     if not isinstance(x_test, torch.Tensor):
         x_test = torch.as_tensor(
             x_test.to_numpy(dtype=np.float32, copy=True),
@@ -313,27 +263,6 @@ def get_model_scores(
     metrics: frozenset[MetricName],
     is_uniform: bool = True,
 ) -> dict[str, float | tuple[float, ...]]:
-    """Calculate requested metrics using uniform or per-output aggregation.
-
-    Parameters
-    ----------
-    predictions : np.ndarray
-        Predicted values shaped ``(observations, outputs)``.
-    y_test : torch.Tensor | pd.DataFrame
-        Actual values with the same shape as ``predictions``.
-    metrics : frozenset[MetricName]
-        Metrics to calculate.
-    is_uniform : bool, default=True
-        Return one uniformly averaged float per metric when true. When false,
-        return one tuple containing a score for each output. The analyzer uses
-        raw tuples for persistence, while model tuning uses scalar values.
-
-    Returns
-    -------
-    dict[str, float | tuple[float, ...]]
-        Metric names mapped to scalar or per-output results according to
-        ``is_uniform``.
-    """
     if isinstance(y_test, torch.Tensor):
         y_test = y_test.detach().cpu().numpy()
 

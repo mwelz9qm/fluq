@@ -10,7 +10,6 @@ TensorInput: TypeAlias = pd.DataFrame | NDArray[np.float64] | NDArray[np.float32
 
 
 def _to_tensor(data: TensorInput) -> torch.Tensor:
-    """Convert tabular data into a float32 PyTorch tensor."""
     if isinstance(data, pd.DataFrame):
         array = data.to_numpy(dtype=np.float32, copy=True)
     else:

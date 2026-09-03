@@ -55,7 +55,6 @@ type PlotKind = Literal['components', 'error_relationship']
 
 @dataclass(frozen=True, slots=True)
 class GroupPlotResult:
-    """Matplotlib objects and metadata for one plotted result group."""
 
     run_id: str
     study_id: int
@@ -70,20 +69,6 @@ class GroupPlotResult:
 
 
 class BiasAnalyzer:
-    '''
-    The BiasAnalyzer constructs a series of studies for analyzing the bias
-    and variance across different model variations. The analyzer starts by
-    gathering results on the ran studies, evaluating the bias and variance,
-    and reviewing the evaluations with plots and tables.
-
-    Attributes
-    ----------------
-    db_path: str | PathLike[str]
-        Path to SQLite database for establishing a connection.
-    db_timeout: float, default = 5.0
-        Timeout in seconds
-
-    '''
     def __init__(
         self,
         db_path: str | PathLike[str] = 'bias_variance.sqlite3',
@@ -133,7 +118,6 @@ class BiasAnalyzer:
         return self
 
     def get_run_history(self) -> pd.DataFrame:
-        """Return all persisted runs as a newest-first DataFrame."""
         with ResultStore(self.db_path, timeout=self.db_timeout) as store:
             store.create_tables()
             runs = store.get_runs()
@@ -574,7 +558,6 @@ class BiasAnalyzer:
         record_id: int,
         non_negative: bool = False,
     ) -> np.ndarray:
-        """Validate one persisted per-output result vector."""
         try:
             array = np.asarray(values, dtype=float)
         except (TypeError, ValueError) as exc:
@@ -606,11 +589,6 @@ class BiasAnalyzer:
         return array
 
     def get_bias_variance_plot_data(self) -> pd.DataFrame:
-        """Return tidy, multi-output plot data for the selected run.
-
-        The selected run must already have been successfully decomposed. Each
-        row represents one pointwise evaluation or model result for one output.
-        """
         with ResultStore(self.db_path, timeout=self.db_timeout) as store:
             store.create_tables()
             run_id = self._require_selected_run(store)
@@ -846,20 +824,6 @@ class BiasAnalyzer:
         group_settings: Mapping[int, Mapping[str, object]] | None = None,
         max_plots: int | None = None,
     ) -> tuple[GroupPlotResult, ...]:
-        """Plot one explicitly selected output for every result group.
-
-        ``components`` preserves test-point or model order in two aligned
-        panels: prediction means with standard-deviation bars, followed by
-        squared bias/MSE and variance. ``error_relationship`` instead places
-        squared bias or MSE on the x-axis in one diagnostic panel. Pointwise
-        standard deviations describe variation across models at one point;
-        averaging standard deviations describe one model's predictions across
-        its test observations.
-
-        The supplied DataFrame is not cached or mutated. One independent
-        figure is returned per group, and Matplotlib display is left to the
-        caller.
-        """
         if plot_kind not in {'components', 'error_relationship'}:
             raise ValueError(
                 "plot_kind must be 'components' or 'error_relationship'."
@@ -1091,14 +1055,6 @@ class BiasAnalyzer:
         output: OutputSelector | None = None,
         plot_settings: Mapping[str, Mapping[str, object]] | None = None,
     ) -> dict[EvaluationMethod, Axes]:
-        """Plot equal-weighted study summaries from tidy prepared results.
-
-        With ``output=None``, every group/output combination receives equal
-        weight. Selecting an output by index or name instead aggregates that
-        output across the groups in each study. Pointwise and averaging
-        results use separate axes because MSE is a total-error proxy rather
-        than a direct squared-bias estimate.
-        """
         if plot_settings is not None and not isinstance(plot_settings, Mapping):
             raise TypeError('plot_settings must be a mapping or None.')
 

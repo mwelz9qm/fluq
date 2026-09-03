@@ -1,9 +1,3 @@
-'''Sampling-based data generator for bias-variance studies.
-
-This module defines sampling strategies, configuration, variation, and generator
-objects for creating sampled copies of a base dataset.
-'''
-
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -24,7 +18,6 @@ SamplingFunction = Callable[..., pd.DataFrame]
 
 
 class SamplingStrategyName(StrEnum):
-    '''Names of supported sampling strategies.'''
 
     BOOTSTRAP = 'bootstrap'
     STRATIFIED = 'stratified'
@@ -33,15 +26,6 @@ class SamplingStrategyName(StrEnum):
 
 @dataclass(frozen=True)
 class SamplingStrategy:
-    '''Stores a sampling function and its keyword arguments.
-
-    Attributes
-    ----------
-    function : SamplingFunction
-        Function used to generate a sampled dataset.
-    kwargs : Mapping[str, Any]
-        Keyword arguments passed to the sampling function.
-    '''
     function: SamplingFunction
     kwargs: Mapping[str, Any] = field(default_factory=dict)
 
@@ -72,13 +56,6 @@ DEFAULT_SAMPLING_STRATEGIES = MappingProxyType({
 
 @dataclass(frozen=True, slots=True)
 class SamplingGeneratorConfig(VariationGeneratorConfig):
-    '''Configures sampling strategies for dataset generation.
-
-    Attributes
-    ----------
-    sampling_strategies : Mapping[SamplingStrategyName, SamplingStrategy]
-        Sampling strategies used to generate dataset variations.
-    '''
     sampling_strategies: Mapping[
         SamplingStrategyName,
         SamplingStrategy,
@@ -86,13 +63,6 @@ class SamplingGeneratorConfig(VariationGeneratorConfig):
 
     @property
     def variation_labels(self) -> tuple[str, ...]:
-        '''Return labels for the configured sampling strategies.
-
-        Returns
-        -------
-        tuple[str, ...]
-            Labels for each configured sampling strategy.
-        '''
         return tuple(
             name.value
             for name
@@ -102,32 +72,13 @@ class SamplingGeneratorConfig(VariationGeneratorConfig):
 
 @dataclass(frozen=True, slots=True)
 class SamplingVariation(Variation[pd.DataFrame]):
-    '''Represents a sampled dataset variation.
-
-    Attributes
-    ----------
-    dataset : pd.DataFrame
-        The generated sampled dataset.
-    '''
 
     @property
     def dataset(self) -> pd.DataFrame:
-        '''The generated dataset, kept as a compatibility alias.'''
         return self.generated
 
 
 class SamplingGenerator(VariationGenerator[pd.DataFrame]):
-    '''Generate sampled copies of a base dataset.
-
-    Each configured sampling strategy creates one sampled dataset variation.
-
-    Attributes
-    ----------
-    settings : SamplingGeneratorConfig | None, default = None
-        Settings that define which sampling strategies are used.
-    base_dataset : pd.DataFrame | None
-        Dataset used as the source for generating sampled variations.
-    '''
 
     def __init__(
         self,
@@ -138,52 +89,19 @@ class SamplingGenerator(VariationGenerator[pd.DataFrame]):
 
     @property
     def variation_labels(self) -> tuple[str, ...]:
-        '''Return labels for the configured sampling variations.
-
-        Returns
-        -------
-        tuple[str, ...]
-            Labels from the generator settings.
-        '''
         return self.settings.variation_labels
 
     @property
     def base_dataset(self) -> pd.DataFrame | None:
-        '''Return the base dataset used for sampling.
-
-        Returns
-        -------
-        pd.DataFrame | None
-            The base dataset, or ``None`` when one has not been set.
-        '''
         return self._base_dataset
 
     @base_dataset.setter
     def base_dataset(self, value: pd.DataFrame) -> None:
-        '''Set and validate the base dataset.
-
-        Parameters
-        ----------
-        value : pd.DataFrame
-            Dataset to use for sampling.
-        '''
         self._validate_dataset(value)
         self._base_dataset = value
 
     @property
     def dataset(self) -> pd.DataFrame:
-        '''Return a copy of the base dataset.
-
-        Returns
-        -------
-        pd.DataFrame
-            A copy of the base dataset.
-
-        Raises
-        ------
-        ValueError
-            If the base dataset has not been set.
-        '''
         if self._base_dataset is None:
             raise ValueError(
                 'Base dataset is not set.'
@@ -195,18 +113,6 @@ class SamplingGenerator(VariationGenerator[pd.DataFrame]):
         *,
         random_state: int | None = None,
     ) -> Iterable[SamplingVariation]:
-        '''Generate sampled dataset variations.
-
-        Parameters
-        ----------
-        random_state : int | None, default = None
-            Seed used to make sampling reproducible.
-
-        Returns
-        -------
-        Iterable[SamplingVariation]
-            Generated sampled dataset variations.
-        '''
         for label, strategy in self.settings.sampling_strategies.items():
             variation = SamplingVariation(
                 label=label.value,

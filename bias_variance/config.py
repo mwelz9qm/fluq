@@ -104,7 +104,6 @@ class RunConfigBuilder:
         self,
         run_settings: Mapping[str, Any] | None,
     ) -> Self:
-        """Apply explicitly supplied run settings through their setters."""
         if run_settings is None:
             return self
         if not isinstance(run_settings, Mapping):

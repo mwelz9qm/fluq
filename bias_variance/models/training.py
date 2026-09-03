@@ -61,9 +61,6 @@ class TrainingConfig:
 
 
 class Trainer:
-    '''
-    Trains models with the provided training configuration and model builder.
-    '''
     def __init__(
         self,
         config: TrainingConfig,
@@ -83,26 +80,6 @@ class Trainer:
         y_train: torch.Tensor | pd.DataFrame,
         random_state: int | None,
     ) -> nn.Sequential:
-        '''
-        Constructs a model given an architecture, then trains
-        with constructed model on provided x_train and y_train
-        data.
-
-        Parameters
-        -----------
-        architecture: FnnArchitecture
-
-        x_train: torch.Tensor | pd.DataFrame
-
-        y_train: torch.Tensor | pd.DataFrame
-
-        random_state: int | None
-
-        Returns
-        ---------
-        nn.Sequential
-            The trained model.
-        '''
         if not isinstance(x_train, torch.Tensor):
             x_train = torch.as_tensor(
                 x_train.to_numpy(dtype=np.float32, copy=True),
@@ -182,24 +159,6 @@ def _build_model(
     model_builder: FnnBuilder,
     resolved_device: torch.device,
 ) -> nn.Sequential:
-    '''
-    Builds a model based on the provided architecture.
-
-    The method uses the model_builder and config to return the built
-    model and set the model training process on the specified or
-    default device with resolved_device property.
-
-    Parameters
-    ---------------
-    architecture: FnnArchitecture
-        A FNN architecture used for building the model with the base
-        training hyperparameters.
-    
-    Returns
-    ----------------
-    nn.Sequential
-        A sequential model for training and predicting steps in workflow.
-    '''
     model = model_builder.build(architecture)
     return model.to(resolved_device)
 
