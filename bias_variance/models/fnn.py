@@ -28,11 +28,24 @@ class FnnConfig:
     bias: bool = True
 
     def __post_init__(self) -> None:
+        if (
+            not isinstance(self.input_size, int)
+            or isinstance(self.input_size, bool)
+        ):
+            raise TypeError('input_size must be an integer.')
         if self.input_size <= 0:
             raise ValueError('input_size must be greater than 0.')
-        
+        if (
+            not isinstance(self.output_size, int)
+            or isinstance(self.output_size, bool)
+        ):
+            raise TypeError('output_size must be an integer.')
         if self.output_size <= 0:
             raise ValueError('output_size must be greater than 0.')
+        if not callable(self.activation_factory):
+            raise TypeError('activation_factory must be callable.')
+        if not isinstance(self.bias, bool):
+            raise TypeError('bias must be a boolean.')
 
 
 class FnnBuilder:
