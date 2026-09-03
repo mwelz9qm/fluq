@@ -86,10 +86,19 @@ class SamplingGeneratorConfigBuilder:
             raise ValueError(
                 'Sampling strategy kwargs cannot contain random_state.'
             )
-        return {
+        merged = {
             **cls.DEFAULT_SAMPLING_STRATEGIES[name].kwargs,
             **overrides,
         }
+        if overrides.get('n_samples') is not None and (
+            'sample_fraction' not in overrides
+        ):
+            merged.pop('sample_fraction', None)
+        if overrides.get('sample_fraction') is not None and (
+            'n_samples' not in overrides
+        ):
+            merged.pop('n_samples', None)
+        return merged
 
     def apply_settings(
         self,
