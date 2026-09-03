@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, ClassVar, Self
 
+import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
@@ -24,6 +25,7 @@ from bias_variance.generators.sampling import (
 )
 from bias_variance.models.evaluation import EvaluationMethod, MetricName
 from bias_variance.models.fnn import FnnArchitecture
+from bias_variance.seeding import MAX_SEED, resolve_seed, seed_from_sequence
 
 
 class StudyBias(StrEnum):
@@ -68,6 +70,25 @@ class RunBaseline:
 
 
 @dataclass(frozen=True, slots=True)
+class RunSeedPlan:
+    entropy: int
+    baseline_split_seed: int
+    tuning_seed: int
+    workflow_seed: int
+
+    @classmethod
+    def from_random_state(cls, random_state: int | None) -> 'RunSeedPlan':
+        entropy = resolve_seed(random_state)
+        baseline_split, tuning, workflow = np.random.SeedSequence(entropy).spawn(3)
+        return cls(
+            entropy=entropy,
+            baseline_split_seed=seed_from_sequence(baseline_split),
+            tuning_seed=seed_from_sequence(tuning),
+            workflow_seed=seed_from_sequence(workflow),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RunConfig:
     baseline: RunBaseline
     studies: tuple[Study, ...]
@@ -76,6 +97,27 @@ class RunConfig:
     test_size: float
     test_metrics: frozenset[MetricName]
     random_state: int | None
+    seed_plan: RunSeedPlan | None = None
+
+    def __post_init__(self) -> None:
+        self.validate_random_state(self.random_state)
+        if self.seed_plan is None:
+            object.__setattr__(
+                self,
+                'seed_plan',
+                RunSeedPlan.from_random_state(self.random_state),
+            )
+
+    @staticmethod
+    def validate_random_state(random_state: int | None) -> None:
+        if random_state is None:
+            return
+        if isinstance(random_state, bool) or not isinstance(random_state, int):
+            raise TypeError('random_state must be an integer or None.')
+        if not 0 <= random_state < MAX_SEED:
+            raise ValueError(
+                f'random_state must be between 0 and {MAX_SEED - 1}.'
+            )
 
 
 class RunConfigBuilder:
@@ -179,7 +221,13 @@ class RunConfigBuilder:
 
     def set_variation_generator_configs(
         self,
-        variation_generator_configs: Iterable[VariationGeneratorConfig] | Mapping[str, Mapping[str, Any]]
+        variation_generator_configs: (
+            Iterable[VariationGeneratorConfig]
+            | Mapping[
+                str,
+                Mapping[str, Any] | Iterable[Mapping[str, Any]],
+            ]
+        ),
     ) -> Self:
         if variation_generator_configs is None:
             raise ValueError(
@@ -189,39 +237,33 @@ class RunConfigBuilder:
 
         if isinstance(variation_generator_configs, Mapping):
             converted_configs: list[VariationGeneratorConfig] = []
-            for key, kwargs in variation_generator_configs.items():
-                if not isinstance(kwargs, Mapping):
-                    raise TypeError(
-                        f'Configuration for {key!r} must be a mapping.'
-                    )
-                match key:
-                    case StudyBias.MODEL.value:
-                        config = (
-                            FnnArchitectureGeneratorConfigBuilder()
-                            .apply_settings(kwargs)
-                            .build()
-                        )
-
-                    case StudyBias.SAMPLING.value:
-                        config = (
-                            SamplingGeneratorConfigBuilder()
-                            .apply_settings(kwargs)
-                            .build()
-                        )
-
-                    case StudyBias.DATA.value:
-                        config = (
-                            NoiseGeneratorConfigBuilder()
-                            .apply_settings(kwargs)
-                            .build()
-                        )
-
-                    case _:
+            for key, raw_settings in variation_generator_configs.items():
+                if isinstance(raw_settings, Mapping):
+                    settings_collection = (raw_settings,)
+                elif isinstance(raw_settings, Iterable) and not isinstance(
+                    raw_settings,
+                    (str, bytes),
+                ):
+                    settings_collection = tuple(raw_settings)
+                    if not settings_collection:
                         raise ValueError(
-                            f'Unknown variation generator config: {key!r}.'
+                            f'Configuration list for {key!r} must not be '
+                            'empty.'
                         )
-
-                converted_configs.append(config)
+                else:
+                    raise TypeError(
+                        f'Configuration for {key!r} must be a mapping or an '
+                        'iterable of mappings.'
+                    )
+                for settings in settings_collection:
+                    if not isinstance(settings, Mapping):
+                        raise TypeError(
+                            f'Each configuration for {key!r} must be a '
+                            'mapping.'
+                        )
+                    converted_configs.append(
+                        self._build_variation_generator_config(key, settings)
+                    )
 
             return self._set('variation_generator_configs', converted_configs)
 
@@ -240,6 +282,38 @@ class RunConfigBuilder:
             return self._set('variation_generator_configs', configs)
 
         raise TypeError('Unknown variation generator type.')
+
+    @staticmethod
+    def _build_variation_generator_config(
+        key: str,
+        settings: Mapping[str, Any],
+    ) -> VariationGeneratorConfig:
+        match key:
+            case StudyBias.MODEL.value:
+                return (
+                    FnnArchitectureGeneratorConfigBuilder()
+                    .apply_settings(settings)
+                    .build()
+                )
+
+            case StudyBias.SAMPLING.value:
+                return (
+                    SamplingGeneratorConfigBuilder()
+                    .apply_settings(settings)
+                    .build()
+                )
+
+            case StudyBias.DATA.value:
+                return (
+                    NoiseGeneratorConfigBuilder()
+                    .apply_settings(settings)
+                    .build()
+                )
+
+            case _:
+                raise ValueError(
+                    f'Unknown variation generator config: {key!r}.'
+                )
         
     def set_evaluation_methods(
         self,
@@ -256,19 +330,24 @@ class RunConfigBuilder:
         converted_methods: list[EvaluationMethod] = []
         for method in evaluation_methods:
             if isinstance(method, EvaluationMethod):
-                converted_methods.append(method)
-                continue
-            match method:
-                case EvaluationMethod.AVERAGING.value:
-                    converted_methods.append(EvaluationMethod.AVERAGING)
+                converted_method = method
+            else:
+                match method:
+                    case EvaluationMethod.AVERAGING.value:
+                        converted_method = EvaluationMethod.AVERAGING
 
-                case EvaluationMethod.POINTWISE.value:
-                    converted_methods.append(EvaluationMethod.POINTWISE)
+                    case EvaluationMethod.POINTWISE.value:
+                        converted_method = EvaluationMethod.POINTWISE
 
-                case _:
-                    raise ValueError(
-                        f'Unknown evaluation method: {method}'
-                    )
+                    case _:
+                        raise ValueError(
+                            f'Unknown evaluation method: {method}'
+                        )
+            if converted_method in converted_methods:
+                raise ValueError(
+                    f'Duplicate evaluation method: {converted_method.value!r}.'
+                )
+            converted_methods.append(converted_method)
         return self._set('evaluation_methods', converted_methods)
 
     def set_base_architecture(self, base_architecture: FnnArchitecture | tuple[int, ...]) -> Self:
@@ -323,7 +402,7 @@ class RunConfigBuilder:
                 'Unknown test_metrics type.'
             )
 
-    def set_random_state(self, random_state: int) -> Self:
+    def set_random_state(self, random_state: int | None) -> Self:
         return self._set('random_state', random_state)
 
     def build(self) -> RunConfig:
@@ -331,6 +410,8 @@ class RunConfigBuilder:
         Y = self._config_data.get('Y', None)
         test_size = self._config_data.get('test_size', None)
         random_state = self._config_data.get('random_state', None)
+        RunConfig.validate_random_state(random_state)
+        seed_plan = RunSeedPlan.from_random_state(random_state)
 
         if not isinstance(X, pd.DataFrame) or not isinstance(Y, pd.DataFrame):
             raise TypeError('X and Y must be pandas DataFrames.')
@@ -338,6 +419,10 @@ class RunConfigBuilder:
             raise ValueError('X and Y must not be empty.')
         if len(X) != len(Y):
             raise ValueError('X and Y must contain the same number of rows.')
+        if not X.index.equals(Y.index):
+            raise ValueError('X and Y indexes must match.')
+        if not X.index.is_unique:
+            raise ValueError('X and Y indexes must be unique.')
 
         n_iter = self._config_data.get('n_iter', None)
         if not isinstance(n_iter, int) or isinstance(n_iter, bool):
@@ -355,7 +440,7 @@ class RunConfigBuilder:
                 X,
                 Y,
                 test_size=test_size,
-                random_state=random_state
+                random_state=seed_plan.baseline_split_seed
             )
         else:
             X_train, X_test, Y_train, Y_test = split
@@ -375,6 +460,8 @@ class RunConfigBuilder:
                 raise ValueError(
                     'Y_train and Y_test row counts must add up to Y.'
                 )
+            self._validate_partition('X', X, X_train, X_test)
+            self._validate_partition('Y', Y, Y_train, Y_test)
 
         base_architecture = self._config_data.get('base_architecture', None)
         
@@ -397,7 +484,17 @@ class RunConfigBuilder:
             ]
             studies = default_studies
         else:
+            unique_configs: list[VariationGeneratorConfig] = []
             for config in variation_generator_configs:
+                if any(
+                    config == existing_config
+                    for existing_config in unique_configs
+                ):
+                    raise ValueError(
+                        'Duplicate variation generator configs are not '
+                        'allowed.'
+                    )
+                unique_configs.append(config)
                 match config:
                     case FnnArchitectureGeneratorConfig():
                         studies.append(Study(StudyBias.MODEL, FnnArchitectureGenerator(config)))
@@ -432,5 +529,34 @@ class RunConfigBuilder:
             n_iter=n_iter,
             test_size=test_size,
             test_metrics=frozenset(test_metrics),
-            random_state=random_state
+            random_state=random_state,
+            seed_plan=seed_plan,
         )
+
+    @staticmethod
+    def _validate_partition(
+        name: str,
+        source: pd.DataFrame,
+        train: pd.DataFrame,
+        test: pd.DataFrame,
+    ) -> None:
+        if not train.index.is_unique or not test.index.is_unique:
+            raise ValueError(f'{name} split indexes must be unique.')
+        if not train.index.intersection(test.index).empty:
+            raise ValueError(
+                f'{name}_train and {name}_test indexes must be disjoint.'
+            )
+
+        combined_index = train.index.append(test.index)
+        if (
+            not combined_index.difference(source.index).empty
+            or not source.index.difference(combined_index).empty
+        ):
+            raise ValueError(
+                f'{name}_train and {name}_test must partition {name} indexes.'
+            )
+
+        if not train.equals(source.loc[train.index]):
+            raise ValueError(f'{name}_train rows must come from {name}.')
+        if not test.equals(source.loc[test.index]):
+            raise ValueError(f'{name}_test rows must come from {name}.')
