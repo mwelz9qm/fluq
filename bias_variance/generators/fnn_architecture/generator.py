@@ -15,6 +15,7 @@ from bias_variance.generators.fnn_architecture.config_builder import (
     FnnArchitectureGeneratorConfigBuilder,
 )
 from bias_variance.models.fnn import FnnArchitecture
+from bias_variance.seeding import derive_keyed_seed, resolve_seed
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,20 +139,37 @@ class FnnArchitectureGenerator(VariationGenerator[FnnArchitecture]):
         *,
         random_state: int | None = None,
     ) -> Iterable[FnnArchitectureVariation]:
-        rng = np.random.default_rng(random_state)
+        parent_seed = resolve_seed(random_state)
 
         for name, config in (self.settings.range_architectures or {}).items():
+            variation_seed = derive_keyed_seed(
+                parent_seed,
+                'fnn_architecture',
+                name.value,
+            )
             variation = FnnArchitectureVariation(
                 label=name.value,
-                random_state=random_state,
-                generated=self._generate_random_sizes(config, rng)
+                variation_seed=variation_seed,
+                generated=self._generate_random_sizes(
+                    config,
+                    np.random.default_rng(variation_seed),
+                )
             )
             yield variation
 
         for name, config in (self.settings.taper_architectures or {}).items():
+            variation_seed = derive_keyed_seed(
+                parent_seed,
+                'fnn_architecture',
+                name.value,
+            )
             variation = FnnArchitectureVariation(
                 label=name.value,
-                random_state=random_state,
-                generated=self._generate_taper_sizes(config, name, rng)
+                variation_seed=variation_seed,
+                generated=self._generate_taper_sizes(
+                    config,
+                    name,
+                    np.random.default_rng(variation_seed),
+                )
             )
             yield variation
