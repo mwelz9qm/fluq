@@ -79,6 +79,7 @@ class RunTable(Table):
     INPUT_COLUMNS = Column('input_columns', 'TEXT')
     OUTPUT_COLUMNS = Column('output_columns', 'TEXT')
     BASE_ARCHITECTURE = Column('base_architecture', 'TEXT')
+    SEED_ENTROPY = Column('seed_entropy', 'INTEGER', nullable=True)
 
     @classmethod
     def create_table_sql(cls) -> str:
@@ -97,7 +98,8 @@ class RunTable(Table):
                 cls.DEVICE,
                 cls.INPUT_COLUMNS,
                 cls.OUTPUT_COLUMNS,
-                cls.BASE_ARCHITECTURE
+                cls.BASE_ARCHITECTURE,
+                cls.SEED_ENTROPY,
             )
         )
 
