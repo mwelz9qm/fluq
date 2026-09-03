@@ -1,5 +1,6 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
+
 
 def get_random_samples(
         dataset: pd.DataFrame,
@@ -146,13 +147,11 @@ def get_stratified_random_samples(
     
     # iterate through groups and track removable samples until the sample size equals n
     drop_indicies = []
-    counter = 0
-    for _, group_df in grouped_samples_df:
-        if samples_df.shape[0] - counter == n:
+    for i, (_, group_df) in enumerate(grouped_samples_df):
+        if samples_df.shape[0] - i == n:
             break
         random_index = rng.choice(group_df.index)
         drop_indicies.append(random_index)
-        counter += 1
     
     # remove the rows (trimming sample set) and return samples
     return samples_df.drop(drop_indicies)

@@ -1,0 +1,926 @@
+"""SQLite persistence interface for bias/variance run results.
+
+The methods in :class:`ResultStore` mirror the persistence operations used by
+``BiasAnalyzer`` and ``Evaluator``.  The query and mutation methods are
+intentionally left as implementation points; this module defines their
+signatures, expected SQL behavior, and return contracts without imposing a
+particular serialization format for array-valued record fields.
+"""
+
+import sqlite3
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from os import PathLike
+from typing import Self
+
+from bias_variance.persistence.records import Record, RunRecord
+from bias_variance.persistence.serialize import (
+    decode_datetime_string,
+    decode_json_array,
+    encode_tuple,
+)
+from bias_variance.persistence.tables import (
+    EvaluationTable,
+    GroupTable,
+    ModelTable,
+    RunTable,
+    ScoreTable,
+    StudyTable,
+    TestPointTable,
+    TrainPointTable,
+)
+
+type BiasVarianceResult = tuple[
+    str,
+    str,
+    str,
+    tuple[float, ...] | None,
+    tuple[float, ...] | None,
+]
+
+
+@dataclass(frozen=True, slots=True)
+class StoredRun:
+    """A fully decoded run row returned from the result store."""
+
+    run_id: str
+    created_at: datetime
+    n_iter: int
+    test_size: float
+    test_metrics: tuple[str, ...]
+    optimizer: str
+    learning_rate: float
+    loss: str
+    epochs: int
+    batch_size: int
+    device: str
+    input_columns: tuple[str, ...]
+    output_columns: tuple[str, ...]
+    base_architecture: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class StoredTestPointPrediction:
+    model_id: int
+    set_position: int
+    input: tuple[float, ...]
+    output: tuple[float, ...]
+    prediction: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ModelResult:
+    model_id: int
+    mse: tuple[float, ...]
+    variance: tuple[float, ...]
+    mean: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TestPointResult:
+    test_point_position: int
+    actual: tuple[float, ...]
+    squared_bias: tuple[float, ...]
+    variance: tuple[float, ...]
+    mean: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class StoredResultGroup:
+    study_id: int
+    study_name: str
+    evaluation_method: str
+    group_id: int
+    group_name: str
+
+
+class ResultStore:
+    """Provide the SQLite operations required by an analysis run.
+
+    A store owns one SQLite connection.  Calls to :meth:`add` and
+    :meth:`update` participate in the connection's current transaction, and
+    :meth:`commit` makes the complete run durable.  Array, tuple, mapping, and
+    datetime fields in the record dataclasses must be encoded consistently by
+    the eventual implementation (for example as JSON or binary values) because
+    SQLite cannot store those Python objects directly.
+    """
+
+    def __init__(
+        self,
+        database: str | PathLike[str] = ":memory:",
+        *,
+        timeout: float = 5.0,
+    ) -> None:
+        """Open the SQLite database used to cache analysis results.
+
+        The constructor creates a standard-library ``sqlite3`` connection and
+        enables foreign-key enforcement.  A complete implementation should
+        also create or migrate the tables represented by ``RunRecord``,
+        ``StudyRecord``, ``GroupRecord``, and ``ModelRecord`` before the store
+        is used.
+
+        Parameters
+        ----------
+        database:
+            Filesystem path to the SQLite database, or ``":memory:"`` for a
+            transient in-memory cache.
+        timeout:
+            Number of seconds the connection waits for a locked table before
+            raising ``sqlite3.OperationalError``.
+
+        Returns
+        -------
+        None
+        """
+        self._connection = sqlite3.connect(database, timeout=timeout)
+        self._connection.row_factory = sqlite3.Row
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        try:
+            if exc_type is None:
+                self.commit()
+
+            else:
+                self.rollback()
+
+        finally:
+            self.close()
+
+    def create_tables(self) -> None:
+        cur = self._connection.cursor()
+        cur.execute('PRAGMA foreign_keys = ON')
+        for table in (
+            RunTable,
+            StudyTable,
+            GroupTable,
+            EvaluationTable,
+            ModelTable,
+            ScoreTable,
+            TrainPointTable,
+            TestPointTable,
+        ):
+            cur.execute(table.create_table_sql())
+
+    def add(self, record: Record) -> int | str:
+        """Stage one record for insertion into its corresponding table.
+
+        The implementation should dispatch on the concrete record type, encode
+        non-scalar fields, and execute a parameterized ``INSERT`` without
+        committing.  If the record's primary-key field is empty, it should
+        generate a unique ID before insertion.  The returned ID must then be
+        used by the caller when constructing dependent records.
+
+        Parameters
+        ----------
+        record:
+            A run, study, group, or model record whose fields map to columns in
+            the matching SQLite table.
+
+        Returns
+        -------
+        int
+            The inserted row's primary-key ID, whether supplied by ``record``
+            or generated by the store.
+        """
+        insert_statement, params = record.table.insert_sql(asdict(record))
+
+        cur = self._connection.cursor()
+        cur.execute(insert_statement, params)
+
+        if isinstance(record, RunRecord):
+            return record.run_id
+
+        return cur.lastrowid
+
+    def update_group(
+        self,
+        group_id: int,
+        bias: tuple[float, ...],
+        variance: tuple[float, ...],
+    ) -> None:
+        """Stage bias and variance values for an evaluated group.
+
+        The implementation should verify that ``group_id`` belongs to
+        ``study_id`` and that the study belongs to ``run_id``.  It should read
+        the study's evaluation method and update either the averaging or
+        pointwise bias/variance columns on the group row with one parameterized
+        ``UPDATE`` statement.  The change remains pending until :meth:`commit`
+        is called.
+
+        ``run_id`` and ``study_id`` are not strictly required to locate a group
+        when IDs are globally unique, but retaining them prevents an update
+        from silently crossing run or study boundaries.
+
+        Parameters
+        ----------
+        group_id:
+            ID of the group whose decomposition values are being stored.
+        bias:
+            Calculated bias value.
+        variance:
+            Calculated variance value.
+
+        Returns
+        -------
+        None
+        """
+        serialized_bias = encode_tuple(bias)
+        serialized_variance = encode_tuple(variance)
+
+        cur = self._connection.cursor()
+        cur.execute(
+            f'''
+            UPDATE {GroupTable.TABLE_NAME}
+            SET ({GroupTable.STRATEGY_BIAS.name}, {GroupTable.STRATEGY_VARIANCE.name}) = (?, ?)
+            WHERE {GroupTable.GROUP_ID.name} = ?
+            AND {GroupTable.STRATEGY_BIAS.name} IS NULL
+            AND {GroupTable.STRATEGY_VARIANCE.name} IS NULL
+            ''',
+            (serialized_bias, serialized_variance, group_id)
+        )
+
+        if cur.rowcount == 0:
+            cur.execute(
+                f'''
+                SELECT {GroupTable.GROUP_ID.name}
+                FROM {GroupTable.TABLE_NAME}
+                WHERE {GroupTable.GROUP_ID.name} = ?
+                ''',
+                (group_id,),
+            )
+            if cur.fetchone() is None:
+                raise KeyError(f'Unknown group_id: {group_id}')
+            raise ValueError(f'Group already evaluated: {group_id}')
+
+    def commit(self) -> None:
+        """Commit all staged inserts and updates to SQLite.
+
+        This delegates to the connection transaction so that records added
+        during a run become durable together.  SQLite rolls the transaction
+        back automatically when the connection closes after an unhandled
+        error, but callers may also use :meth:`rollback` explicitly.
+
+        Returns
+        -------
+        None
+        """
+        self._connection.commit()
+
+    def rollback(self) -> None:
+        """Discard all uncommitted changes in the current transaction.
+
+        This calls the SQLite connection's rollback operation and is useful
+        when model training or row serialization fails partway through a run.
+
+        Returns
+        -------
+        None
+        """
+        self._connection.rollback()
+
+    def close(self) -> None:
+        """Close the underlying SQLite connection.
+
+        Closing releases database resources.  Pending changes are not
+        implicitly committed, so callers should call :meth:`commit` first when
+        they want to retain them.
+
+        Returns
+        -------
+        None
+        """
+        self._connection.close()
+
+    def get_recent_run(self) -> str | None:
+        """Return the ID of the most recently created run.
+
+        The implementation should query the run table, order rows by
+        ``created_at`` descending with a deterministic primary-key tiebreaker,
+        and read at most one row.
+
+        Returns
+        -------
+        str or None
+            The newest run ID, or ``None`` when the run table is empty.
+        """
+        cur = self._connection.cursor()
+
+        # Get one run where runs are ordered by created_at descending
+        cur.execute(
+            f'''
+            SELECT {RunTable.RUN_ID.name}
+            FROM {RunTable.TABLE_NAME}
+            ORDER BY {RunTable.CREATED_AT.name} DESC, {RunTable.RUN_ID.name} DESC
+            LIMIT 1
+            '''
+        )
+
+        row = cur.fetchone()
+
+        return None if row is None else str(row[RunTable.RUN_ID.name])
+
+    def get_runs(self) -> tuple[StoredRun, ...]:
+        """Return every persisted run with all serialized fields decoded.
+
+        Runs are ordered from newest to oldest. The run ID provides a stable
+        tiebreaker when multiple rows have the same creation timestamp.
+        """
+        cur = self._connection.cursor()
+        cur.execute(
+            f'''
+            SELECT
+                {RunTable.RUN_ID.name},
+                {RunTable.CREATED_AT.name},
+                {RunTable.N_ITER.name},
+                {RunTable.TEST_SIZE.name},
+                {RunTable.TEST_METRICS.name},
+                {RunTable.OPTIMIZER.name},
+                {RunTable.LEARNING_RATE.name},
+                {RunTable.LOSS.name},
+                {RunTable.EPOCHS.name},
+                {RunTable.BATCH_SIZE.name},
+                {RunTable.DEVICE.name},
+                {RunTable.INPUT_COLUMNS.name},
+                {RunTable.OUTPUT_COLUMNS.name},
+                {RunTable.BASE_ARCHITECTURE.name}
+            FROM {RunTable.TABLE_NAME}
+            ORDER BY {RunTable.CREATED_AT.name} DESC,
+                     {RunTable.RUN_ID.name} DESC
+            '''
+        )
+
+        return tuple(
+            StoredRun(
+                run_id=str(row[RunTable.RUN_ID.name]),
+                created_at=decode_datetime_string(
+                    row[RunTable.CREATED_AT.name]
+                ),
+                n_iter=int(row[RunTable.N_ITER.name]),
+                test_size=float(row[RunTable.TEST_SIZE.name]),
+                test_metrics=tuple(
+                    str(value)
+                    for value in decode_json_array(
+                        row[RunTable.TEST_METRICS.name]
+                    )
+                ),
+                optimizer=str(row[RunTable.OPTIMIZER.name]),
+                learning_rate=float(row[RunTable.LEARNING_RATE.name]),
+                loss=str(row[RunTable.LOSS.name]),
+                epochs=int(row[RunTable.EPOCHS.name]),
+                batch_size=int(row[RunTable.BATCH_SIZE.name]),
+                device=str(row[RunTable.DEVICE.name]),
+                input_columns=tuple(
+                    str(value)
+                    for value in decode_json_array(
+                        row[RunTable.INPUT_COLUMNS.name]
+                    )
+                ),
+                output_columns=tuple(
+                    str(value)
+                    for value in decode_json_array(
+                        row[RunTable.OUTPUT_COLUMNS.name]
+                    )
+                ),
+                base_architecture=tuple(
+                    int(value)
+                    for value in decode_json_array(
+                        row[RunTable.BASE_ARCHITECTURE.name]
+                    )
+                ),
+            )
+            for row in cur.fetchall()
+        )
+
+    def get_run(self, run_id: str) -> StoredRun | None:
+        """Return one fully decoded run, or ``None`` when it does not exist."""
+        return next(
+            (run for run in self.get_runs() if run.run_id == run_id),
+            None,
+        )
+
+    def get_run_groups(self, run_id: str) -> tuple[StoredResultGroup, ...]:
+        """Return the studies and groups belonging to a run in stable order."""
+        cur = self._connection.cursor()
+        cur.execute(
+            f'''
+            SELECT
+                s.{StudyTable.STUDY_ID.name},
+                s.{StudyTable.STUDY_NAME.name},
+                s.{StudyTable.EVALUATION_METHOD.name},
+                g.{GroupTable.GROUP_ID.name},
+                g.{GroupTable.GROUP_NAME.name}
+            FROM {StudyTable.TABLE_NAME} AS s
+            INNER JOIN {GroupTable.TABLE_NAME} AS g
+                ON g.{GroupTable.STUDY_ID.name} = s.{StudyTable.STUDY_ID.name}
+            WHERE s.{StudyTable.RUN_ID.name} = ?
+            ORDER BY s.{StudyTable.STUDY_ID.name},
+                     g.{GroupTable.GROUP_ID.name}
+            ''',
+            (run_id,),
+        )
+
+        return tuple(
+            StoredResultGroup(
+                study_id=int(row[StudyTable.STUDY_ID.name]),
+                study_name=str(row[StudyTable.STUDY_NAME.name]),
+                evaluation_method=str(
+                    row[StudyTable.EVALUATION_METHOD.name]
+                ),
+                group_id=int(row[GroupTable.GROUP_ID.name]),
+                group_name=str(row[GroupTable.GROUP_NAME.name]),
+            )
+            for row in cur.fetchall()
+        )
+
+    def get_studies(self, run_id: str) -> tuple[int, ...]:
+        """Return all study IDs belonging to a run.
+
+        The implementation should select study primary keys whose foreign key
+        equals ``run_id`` in a stable order.
+
+        Parameters
+        ----------
+        run_id:
+            ID of the parent run.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Study IDs for the run; an empty tuple when none exist.
+        """
+        cur = self._connection.cursor()
+
+        cur.execute(
+            f'''
+            SELECT {StudyTable.STUDY_ID.name}
+            FROM {StudyTable.TABLE_NAME}
+            WHERE {StudyTable.RUN_ID.name} = ?
+            ORDER BY {StudyTable.STUDY_ID.name}
+            ''',
+            (run_id,)
+        )
+        rows = cur.fetchall()
+
+        return tuple(
+            int(row[StudyTable.STUDY_ID.name])
+            for row in rows
+        )
+
+    def get_groups(self, study_id: int) -> tuple[int, ...]:
+        """Return all group IDs belonging to a study.
+
+        The implementation should select group primary keys whose foreign key
+        equals ``study_id`` in a stable order.
+
+        Parameters
+        ----------
+        study_id:
+            ID of the parent study.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Group IDs for the study; an empty tuple when none exist.
+        """
+        cur = self._connection.cursor()
+        
+        cur.execute(
+            f'''
+            SELECT {GroupTable.GROUP_ID.name}
+            FROM {GroupTable.TABLE_NAME}
+            WHERE {GroupTable.STUDY_ID.name} = ?
+            ORDER BY {GroupTable.GROUP_ID.name}
+            ''',
+            (study_id,)
+        )
+        rows = cur.fetchall()
+        
+        return tuple(
+            int(row[GroupTable.GROUP_ID.name])
+            for row in rows
+        )
+
+    def get_models(self, group_id: int) -> tuple[int, ...]:
+        """Return all model IDs belonging to a group.
+
+        The implementation should select model primary keys whose foreign key
+        equals ``group_id`` in a stable order.  Averaging evaluation uses these
+        IDs to calculate one bias/variance contribution per model.
+
+        Parameters
+        ----------
+        group_id:
+            ID of the parent variation group.
+
+        Returns
+        -------
+        tuple[str, ...]
+            Model IDs for the group; an empty tuple when none exist.
+        """
+        cur = self._connection.cursor()
+        
+        cur.execute(
+            f'''
+            SELECT {ModelTable.MODEL_ID.name}
+            FROM {ModelTable.TABLE_NAME}
+            WHERE {ModelTable.GROUP_ID.name} = ?
+            ORDER BY {ModelTable.MODEL_ID.name}
+            ''',
+            (group_id,)
+        )
+        rows = cur.fetchall()
+        
+        return tuple(
+            int(row[ModelTable.MODEL_ID.name])
+            for row in rows
+        )
+
+    def get_test_set_positions(
+        self,
+        group_id: int,
+    ) -> tuple[int, ...]:
+        cur = self._connection.cursor()
+        cur.execute(
+            f'''
+            SELECT DISTINCT tp.set_position
+            FROM {TestPointTable.TABLE_NAME} AS tp
+            JOIN {ModelTable.TABLE_NAME} AS m ON m.model_id = tp.model_id
+            WHERE m.group_id = ?
+            ORDER BY tp.set_position
+            ''',
+            (group_id,)
+        )
+        rows = cur.fetchall()
+
+        return tuple(
+            int(row['set_position'])
+            for row in rows
+        )
+
+    def get_actual_and_predictions(
+        self,
+        group_id: int,
+        test_set_pos: int,
+    ) -> tuple[
+        tuple[float, ...],
+        tuple[tuple[float, ...], ...],
+    ]:
+        """Load a shared actual and all predictions for one test position.
+
+        All models in a variation group are expected to use the same actual
+        output at a given test-set position. The first actual is therefore
+        returned once, while every model prediction is returned in model-ID
+        order.
+
+        Parameters
+        ----------
+        group_id : int
+            ID of the variation group whose model predictions are loaded.
+        test_set_pos : int
+            Shared test-set position to load across the group's models.
+
+        Returns
+        -------
+        tuple[tuple[float, ...], tuple[tuple[float, ...], ...]]
+            The shared actual-output row and ordered model prediction rows.
+
+        Raises
+        ------
+        ValueError
+            If the group has no predictions at the requested position.
+        """
+        cur = self._connection.cursor()
+
+        cur.execute(
+            f'''
+            SELECT tp.output, tp.prediction
+            FROM {ModelTable.TABLE_NAME} AS m
+            INNER JOIN {TestPointTable.TABLE_NAME} AS tp
+                ON m.model_id = tp.model_id
+            WHERE m.group_id = ?
+            AND tp.set_position = ?
+            ORDER BY m.model_id, tp.test_point_id
+            ''',
+            (group_id, test_set_pos)
+        )
+
+        rows = cur.fetchall()
+
+        if not rows:
+            raise ValueError(
+                'query returned empty rows.'
+            )
+
+        actual = decode_json_array(rows[0]['output'])
+        predictions = tuple(
+            decode_json_array(row['prediction']) for row in rows
+        )
+
+        return actual, predictions
+
+    def get_bias_variance_results(
+        self,
+        run_id: str,
+    ) -> tuple[BiasVarianceResult, ...]:
+        """Return the evaluated bias and variance rows for one run."""
+        cur = self._connection.cursor()
+        cur.execute(
+            f'''
+            SELECT
+                s.study_name,
+                g.group_name,
+                s.evaluation_method,
+                g.strategy_bias,
+                g.strategy_variance
+            FROM {RunTable.TABLE_NAME} AS r
+            INNER JOIN {StudyTable.TABLE_NAME} AS s
+                ON r.run_id = s.run_id
+            INNER JOIN {GroupTable.TABLE_NAME} AS g
+                ON s.study_id = g.study_id
+            WHERE r.run_id = ?
+            ORDER BY s.study_id, g.group_id
+            ''',
+            (run_id,),
+        )
+
+        return tuple(
+            (
+                str(row['study_name']),
+                str(row['group_name']),
+                str(row['evaluation_method']),
+                None if row['strategy_bias'] is None else tuple(
+                    float(value) for value in decode_json_array(row['strategy_bias'])
+                ),
+                None if row['strategy_variance'] is None else tuple(
+                    float(value) for value in decode_json_array(row['strategy_variance'])
+                ),
+            )
+            for row in cur.fetchall()
+        )
+
+    def get_method(self, group_id: int) -> str:
+        """Return the evaluation method that applies to a group.
+
+        The implementation should join the group row to its parent study and
+        select the study's ``evaluation_method`` value.
+
+        Parameters
+        ----------
+        group_id:
+            ID of the group whose evaluation strategy is required.
+
+        Returns
+        -------
+        str
+            Stored evaluation method, currently ``"averaging"`` or
+            ``"pointwise"``.
+        """
+        cur = self._connection.cursor()
+        
+        cur.execute(
+            f'''
+            SELECT studies.evaluation_method
+            FROM {GroupTable.TABLE_NAME}
+            JOIN {StudyTable.TABLE_NAME}
+                ON {StudyTable.TABLE_NAME}.study_id = {GroupTable.TABLE_NAME}.study_id
+            WHERE {GroupTable.TABLE_NAME}.group_id = ? LIMIT 1
+            ''',
+            (group_id,)
+        )
+        row = cur.fetchone()
+
+        if row is None:
+            raise KeyError(f'Unknown group_id: {group_id}')
+
+        return str(row['evaluation_method'])
+
+    def does_run_exist(self, run_id: str) -> bool:
+        cur = self._connection.cursor()
+
+        cur.execute(
+            f'SELECT run_id FROM {RunTable.TABLE_NAME} WHERE run_id = ? LIMIT 1',
+            (run_id,)
+        )
+
+        row = cur.fetchone()
+
+        return row is not None
+
+    def get_averaging_evaluation_data(
+        self,
+        group_id: int,
+    ) -> tuple[
+        tuple[
+            tuple[float, ...], ...
+        ],
+        tuple[
+            tuple[float, ...], ...
+        ]
+    ]:
+        """Load per-output MSE scores and variances for a variation group.
+
+        Results are ordered by model ID. Each outer tuple contains one inner
+        tuple per model, and each inner tuple contains one value per output.
+
+        Parameters
+        ----------
+        group_id : int
+            ID of the variation group whose model results are loaded.
+
+        Returns
+        -------
+        tuple[tuple[tuple[float, ...], ...], tuple[tuple[float, ...], ...]]
+            Per-model MSE score tuples followed by per-model prediction
+            variance tuples.
+        """
+        cur = self._connection.cursor()
+
+        cur.execute(
+            f'''
+            SELECT
+                {ScoreTable.TABLE_NAME}.{ScoreTable.SCORE.name},
+                {ModelTable.TABLE_NAME}.{ModelTable.MODEL_VARIANCE_PREDICTION.name}
+            FROM {ModelTable.TABLE_NAME}
+            INNER JOIN {ScoreTable.TABLE_NAME}
+            ON {ScoreTable.TABLE_NAME}.{ScoreTable.MODEL_ID.name} = {ModelTable.TABLE_NAME}.{ModelTable.MODEL_ID.name}
+            WHERE {ModelTable.TABLE_NAME}.{ModelTable.GROUP_ID.name} = ?
+            AND {ScoreTable.TABLE_NAME}.{ScoreTable.METRIC.name} = ?
+            ORDER BY {ModelTable.TABLE_NAME}.{ModelTable.MODEL_ID.name}, {ScoreTable.SCORE_ID.name}
+            ''',
+            (group_id, 'mse')
+        )
+
+        rows = cur.fetchall()
+
+        return (
+            tuple(
+                tuple(
+                    float(value)
+                    for value in decode_json_array(row[ScoreTable.SCORE.name])
+                )
+                for row in rows
+            ),
+            tuple(
+                tuple(
+                    float(value)
+                    for value in decode_json_array(
+                        row[ModelTable.MODEL_VARIANCE_PREDICTION.name]
+                    )
+                )
+                for row in rows
+            ),
+        )
+
+    def get_pointwise_evaluation_data(
+        self,
+        group_id: int,
+    ) -> tuple[StoredTestPointPrediction, ...]:
+        cur = self._connection.cursor()
+
+        cur.execute(
+            '''
+            SELECT
+                m.model_id,
+                tp.set_position,
+                tp.input,
+                tp.output,
+                tp.prediction
+            FROM models AS m
+            JOIN test_points AS tp ON tp.model_id = m.model_id
+            WHERE m.group_id = ?
+            ORDER BY tp.set_position, m.model_id;
+            ''',
+            (group_id,)
+        )
+
+        rows = cur.fetchall()
+        points: list[StoredTestPointPrediction] = []
+
+        for row in rows:
+            points.append(
+                StoredTestPointPrediction(
+                    model_id=int(row[ModelTable.MODEL_ID.name]),
+                    set_position=int(row[TestPointTable.SET_POSITION.name]),
+                    input=tuple(
+                        float(value)
+                        for value in decode_json_array(
+                            row[TestPointTable.INPUT.name]
+                        )
+                    ),
+                    output=tuple(
+                        float(value)
+                        for value in decode_json_array(
+                            row[TestPointTable.OUTPUT.name]
+                        )
+                    ),
+                    prediction=tuple(
+                        float(value)
+                        for value in decode_json_array(
+                            row[TestPointTable.PREDICTION.name]
+                        )
+                    ),
+                )
+            )
+
+        return tuple(points)
+
+    def get_model_results(self, group_id: int) -> tuple[ModelResult, ...]:
+        """Return per-model MSE and prediction summaries for a group."""
+        cur = self._connection.cursor()
+        cur.execute(
+            f'''
+            SELECT
+                m.{ModelTable.MODEL_ID.name},
+                s.{ScoreTable.SCORE.name},
+                m.{ModelTable.MODEL_VARIANCE_PREDICTION.name},
+                m.{ModelTable.MODEL_MEAN_PREDICTION.name}
+            FROM {ModelTable.TABLE_NAME} AS m
+            INNER JOIN {ScoreTable.TABLE_NAME} AS s
+                ON s.{ScoreTable.MODEL_ID.name} = m.{ModelTable.MODEL_ID.name}
+            WHERE m.{ModelTable.GROUP_ID.name} = ?
+                AND s.{ScoreTable.METRIC.name} = ?
+            ORDER BY m.{ModelTable.MODEL_ID.name}
+            ''',
+            (group_id, 'mse'),
+        )
+
+        return tuple(
+            ModelResult(
+                model_id=int(row[ModelTable.MODEL_ID.name]),
+                mse=tuple(
+                    float(value)
+                    for value in decode_json_array(row[ScoreTable.SCORE.name])
+                ),
+                variance=tuple(
+                    float(value)
+                    for value in decode_json_array(
+                        row[ModelTable.MODEL_VARIANCE_PREDICTION.name]
+                    )
+                ),
+                mean=tuple(
+                    float(value)
+                    for value in decode_json_array(
+                        row[ModelTable.MODEL_MEAN_PREDICTION.name]
+                    )
+                ),
+            )
+            for row in cur.fetchall()
+        )
+
+    def get_test_point_results(
+        self,
+        group_id: int,
+    ) -> tuple[TestPointResult, ...]:
+        """Return pointwise evaluation summaries for a group."""
+        cur = self._connection.cursor()
+        cur.execute(
+            f'''
+            SELECT
+                {EvaluationTable.TEST_SET_POSITION.name},
+                {EvaluationTable.Y_TRUE.name},
+                {EvaluationTable.BIAS.name},
+                {EvaluationTable.VARIANCE.name},
+                {EvaluationTable.POINT_MEAN_PREDICTION.name}
+            FROM {EvaluationTable.TABLE_NAME}
+            WHERE {EvaluationTable.GROUP_ID.name} = ?
+            ORDER BY {EvaluationTable.TEST_SET_POSITION.name},
+                     {EvaluationTable.EVALUATION_ID.name}
+            ''',
+            (group_id,),
+        )
+
+        return tuple(
+            TestPointResult(
+                test_point_position=int(
+                    row[EvaluationTable.TEST_SET_POSITION.name]
+                ),
+                actual=tuple(
+                    float(value)
+                    for value in decode_json_array(
+                        row[EvaluationTable.Y_TRUE.name]
+                    )
+                ),
+                squared_bias=tuple(
+                    float(value)
+                    for value in decode_json_array(
+                        row[EvaluationTable.BIAS.name]
+                    )
+                ),
+                variance=tuple(
+                    float(value)
+                    for value in decode_json_array(
+                        row[EvaluationTable.VARIANCE.name]
+                    )
+                ),
+                mean=tuple(
+                    float(value)
+                    for value in decode_json_array(
+                        row[EvaluationTable.POINT_MEAN_PREDICTION.name]
+                    )
+                ),
+            )
+            for row in cur.fetchall()
+        )

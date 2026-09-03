@@ -25,6 +25,7 @@ MANIFEST
 ### Virtual Environments ###
 # Common names for virtual envs
 .venv/
+.venv-notebook/
 venv/
 env/
 ENV/
@@ -42,6 +43,7 @@ bin/
 # If you want to ignore large generated figures/outputs
 # out/
 # figures/
+notebook_artifacts/
 
 ### Machine Learning / pyMAISE ###
 # Ignore large local datasets or model weights
