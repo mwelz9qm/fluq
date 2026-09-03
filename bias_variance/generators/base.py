@@ -18,7 +18,7 @@ class VariationGeneratorConfig(ABC):
 @dataclass(frozen=True, slots=True)
 class Variation[VaritionGeneratedT]:
     label: str
-    random_state: int | None
+    variation_seed: int
     generated: VaritionGeneratedT
 
     @staticmethod
@@ -34,21 +34,21 @@ class Variation[VaritionGeneratedT]:
             )
 
     @staticmethod
-    def _validate_random_state(random_state: int | None) -> None:
+    def _validate_variation_seed(variation_seed: int) -> None:
         if (
-            not isinstance(random_state, int)
-            or isinstance(random_state, bool)
-        ) and random_state is not None:
-            raise TypeError('random_state must be an integer or None.')
+            not isinstance(variation_seed, int)
+            or isinstance(variation_seed, bool)
+        ):
+            raise TypeError('variation_seed must be an integer.')
 
-        if random_state is not None and not (0 <= random_state < 2**32):
+        if not (0 <= variation_seed < 2**32):
             raise ValueError(
-                'random_state out of bounds.'
+                'variation_seed out of bounds.'
             )
 
     def __post_init__(self) -> None:
         self._validate_label(self.label)
-        self._validate_random_state(self.random_state)
+        self._validate_variation_seed(self.variation_seed)
 
 
 class VariationGenerator[VaritionGeneratedT](ABC):
