@@ -43,13 +43,9 @@ from bias_variance.persistence.records import (
 )
 from bias_variance.persistence.store import ResultStore, StoredRun
 from bias_variance.plotting import (
-    plot_bias_and_variance as plot_prediction_distribution,
-)
-from bias_variance.plotting import (
     plot_error_components,
-)
-from bias_variance.plotting import (
-    plot_summary as plot_summary_bars,
+    plot_prediction_distribution,
+    plot_summary_bars,
 )
 from common.utils import ProgressBar
 

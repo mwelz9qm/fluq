@@ -52,7 +52,7 @@ def _resolve_axes(
     return resolved_ax
 
 
-def plot_bias_and_variance(
+def plot_prediction_distribution(
     x_values: ArrayLike,
     y_values: ArrayLike,
     y_error_bar_values: ArrayLike,
@@ -203,7 +203,7 @@ def plot_error_components(
     return resolved_ax
 
 
-def plot_summary(
+def plot_summary_bars(
     labels: Sequence[object],
     primary_metric_values: ArrayLike,
     variance_values: ArrayLike,
