@@ -10,6 +10,7 @@ from bias_variance.generators.noise.config import NoiseGeneratorConfig
 from bias_variance.generators.noise.config_builder import (
     NoiseGeneratorConfigBuilder,
 )
+from bias_variance.seeding import derive_keyed_seed, resolve_seed
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,9 +63,16 @@ class NoiseGenerator(VariationGenerator[pd.DataFrame]):
         *,
         random_state: int | None = None,
     ) -> Iterable[NoiseVariation]:
-        rng = np.random.default_rng(random_state)
+        parent_seed = resolve_seed(random_state)
 
         for standard_deviation in self.settings.standard_deviations:
+            label = f'std_{standard_deviation:g}'
+            variation_seed = derive_keyed_seed(
+                parent_seed,
+                'noise',
+                label,
+            )
+            rng = np.random.default_rng(variation_seed)
             noisy_dataset = self.dataset
             scale_factor_matrix = rng.normal(
                 loc=1.0,
@@ -77,7 +85,7 @@ class NoiseGenerator(VariationGenerator[pd.DataFrame]):
             )
 
             yield NoiseVariation(
-                label=f'std_{standard_deviation:g}',
-                random_state=random_state,
+                label=label,
+                variation_seed=variation_seed,
                 generated=noisy_dataset,
             )
