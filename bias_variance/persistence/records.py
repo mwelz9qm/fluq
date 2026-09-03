@@ -45,6 +45,7 @@ class RunRecord(Record, table=RunTable):
     input_columns: tuple[str, ...]
     output_columns: tuple[str, ...]
     base_architecture: tuple[int, ...]
+    seed_entropy: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
