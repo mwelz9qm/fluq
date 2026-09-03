@@ -13,6 +13,7 @@ from bias_variance.generators.sampling.config import (
 from bias_variance.generators.sampling.config_builder import (
     SamplingGeneratorConfigBuilder,
 )
+from bias_variance.seeding import derive_keyed_seed, resolve_seed
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,13 +74,19 @@ class SamplingGenerator(VariationGenerator[pd.DataFrame]):
         *,
         random_state: int | None = None,
     ) -> Iterable[SamplingVariation]:
+        parent_seed = resolve_seed(random_state)
         for name, strategy in self.settings.sampling_strategies.items():
+            variation_seed = derive_keyed_seed(
+                parent_seed,
+                'sampling',
+                name.value,
+            )
             yield SamplingVariation(
                 label=name.value,
-                random_state=random_state,
+                variation_seed=variation_seed,
                 generated=strategy.function(
                     self.dataset,
-                    random_state=random_state,
+                    random_state=variation_seed,
                     **strategy.kwargs,
                 ),
             )
