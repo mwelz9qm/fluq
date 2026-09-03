@@ -26,9 +26,9 @@ from bias_variance.persistence.records import (
 )
 from bias_variance.persistence.store import ResultStore
 from bias_variance.plotting import (
-    plot_bias_and_variance,
     plot_error_components,
-    plot_summary,
+    plot_prediction_distribution,
+    plot_summary_bars,
 )
 
 
@@ -111,7 +111,7 @@ def _create_plot_database(path: Path) -> tuple[int, int]:
 
 
 def test_low_level_prediction_helper_accepts_array_like_and_actuals() -> None:
-    ax = plot_bias_and_variance(
+    ax = plot_prediction_distribution(
         [0, 1],
         pd.Series([1.5, 2.0]),
         np.array([0.2, 0.4]),
@@ -139,7 +139,7 @@ def test_low_level_prediction_helper_accepts_array_like_and_actuals() -> None:
 )
 def test_low_level_prediction_helper_rejects_invalid_values(args, message) -> None:
     with pytest.raises((TypeError, ValueError), match=message):
-        plot_bias_and_variance(*args)
+        plot_prediction_distribution(*args)
 
 
 def test_error_component_helper_plots_metrics_and_their_means() -> None:
@@ -159,7 +159,7 @@ def test_error_component_helper_plots_metrics_and_their_means() -> None:
 
 
 def test_summary_helper_plots_paired_aggregate_bars() -> None:
-    ax = plot_summary(
+    ax = plot_summary_bars(
         ('Model', 'Sampling'),
         (0.25, 0.5),
         (0.1, 0.2),

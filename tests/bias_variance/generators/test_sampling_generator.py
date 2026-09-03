@@ -20,23 +20,14 @@ def dataset() -> pd.DataFrame:
     )
 
 
-def _take_rows(
-    frame: pd.DataFrame,
-    *,
-    random_state: int | None = None,
-    n_rows: int = 1,
-) -> pd.DataFrame:
-    return frame.head(n_rows).copy()
-
-
 def _generate_by_label(
     dataset: pd.DataFrame,
-    strategies,
+    settings,
     *,
     random_state: int | None = 42,
 ) -> dict[str, SamplingVariation]:
     generator = SamplingGenerator(
-        SamplingGeneratorConfig(strategies)
+        settings
     )
     generator.base_dataset = dataset
 
@@ -47,26 +38,30 @@ def _generate_by_label(
 
 
 def test_generate_returns_labeled_reproducible_samples(dataset):
-    strategies = {
-        SamplingStrategyName.BOOTSTRAP: SamplingStrategy(
-            function=_take_rows,
-            kwargs={"n_rows": 20},
-        ),
-        SamplingStrategyName.STRATIFIED: SamplingStrategy(
-            function=_take_rows,
-            kwargs={"n_rows": 8},
-        ),
+    settings = {
+        SamplingStrategyName.BOOTSTRAP: {
+            "sample_fraction": 1.0,
+            "with_replacement": True,
+        },
+        SamplingStrategyName.STRATIFIED: {
+            "stratify_col_index": 0,
+            "sample_fraction": 0.4,
+        },
     }
 
-    first = _generate_by_label(dataset, strategies, random_state=42)
-    second = _generate_by_label(dataset, strategies, random_state=42)
+    first = _generate_by_label(dataset, settings, random_state=42)
+    second = _generate_by_label(dataset, settings, random_state=42)
 
     assert set(first) == {"bootstrap", "stratified"}
     assert len(first["bootstrap"].dataset) == 20
     assert len(first["stratified"].dataset) == 8
 
     assert isinstance(first["bootstrap"], SamplingVariation)
-    assert first["bootstrap"].random_state == 42
+    assert isinstance(first["bootstrap"].variation_seed, int)
+    assert (
+        first["bootstrap"].variation_seed
+        != first["stratified"].variation_seed
+    )
     pd.testing.assert_frame_equal(
         first["bootstrap"].dataset,
         second["bootstrap"].dataset,
@@ -98,30 +93,15 @@ def test_dataset_property_returns_copy(dataset):
 
 
 def test_each_strategy_receives_an_independent_dataset_copy(dataset):
-    def mutate(
-        frame: pd.DataFrame,
-        *,
-        random_state: int | None = None,
-    ) -> pd.DataFrame:
-        frame.loc[:, "feature"] = -1
-        return frame
-
-    def observe(
-        frame: pd.DataFrame,
-        *,
-        random_state: int | None = None,
-    ) -> pd.DataFrame:
-        return frame
-
-    strategies = {
-        SamplingStrategyName.BOOTSTRAP: SamplingStrategy(function=mutate),
-        SamplingStrategyName.STRATIFIED: SamplingStrategy(function=observe),
+    settings = {
+        SamplingStrategyName.BOOTSTRAP: {},
+        SamplingStrategyName.STRATIFIED: {},
     }
 
-    generated = _generate_by_label(dataset, strategies, random_state=42)
+    generated = _generate_by_label(dataset, settings, random_state=42)
 
-    assert (generated["bootstrap"].dataset["feature"] == -1).all()
-    pd.testing.assert_frame_equal(generated["stratified"].dataset, dataset)
+    generated["bootstrap"].dataset.loc[:, "feature"] = -1
+    assert not (generated["stratified"].dataset["feature"] == -1).all()
     pd.testing.assert_frame_equal(dataset, pd.DataFrame(
         {
             "feature": range(20),
@@ -131,31 +111,29 @@ def test_each_strategy_receives_an_independent_dataset_copy(dataset):
 
 
 def test_strategy_kwargs_are_passed_to_function(dataset):
-    strategies = {
-        SamplingStrategyName.BOOTSTRAP: SamplingStrategy(
-            function=_take_rows,
-            kwargs={"n_rows": 4},
-        ),
+    settings = {
+        SamplingStrategyName.BOOTSTRAP: {
+            "sample_fraction": 0.2,
+            "with_replacement": False,
+        },
     }
 
-    generated = _generate_by_label(dataset, strategies, random_state=42)
+    generated = _generate_by_label(dataset, settings, random_state=42)
 
-    pd.testing.assert_frame_equal(
-        generated["bootstrap"].dataset,
-        dataset.head(4),
-    )
+    assert len(generated["bootstrap"].dataset) == 4
 
 
 def test_generate_without_base_dataset_raises_value_error():
-    strategies = {
-        SamplingStrategyName.BOOTSTRAP: SamplingStrategy(
-            function=_take_rows,
-            kwargs={"n_rows": 4},
-        ),
-    }
-    generator = SamplingGenerator(
-        SamplingGeneratorConfig(strategies)
-    )
+    generator = SamplingGenerator({'bootstrap': {}})
 
     with pytest.raises(ValueError, match="Base dataset is not set"):
         tuple(generator.generate(random_state=42))
+
+
+def test_strategy_name_rejects_a_mismatched_function():
+    with pytest.raises(ValueError, match='must use get_random_samples'):
+        SamplingGeneratorConfig({
+            SamplingStrategyName.BOOTSTRAP: SamplingStrategy(
+                function=SamplingStrategyName.LHS.function,
+            ),
+        })

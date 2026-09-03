@@ -23,6 +23,7 @@ from bias_variance.generators.sampling import (
 from bias_variance.models.evaluation import EvaluationMethod, MetricName
 from bias_variance.models.training import TrainingConfig
 from bias_variance.models.tuner import TunerConfig
+from bias_variance.seeding import seed_from_sequence
 
 
 def test_workflows_share_file_database_and_return_multioutput_results(
@@ -109,12 +110,14 @@ def test_workflows_share_file_database_and_return_multioutput_results(
         'input_columns',
         'output_columns',
         'base_architecture',
+        'seed_entropy',
     )
     assert run_history.loc[0, 'n_iter'] == 2
     assert run_history.loc[0, 'test_size'] == 0.5
     assert run_history.loc[0, 'test_metrics'] == ('mse',)
     assert run_history.loc[0, 'input_columns'] == ('x',)
     assert run_history.loc[0, 'output_columns'] == ('y', 'z')
+    assert run_history.loc[0, 'seed_entropy'] == 7
     assert set(plot_data['output_name']) == {'y', 'z'}
     assert set(plot_data['result_type']) == {'test_point'}
     assert len(plot_data) == 4
@@ -139,10 +142,13 @@ def test_get_run_history_returns_typed_empty_frame(tmp_path: Path) -> None:
         'input_columns',
         'output_columns',
         'base_architecture',
+        'seed_entropy',
     )
 
 
-def test_run_studies_accepts_mapped_run_settings(tmp_path: Path) -> None:
+def test_run_studies_accepts_every_run_setting_as_dictionary_data(
+    tmp_path: Path,
+) -> None:
     inputs = pd.DataFrame({'x': [0.0, 1.0, 2.0, 3.0]})
     outputs = pd.DataFrame({'y': [0.0, 2.0, 4.0, 6.0]})
     analyzer = BiasAnalyzer(tmp_path / 'raw-results.sqlite3')
@@ -157,15 +163,22 @@ def test_run_studies_accepts_mapped_run_settings(tmp_path: Path) -> None:
             {
                 'variation_generator_configs': {
                     StudyBias.MODEL.value: {
-                        'range_architectures': {
-                            ArchitectureName.WIDE: FnnRandomArchitectureConfig(
-                                layer_range=(1, 2),
-                                size_range=(2, 3),
-                            ),
+                        'wide': {
+                            'layer_range': (1, 2),
+                            'size_range': (2, 3),
                         },
-                        'taper_architectures': {},
+                    },
+                    StudyBias.SAMPLING.value: {
+                        'bootstrap': {
+                            'sample_fraction': 1.0,
+                            'with_replacement': True,
+                        },
+                    },
+                    StudyBias.DATA.value: {
+                        'standard_deviations': (0.1,),
                     },
                 },
+                'base_architecture': (2,),
                 'n_iter': 1,
                 'test_size': 0.5,
                 'test_metrics': ['mse'],
@@ -173,6 +186,13 @@ def test_run_studies_accepts_mapped_run_settings(tmp_path: Path) -> None:
                 'random_state': 7,
             },
         )
+
+    with sqlite3.connect(analyzer.db_path) as connection:
+        groups = connection.execute(
+            'SELECT group_name FROM groups ORDER BY group_name'
+        ).fetchall()
+
+    assert groups == [('bootstrap',), ('std_0.1',), ('wide',)]
 
 def test_run_studies_rejects_training_and_tuner_config(
     tmp_path: Path,
@@ -231,7 +251,7 @@ def test_generators_construct_their_own_default_configs() -> None:
     )
     assert isinstance(NoiseGenerator().settings, NoiseGeneratorConfig)
     assert isinstance(SamplingGenerator().settings, SamplingGeneratorConfig)
-    assert FnnArchitectureGeneratorConfig().variation_labels == (
+    assert FnnArchitectureGenerator().settings.variation_labels == (
         'wide',
         'narrow',
         'taper',
@@ -250,3 +270,33 @@ def test_noise_generator_changes_values_without_mutating_base_data() -> None:
 
     assert not generated.equals(original)
     pd.testing.assert_frame_equal(dataset, original)
+
+
+def test_each_evaluation_method_receives_an_independent_seed_sequence(
+    tmp_path: Path,
+) -> None:
+    inputs = pd.DataFrame({'x': [0.0, 1.0, 2.0, 3.0]})
+    outputs = pd.DataFrame({'y': [0.0, 2.0, 4.0, 6.0]})
+    analyzer = BiasAnalyzer(tmp_path / 'method-seeds.sqlite3')
+
+    with patch.object(BiasAnalyzer, '_run_study', autospec=True) as run_study:
+        analyzer.run_studies(
+            inputs,
+            outputs,
+            {
+                'variation_generator_configs': {
+                    'data': {'standard_deviations': (0.1,)},
+                },
+                'evaluation_methods': ('averaging', 'pointwise'),
+                'n_iter': 1,
+                'random_state': 7,
+            },
+            training_config=TrainingConfig(epochs=0, device='cpu'),
+        )
+
+    assert run_study.call_count == 2
+    method_seeds = [
+        seed_from_sequence(call.args[8])
+        for call in run_study.call_args_list
+    ]
+    assert method_seeds[0] != method_seeds[1]

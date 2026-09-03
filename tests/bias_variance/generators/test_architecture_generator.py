@@ -228,14 +228,11 @@ def test_reverse_taper_is_non_increasing_and_never_zero():
 
 
 def test_empty_settings_generate_no_architectures():
-    generator = FnnArchitectureGenerator(
+    with pytest.raises(ValueError, match='cannot both be None or empty'):
         FnnArchitectureGeneratorConfig(
             range_architectures={},
             taper_architectures={},
         )
-    )
-
-    assert _generate_by_label(generator, random_state=42) == {}
 
 
 def test_unsupported_architecture_is_rejected():
@@ -244,6 +241,11 @@ def test_unsupported_architecture_is_rejected():
         match="range_architectures keys must be ArchitectureName members",
     ):
         FnnArchitectureGeneratorConfig(
-            range_architectures={"unknown": FnnRandomArchitectureConfig()},
+            range_architectures={
+                "unknown": FnnRandomArchitectureConfig(
+                    layer_range=(1, 2),
+                    size_range=(2, 3),
+                )
+            },
             taper_architectures={},
         )

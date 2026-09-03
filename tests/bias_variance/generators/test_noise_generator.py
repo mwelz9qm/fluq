@@ -49,12 +49,13 @@ def test_generate_returns_labeled_noise_variations(dataset):
 
     assert isinstance(first, NoiseVariation)
     assert first.label == "std_0.1"
-    assert first.random_state == 42
+    assert isinstance(first.variation_seed, int)
     pd.testing.assert_frame_equal(first.dataset, first.generated)
 
     assert isinstance(second, NoiseVariation)
     assert second.label == "std_0.25"
-    assert second.random_state == 42
+    assert isinstance(second.variation_seed, int)
+    assert first.variation_seed != second.variation_seed
     pd.testing.assert_frame_equal(second.dataset, second.generated)
 
 def test_default_standard_deviations_generate_expected_labels(dataset):
@@ -101,13 +102,13 @@ def test_different_seeds_generate_different_noise(dataset):
     assert not first.equals(second)
 
 def test_generate_applies_expected_multiplicative_noise(dataset):
-    generated = _generate_by_label(
+    variation = _generate_by_label(
         dataset,
         (0.1,),
         random_state=42,
-    )["std_0.1"].dataset
+    )["std_0.1"]
 
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(variation.variation_seed)
     scale_factors = rng.normal(
         loc=1.0,
         scale=0.1,
@@ -115,34 +116,26 @@ def test_generate_applies_expected_multiplicative_noise(dataset):
     )
     expected = dataset.mul(scale_factors, axis="columns")
 
-    pd.testing.assert_frame_equal(generated, expected)
+    pd.testing.assert_frame_equal(variation.dataset, expected)
 
-def test_each_standard_deviation_uses_next_rng_values(dataset):
-    generated = _generate_by_label(
+def test_each_standard_deviation_uses_a_label_keyed_seed(dataset):
+    forward = _generate_by_label(
         dataset,
         (0.1, 0.2),
         random_state=42,
     )
-
-    rng = np.random.default_rng(42)
-
-    expected_01 = dataset.mul(
-        rng.normal(1.0, 0.1, size=dataset.shape),
-        axis="columns",
-    )
-    expected_02 = dataset.mul(
-        rng.normal(1.0, 0.2, size=dataset.shape),
-        axis="columns",
+    reverse = _generate_by_label(
+        dataset,
+        (0.2, 0.1),
+        random_state=42,
     )
 
-    pd.testing.assert_frame_equal(
-        generated["std_0.1"].dataset,
-        expected_01,
-    )
-    pd.testing.assert_frame_equal(
-        generated["std_0.2"].dataset,
-        expected_02,
-    )
+    for label in forward:
+        assert forward[label].variation_seed == reverse[label].variation_seed
+        pd.testing.assert_frame_equal(
+            forward[label].dataset,
+            reverse[label].dataset,
+        )
 
 def test_generate_preserves_dataframe_metadata(dataset):
     generated = _generate_by_label(
@@ -251,3 +244,15 @@ def test_non_finite_standard_deviations_are_rejected(value):
         match="must be finite",
     ):
         NoiseGeneratorConfig((value,))
+
+
+@pytest.mark.parametrize('value', ((1.0,), (1.1,), (0.1, 1.0)))
+def test_standard_deviations_must_be_less_than_one(value):
+    with pytest.raises(ValueError, match='less than one'):
+        NoiseGeneratorConfig(value)
+
+
+@pytest.mark.parametrize('value', ([0.1], ('0.1',), (True,)))
+def test_standard_deviations_require_a_tuple_of_real_numbers(value):
+    with pytest.raises(TypeError):
+        NoiseGeneratorConfig(value)

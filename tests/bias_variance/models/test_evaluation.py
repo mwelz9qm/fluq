@@ -134,3 +134,17 @@ def test_get_model_scores_returns_raw_values_per_output() -> None:
     )
 
     assert scores == {'mse': (1.0, 4.0)}
+
+
+def test_get_model_scores_wraps_single_raw_output_in_a_tuple() -> None:
+    predictions = np.array([[2.0], [4.0]])
+    y_test = pd.DataFrame({'y': [1.0, 3.0]})
+
+    scores = get_model_scores(
+        predictions=predictions,
+        y_test=y_test,
+        metrics=frozenset({MetricName.MSE}),
+        is_uniform=False,
+    )
+
+    assert scores == {'mse': (1.0,)}

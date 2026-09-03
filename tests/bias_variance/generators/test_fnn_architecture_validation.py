@@ -9,10 +9,30 @@ from bias_variance.generators.fnn_architecture import (
     FnnArchitectureGenerator,
     FnnArchitectureGeneratorConfig,
     FnnArchitectureVariation,
-    FnnRandomArchitectureConfig,
-    FnnTaperArchitectureConfig,
+    FnnRandomArchitectureConfig as RandomArchitectureConfig,
+    FnnTaperArchitectureConfig as TaperArchitectureConfig,
 )
 from bias_variance.models.fnn import FnnArchitecture
+
+
+def FnnRandomArchitectureConfig(**overrides):
+    settings = {
+        'layer_range': (1, 4),
+        'size_range': (64, 256),
+    }
+    settings.update(overrides)
+    return RandomArchitectureConfig(**settings)
+
+
+def FnnTaperArchitectureConfig(**overrides):
+    settings = {
+        'layer_range': (1, 16),
+        'start_size_range': (1, 9),
+        'taper_rate_range': (0.25, 0.5),
+        'max_size': 256,
+    }
+    settings.update(overrides)
+    return TaperArchitectureConfig(**settings)
 
 
 @pytest.mark.parametrize('name', ('layer_range', 'size_range'))
@@ -80,6 +100,7 @@ def test_max_size_must_be_positive():
 def test_max_size_need_not_cover_layer_range_upper_bound():
     config = FnnTaperArchitectureConfig(
         layer_range=(1, 8),
+        start_size_range=(1, 7),
         max_size=7,
     )
 
@@ -143,9 +164,11 @@ def test_wide_and_narrow_size_ranges_must_be_disjoint_and_ordered():
         FnnArchitectureGeneratorConfig(
             range_architectures={
                 ArchitectureName.WIDE: FnnRandomArchitectureConfig(
+                    layer_range=(1, 4),
                     size_range=(63, 256),
                 ),
                 ArchitectureName.NARROW: FnnRandomArchitectureConfig(
+                    layer_range=(4, 16),
                     size_range=(2, 64),
                 ),
             }
@@ -156,13 +179,16 @@ def test_default_random_config_satisfies_cross_architecture_rules():
     config = FnnArchitectureGeneratorConfig(
         range_architectures={
             ArchitectureName.WIDE: FnnRandomArchitectureConfig(),
-            ArchitectureName.NARROW: FnnRandomArchitectureConfig(),
+            ArchitectureName.NARROW: FnnRandomArchitectureConfig(
+                layer_range=(4, 16),
+                size_range=(2, 64),
+            ),
         }
     )
 
     assert config.range_architectures[ArchitectureName.WIDE].layer_range == (
         1,
-        8,
+        4,
     )
     assert config.range_architectures[ArchitectureName.NARROW].size_range == (
         2,
@@ -286,22 +312,22 @@ def test_combined_taper_grows_and_then_shrinks():
     ('arguments', 'error', 'message'),
     [
         (
-            {'label': 1, 'random_state': None, 'generated': FnnArchitecture(())},
+            {'label': 1, 'variation_seed': 1, 'generated': FnnArchitecture(())},
             TypeError,
             'label must be a string',
         ),
         (
-            {'label': '', 'random_state': None, 'generated': FnnArchitecture(())},
+            {'label': '', 'variation_seed': 1, 'generated': FnnArchitecture(())},
             ValueError,
             'label cannot be empty string or whitespace',
         ),
         (
-            {'label': 'wide', 'random_state': True, 'generated': FnnArchitecture(())},
+            {'label': 'wide', 'variation_seed': True, 'generated': FnnArchitecture(())},
             TypeError,
-            'random_state must be an integer',
+            'variation_seed must be an integer',
         ),
         (
-            {'label': 'wide', 'random_state': None, 'generated': object()},
+            {'label': 'wide', 'variation_seed': 1, 'generated': object()},
             TypeError,
             'generated must be an FnnArchitecture',
         ),

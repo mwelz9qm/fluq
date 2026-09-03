@@ -3,7 +3,6 @@ NOTE: The Sampler accepts same-labelled tuples. This may cause undesirable resul
 for the BiasAnalyzer. Need to decide to keep duplicates or enforce unique labelling.
 '''
 
-from pathlib import Path
 import pandas as pd
 import pytest
 
@@ -17,12 +16,11 @@ from common.sampling._sampling import (
 
 @pytest.fixture
 def sample_df() -> pd.DataFrame:
-    benchmarks = Path(__file__).resolve().parents[1] / 'benchmarks'
-    df = pd.concat([
-        pd.read_csv(benchmarks / 'chf_train_synth.csv'),
-        pd.read_csv(benchmarks / 'chf_test_synth.csv')
-    ])
-    return df
+    return pd.DataFrame({
+        'feature_a': range(120),
+        'feature_b': range(120, 240),
+        'target': range(240, 360),
+    })
 
 def test_constructor():
     strategies = [

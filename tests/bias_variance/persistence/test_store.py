@@ -1,5 +1,7 @@
 from collections.abc import Iterator
 from datetime import UTC, datetime
+import sqlite3
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -22,6 +24,7 @@ def _add_run(
     store: ResultStore,
     run_id: str = 'run-1',
     created_at: datetime | None = None,
+    seed_entropy: int | None = None,
 ) -> str:
     result = store.add(
         RunRecord(
@@ -39,6 +42,7 @@ def _add_run(
             input_columns=('x',),
             output_columns=('y',),
             base_architecture=(8,),
+            seed_entropy=seed_entropy,
         )
     )
     assert isinstance(result, str)
@@ -84,6 +88,42 @@ def test_get_runs_returns_all_decoded_fields_newest_first(
         output_columns=('y',),
         base_architecture=(8,),
     )
+
+
+def test_seed_entropy_round_trips(store: ResultStore) -> None:
+    _add_run(store, seed_entropy=1234)
+
+    assert store.get_runs()[0].seed_entropy == 1234
+
+
+def test_create_tables_migrates_a_run_table_without_seed_entropy(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / 'legacy.sqlite3'
+    with sqlite3.connect(database) as connection:
+        connection.execute('''
+            CREATE TABLE runs (
+                run_id TEXT PRIMARY KEY NOT NULL,
+                created_at TEXT NOT NULL,
+                n_iter INTEGER NOT NULL,
+                test_size REAL NOT NULL,
+                test_metrics TEXT NOT NULL,
+                optimizer TEXT NOT NULL,
+                learning_rate REAL NOT NULL,
+                loss TEXT NOT NULL,
+                epochs INTEGER NOT NULL,
+                batch_size INTEGER NOT NULL,
+                device TEXT NOT NULL,
+                input_columns TEXT NOT NULL,
+                output_columns TEXT NOT NULL,
+                base_architecture TEXT NOT NULL
+            ) STRICT
+        ''')
+
+    with ResultStore(database) as migrated_store:
+        migrated_store.create_tables()
+        _add_run(migrated_store, seed_entropy=42)
+        assert migrated_store.get_runs()[0].seed_entropy == 42
 
 
 def test_add_and_query_complete_record_hierarchy(store: ResultStore) -> None:
