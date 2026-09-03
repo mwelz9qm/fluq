@@ -122,6 +122,16 @@ class FnnArchitectureGeneratorConfig(VariationGeneratorConfig):
     ] | None = None
 
     def __post_init__(self) -> None:
+        for name, architectures in (
+            ('range_architectures', self.range_architectures),
+            ('taper_architectures', self.taper_architectures),
+        ):
+            if architectures is not None and not isinstance(
+                architectures,
+                Mapping,
+            ):
+                raise TypeError(f'{name} must be a mapping.')
+
         if not self.range_architectures and not self.taper_architectures:
             raise ValueError(
                 'range_architectures and taper_architectures cannot both be '
