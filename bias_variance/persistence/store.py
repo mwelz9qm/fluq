@@ -47,6 +47,7 @@ class StoredRun:
     input_columns: tuple[str, ...]
     output_columns: tuple[str, ...]
     base_architecture: tuple[int, ...]
+    seed_entropy: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +124,18 @@ class ResultStore:
             TestPointTable,
         ):
             cur.execute(table.create_table_sql())
+
+        run_columns = {
+            str(row['name'])
+            for row in cur.execute(
+                f'PRAGMA table_info({RunTable.TABLE_NAME})'
+            ).fetchall()
+        }
+        if RunTable.SEED_ENTROPY.name not in run_columns:
+            cur.execute(
+                f'ALTER TABLE {RunTable.TABLE_NAME} '
+                f'ADD COLUMN {RunTable.SEED_ENTROPY.to_sql()}'
+            )
 
     def add(self, record: Record) -> int | str:
         insert_statement, params = record.table.insert_sql(asdict(record))
@@ -213,7 +226,8 @@ class ResultStore:
                 {RunTable.DEVICE.name},
                 {RunTable.INPUT_COLUMNS.name},
                 {RunTable.OUTPUT_COLUMNS.name},
-                {RunTable.BASE_ARCHITECTURE.name}
+                {RunTable.BASE_ARCHITECTURE.name},
+                {RunTable.SEED_ENTROPY.name}
             FROM {RunTable.TABLE_NAME}
             ORDER BY {RunTable.CREATED_AT.name} DESC,
                      {RunTable.RUN_ID.name} DESC
@@ -257,6 +271,11 @@ class ResultStore:
                     for value in decode_json_array(
                         row[RunTable.BASE_ARCHITECTURE.name]
                     )
+                ),
+                seed_entropy=(
+                    None
+                    if row[RunTable.SEED_ENTROPY.name] is None
+                    else int(row[RunTable.SEED_ENTROPY.name])
                 ),
             )
             for row in cur.fetchall()
