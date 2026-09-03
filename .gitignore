@@ -44,6 +44,7 @@ bin/
 # out/
 # figures/
 notebook_artifacts/
+plot_artifacts/
 
 ### Machine Learning / pyMAISE ###
 # Ignore large local datasets or model weights
